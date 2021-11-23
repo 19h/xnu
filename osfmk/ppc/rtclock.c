@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -43,7 +46,6 @@
 #include <machine/mach_param.h>	/* HZ */
 #include <machine/commpage.h>
 #include <machine/machine_routines.h>
-#include <ppc/exception.h>
 #include <ppc/proc_reg.h>
 
 #include <pexpert/pexpert.h>
@@ -53,8 +55,6 @@
 int		sysclk_config(void);
 
 int		sysclk_init(void);
-
-void treqs(uint32_t dec);
 
 kern_return_t	sysclk_gettime(
 	mach_timespec_t			*cur_time);
@@ -243,7 +243,7 @@ sysclk_init(void)
 		rtclock_tick_deadline[mycpu] = abstime;
 		rtclock_tick_deadline[mycpu] += rtclock_tick_interval;
 		decr = deadline_to_decrementer(rtclock_tick_deadline[mycpu], abstime);
-		treqs(decr);
+		mtdec(decr);
 
 		return(1);
 	}
@@ -253,7 +253,7 @@ sysclk_init(void)
 	rtclock_tick_deadline[mycpu] = abstime;
 	rtclock_tick_deadline[mycpu] += rtclock_tick_interval;
 	decr = deadline_to_decrementer(rtclock_tick_deadline[mycpu], abstime);
-	treqs(decr);
+	mtdec(decr);
 
 	rtclock_initialized = TRUE;
 
@@ -456,28 +456,24 @@ clock_get_calendar_microtime(
 	else {
 		uint32_t	delta, t32;
 
-		delta = -rtclock_calend.adjdelta;
+		delta = -rtclock_calend.adjdelta;		
 
-		now = mach_absolute_time();
+		t64 = mach_absolute_time() - rtclock_calend.epoch1;
 
 		*secs = rtclock_calend.epoch;
 		*microsecs = rtclock_calend.microepoch;
 
-		if (now > rtclock_calend.epoch1) {
-			t64 = now - rtclock_calend.epoch1;
-
-			t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
-
-			if (t32 > delta)
-				*microsecs += (t32 - delta);
-
-			if (*microsecs >= USEC_PER_SEC) {
-				*microsecs -= USEC_PER_SEC;
-				*secs += 1;
-			}
-		}
-
 		simple_unlock(&rtclock_lock);
+
+		t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
+
+		if (t32 > delta)
+			*microsecs += (t32 - delta);
+
+		if (*microsecs >= USEC_PER_SEC) {
+			*microsecs -= USEC_PER_SEC;
+			*secs += 1;
+		}
 	}
 
 	splx(s);
@@ -527,27 +523,22 @@ clock_gettimeofday(
 	else {
 		uint32_t	delta, t32;
 
-		delta = -rtclock_calend.adjdelta;
+		delta = -rtclock_calend.adjdelta;		
 
-		now = mach_absolute_time();
+		now = mach_absolute_time() - rtclock_calend.epoch1;
 
 		secs = rtclock_calend.epoch;
 		microsecs = rtclock_calend.microepoch;
 
-		if (now > rtclock_calend.epoch1) {
-			t64 = now - rtclock_calend.epoch1;
+		t32 = (now * USEC_PER_SEC) / rtclock_sec_divisor;
 
-			t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
+		if (t32 > delta)
+			microsecs += (t32 - delta);
 
-			if (t32 > delta)
-				microsecs += (t32 - delta);
-
-			if (microsecs >= USEC_PER_SEC) {
-				microsecs -= USEC_PER_SEC;
-				secs += 1;
-			}
+		if (microsecs >= USEC_PER_SEC) {
+			microsecs -= USEC_PER_SEC;
+			secs += 1;
 		}
-
         /* no need to disable timestamp, it is already off */
 	}
 
@@ -595,26 +586,22 @@ clock_get_calendar_nanotime(
 
 		delta = -rtclock_calend.adjdelta;
 
-		now = mach_absolute_time();
+		t64 = mach_absolute_time() - rtclock_calend.epoch1;
 
 		*secs = rtclock_calend.epoch;
 		*nanosecs = rtclock_calend.microepoch * NSEC_PER_USEC;
 
-		if (now > rtclock_calend.epoch1) {
-			t64 = now - rtclock_calend.epoch1;
-
-			t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
-
-			if (t32 > delta)
-				*nanosecs += ((t32 - delta) * NSEC_PER_USEC);
-
-			if (*nanosecs >= NSEC_PER_SEC) {
-				*nanosecs -= NSEC_PER_SEC;
-				*secs += 1;
-			}
-		}
-
 		simple_unlock(&rtclock_lock);
+
+		t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
+
+		if (t32 > delta)
+			*nanosecs += ((t32 - delta) * NSEC_PER_USEC);
+
+		if (*nanosecs >= NSEC_PER_SEC) {
+			*nanosecs -= NSEC_PER_SEC;
+			*secs += 1;
+		}
 	}
 
 	splx(s);
@@ -685,11 +672,7 @@ clock_set_calendar_adjtime(
 
 		now = mach_absolute_time();
 
-		if (now > rtclock_calend.epoch1)
-			t64 = now - rtclock_calend.epoch1;
-		else
-			t64 = 0;
-
+		t64 = now - rtclock_calend.epoch1;
 		t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
 
 		if (t32 > delta)
@@ -804,10 +787,7 @@ clock_adjust_calendar(void)
 
 		now = mach_absolute_time();
 
-		if (now > rtclock_calend.epoch1)
-			t64 = now - rtclock_calend.epoch1;
-		else
-			t64 = 0;
+		t64 = now - rtclock_calend.epoch1;
 
 		rtclock_calend.epoch1 = now;
 
@@ -912,7 +892,7 @@ clock_set_timer_deadline(
 					rtclock_decrementer_min < (natural_t)decr		)
 				decr = rtclock_decrementer_min;
 
-			treqs(decr);
+			mtdec(decr);
 
 			KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1)
 										| DBG_FUNC_NONE, decr, 2, 0, 0, 0);
@@ -960,7 +940,7 @@ rtclock_intr(
 	 * We may receive interrupts too early, we must reject them.
 	 */
 	if (rtclock_initialized == FALSE) {
-		treqs(DECREMENTER_MAX);		/* Max the decrementer if not init */
+		mtdec(DECREMENTER_MAX);		/* Max the decrementer if not init */
 		return;
 	}
 
@@ -994,7 +974,7 @@ rtclock_intr(
 			rtclock_decrementer_min < (natural_t)decr1		)
 		decr1 = rtclock_decrementer_min;
 
-	treqs(decr1);
+	mtdec(decr1);
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1)
 						  | DBG_FUNC_NONE, decr1, 3, 0, 0, 0);
@@ -1140,25 +1120,4 @@ delay(
 	int		usec)
 {
 	delay_for_interval((usec < 0)? -usec: usec, NSEC_PER_USEC);
-}
-
-/*
- *	Request a decrementer pop
- *
- */
-
-void treqs(uint32_t dec) {
-
-
-	struct per_proc_info *pp;
-	uint64_t nowtime, newtime;
-	
-	nowtime = mach_absolute_time();						/* What time is it? */
-	pp = getPerProc();									/* Get our processor block */
-	newtime = nowtime + (uint64_t)dec;					/* Get requested pop time */
-	pp->rtcPop = newtime;								/* Copy it */
-	
-	mtdec((uint32_t)(newtime - nowtime));				/* Set decrementer */
-	return;
-
 }

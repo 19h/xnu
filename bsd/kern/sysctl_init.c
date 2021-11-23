@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -99,7 +102,6 @@ extern struct sysctl_oid sysctl__kern_ipc_somaxconn;
 extern struct sysctl_oid sysctl__kern_ipc_sosendminchain;
 extern struct sysctl_oid sysctl__kern_ipc_sorecvmincopy;
 extern struct sysctl_oid sysctl__kern_ipc_maxsockets;
-extern struct sysctl_oid sysctl__kern_sugid_scripts;
 extern struct sysctl_oid sysctl__net_inet_icmp_icmplim;
 extern struct sysctl_oid sysctl__net_inet_icmp_maskrepl;
 extern struct sysctl_oid sysctl__net_inet_icmp_timestamp;
@@ -125,7 +127,6 @@ extern struct sysctl_oid sysctl__net_inet_ip_sourceroute;
 extern struct sysctl_oid sysctl__net_inet_ip_subnets_are_local;
 extern struct sysctl_oid sysctl__net_inet_ip_keepfaith;
 extern struct sysctl_oid sysctl__net_inet_ip_maxfragpackets;
-extern struct sysctl_oid sysctl__net_inet_ip_maxfragsperpacket;
 extern struct sysctl_oid sysctl__net_inet_ip_check_interface;
 extern struct sysctl_oid sysctl__net_inet_ip_check_route_selfref;
 extern struct sysctl_oid sysctl__net_inet_ip_use_route_genid;
@@ -165,7 +166,6 @@ extern struct sysctl_oid sysctl__net_inet_tcp_keepidle;
 extern struct sysctl_oid sysctl__net_inet_tcp_keepinit;
 extern struct sysctl_oid sysctl__net_inet_tcp_keepintvl;
 extern struct sysctl_oid sysctl__net_inet_tcp_mssdflt;
-extern struct sysctl_oid sysctl__net_inet_tcp_minmss;
 extern struct sysctl_oid sysctl__net_inet_tcp_recvspace;
 extern struct sysctl_oid sysctl__net_inet_tcp_sendspace;
 extern struct sysctl_oid sysctl__net_inet_tcp_slowlink_wsize;
@@ -189,11 +189,6 @@ extern struct sysctl_oid sysctl__net_inet_tcp_drop_synfin;
 extern struct sysctl_oid sysctl__net_inet_tcp_tcpconsdebug;
 #endif
 extern struct sysctl_oid sysctl__net_inet_tcp_sockthreshold;
-extern struct sysctl_oid sysctl__net_inet_tcp_reass_maxsegments;
-extern struct sysctl_oid sysctl__net_inet_tcp_reass_cursegments;
-extern struct sysctl_oid sysctl__net_inet_tcp_reass_overflows;
-extern struct sysctl_oid sysctl__net_inet_tcp_reass;
-
 extern struct sysctl_oid sysctl__net_inet_udp_log_in_vain;
 extern struct sysctl_oid sysctl__net_inet_udp_checksum;
 extern struct sysctl_oid sysctl__net_inet_udp_maxdgram;
@@ -463,7 +458,6 @@ struct sysctl_oid *newsysctl_list[] =
     ,&sysctl__kern_ipc_sosendminchain
     ,&sysctl__kern_ipc_sorecvmincopy
     ,&sysctl__kern_ipc_maxsockets
-    ,&sysctl__kern_sugid_scripts
 
     ,&sysctl__hw_machine
     ,&sysctl__hw_model
@@ -528,7 +522,6 @@ struct sysctl_oid *newsysctl_list[] =
     ,&sysctl__net_inet_ip_subnets_are_local
     ,&sysctl__net_inet_ip_keepfaith
     ,&sysctl__net_inet_ip_maxfragpackets
-    ,&sysctl__net_inet_ip_maxfragsperpacket
     ,&sysctl__net_inet_ip_check_interface
     ,&sysctl__net_inet_ip_check_route_selfref
     ,&sysctl__net_inet_ip_use_route_genid
@@ -565,7 +558,6 @@ struct sysctl_oid *newsysctl_list[] =
     ,&sysctl__net_inet_tcp_keepinit
     ,&sysctl__net_inet_tcp_keepintvl
     ,&sysctl__net_inet_tcp_mssdflt
-    ,&sysctl__net_inet_tcp_minmss
     ,&sysctl__net_inet_tcp_recvspace
     ,&sysctl__net_inet_tcp_sendspace
     ,&sysctl__net_inet_tcp_slowlink_wsize
@@ -589,11 +581,6 @@ struct sysctl_oid *newsysctl_list[] =
     ,&sysctl__net_inet_tcp_tcpconsdebug
 #endif
     ,&sysctl__net_inet_tcp_sockthreshold
-    ,&sysctl__net_inet_tcp_reass_maxsegments
-    ,&sysctl__net_inet_tcp_reass_cursegments
-    ,&sysctl__net_inet_tcp_reass_overflows
-    ,&sysctl__net_inet_tcp_reass
-
     ,&sysctl__net_inet_udp_log_in_vain 
     ,&sysctl__net_inet_udp_checksum
     ,&sysctl__net_inet_udp_maxdgram

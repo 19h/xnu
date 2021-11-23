@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -228,15 +231,14 @@ parse_machfile(
 )
 {
 	struct machine_slot	*ms;
-	uint32_t		ncmds;
+	int			ncmds;
 	struct load_command	*lcp, *next;
 	struct dylinker_command	*dlp = 0;
 	void *			pager;
 	load_return_t		ret = LOAD_SUCCESS;
 	vm_offset_t		addr, kl_addr;
 	vm_size_t		size,kl_size;
-	size_t			offset;
-	size_t			oldoffset;	/* for overflow check */
+	int			offset;
 	int			pass;
 	struct proc *p = current_proc();		/* XXXX */
 	int			error;
@@ -327,12 +329,6 @@ parse_machfile(
 	 *	Scan through the commands, processing each one as necessary.
 	 */
 	for (pass = 1; pass <= 2; pass++) {
-		/*
-		 * Loop through each of the load_commands indicated by the
-		 * Mach-O header; if an absurd value is provided, we just
-		 * run off the end of the reserved section by incrementing
-		 * the offset too far, so we are implicitly fail-safe.
-		 */
 		offset = sizeof(struct mach_header);
 		ncmds = header->ncmds;
 		while (ncmds--) {
@@ -340,27 +336,21 @@ parse_machfile(
 			 *	Get a pointer to the command.
 			 */
 			lcp = (struct load_command *)(addr + offset);
-			oldoffset = offset;
 			offset += lcp->cmdsize;
 
 			/*
-			 * Perform prevalidation of the struct load_command
-			 * before we attempt to use its contents.  Invalid
-			 * values are ones which result in an overflow, or
-			 * which can not possibly be valid commands, or which
-			 * straddle or exist past the reserved section at the
-			 * start of the image.
+			 *	Check for valid lcp pointer by checking
+			 *	next offset.
 			 */
-			if (oldoffset > offset ||
-			    lcp->cmdsize < sizeof(struct load_command) ||
-			    offset > header->sizeofcmds + sizeof(struct mach_header)) {
-			    	ret = LOAD_BADMACHO;
-				break;
+			if (offset > header->sizeofcmds
+					+ sizeof(struct mach_header)) {
+				if (kl_addr )
+					kfree(kl_addr, kl_size);
+				return(LOAD_BADMACHO);
 			}
 
 			/*
-			 * Act on struct load_command's for which kernel
-			 * intervention is required.
+			 *	Check for valid command.
 			 */
 			switch(lcp->cmd) {
 			case LC_SEGMENT:
@@ -396,8 +386,7 @@ parse_machfile(
 					ret = LOAD_FAILURE;
 				break;
 			default:
-				/* Other commands are ignored by the kernel */
-				ret = LOAD_SUCCESS;
+				ret = LOAD_SUCCESS;/* ignore other stuff */
 			}
 			if (ret != LOAD_SUCCESS)
 				break;

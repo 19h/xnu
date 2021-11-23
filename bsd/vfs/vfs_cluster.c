@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -76,6 +79,7 @@
 
 #include <sys/kdebug.h>
 
+
 #define CL_READ      0x01
 #define CL_ASYNC     0x02
 #define CL_COMMIT    0x04
@@ -114,7 +118,7 @@ static int cluster_phys_write(struct vnode *vp, struct uio *uio,
 		off_t newEOF, int devblocksize, int flags);
 static int cluster_align_phys_io(struct vnode *vp, struct uio *uio,
                 addr64_t usr_paddr, int xsize, int devblocksize, int flags);
-static int cluster_push_x(struct vnode *vp, off_t EOF, unsigned int first, unsigned int last, int can_delay);
+static int cluster_push_x(struct vnode *vp, off_t EOF, daddr_t first, daddr_t last, int can_delay);
 static int cluster_try_push(struct vnode *vp, off_t EOF, int can_delay, int push_all);
 
 static int sparse_cluster_switch(struct vnode *vp, off_t EOF);
@@ -3544,8 +3548,8 @@ static int
 cluster_push_x(vp, EOF, first, last, can_delay)
         struct vnode *vp;
 	off_t  EOF;
-	unsigned int first;
-	unsigned int last;
+	daddr_t first;
+	daddr_t last;
 	int    can_delay;
 {
 	upl_page_info_t *pl;
@@ -3572,7 +3576,7 @@ cluster_push_x(vp, EOF, first, last, can_delay)
 	        return (1);
 	}
 	upl_size = pages_in_upl * PAGE_SIZE;
-	upl_f_offset = (off_t)((unsigned long long)first * PAGE_SIZE_64);
+	upl_f_offset = ((off_t)first) * PAGE_SIZE_64;
 
 	if (upl_f_offset + upl_size >= EOF) {
 
@@ -3718,8 +3722,8 @@ sparse_cluster_switch(struct vnode *vp, off_t EOF)
 static int
 sparse_cluster_push(struct vnode *vp, off_t EOF, int push_all)
 {
-        unsigned int first;
-	unsigned int last;
+        daddr_t first;
+	daddr_t last;
         off_t offset;
 	u_int length;
 
@@ -3734,8 +3738,8 @@ sparse_cluster_push(struct vnode *vp, off_t EOF, int push_all)
 		        vp->v_clen = 0;
 			break;
 		}
-		first = (unsigned int)(offset / PAGE_SIZE_64);
-		last  = (unsigned int)((offset + length) / PAGE_SIZE_64);
+		first = (daddr_t)(offset / PAGE_SIZE_64);
+		last  = (daddr_t)((offset + length) / PAGE_SIZE_64);
 
 		cluster_push_x(vp, EOF, first, last, 0);
 

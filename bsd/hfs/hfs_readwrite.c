@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -2219,7 +2222,7 @@ hfs_relocate(vp, blockHint, cred, p)
 	int eflags;
 	u_int32_t  oldstart;  /* debug only */
 	off_t  newbytes;
-	int  retval, need_vinval=0;
+	int  retval;
 
 	if (vp->v_type != VREG && vp->v_type != VLNK) {
 		return (EPERM);
@@ -2323,23 +2326,12 @@ hfs_relocate(vp, blockHint, cred, p)
 	 * STEP 2 - clone data into the new allocation blocks.
 	 */
 
-	// XXXdbg - unlock the extents overflow file because hfs_clonefile()
-	//          calls vinvalbuf() which calls hfs_fsync() which can
-	//          call hfs_metasync() which may need to lock the catalog
-	//          file -- but the catalog file may be locked and blocked
-	//          waiting for the extents overflow file if we're unlucky.
-	//          see radar 3742973 for more details.
-	(void) hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_RELEASE, p);
-
 	if (vp->v_type == VLNK)
 		retval = hfs_clonelink(vp, blksize, cred, p);
 	else if (vp->v_flag & VSYSTEM)
 		retval = hfs_clonesysfile(vp, headblks, datablks, blksize, cred, p);
 	else
 		retval = hfs_clonefile(vp, headblks, datablks, blksize, cred, p);
-
-	// XXXdbg - relock the extents overflow file
-	(void)hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_EXCLUSIVE, p);
 
 	if (retval)
 		goto restore;
@@ -2362,18 +2354,12 @@ hfs_relocate(vp, blockHint, cred, p)
 	fp->ff_size = realsize;
 	if (UBCISVALID(vp)) {
 		(void) ubc_setsize(vp, realsize);
-		need_vinval = 1;
+		(void) vinvalbuf(vp, V_SAVE, cred, p, 0, 0);
 	}
 
 	CLR(VTOC(vp)->c_flag, C_RELOCATING);  /* Resume page-outs for this file. */
 out:
 	(void) hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_RELEASE, p);
-
-	// XXXdbg - do this after unlocking the extents-overflow
-	// file to avoid deadlocks (see comment above by STEP 2)
-	if (need_vinval) {
-	    (void) vinvalbuf(vp, V_SAVE, cred, p, 0, 0);
-	}
 
 	retval = VOP_FSYNC(vp, cred, MNT_WAIT, p);
 out2:

@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -83,9 +86,7 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <sys/aio_kern.h>
-
-#include <bsm/audit_kernel.h>
-#include <bsm/audit_kevents.h>
+#include <sys/kern_audit.h>
 
 #include <mach/mach_types.h>
 #include <kern/thread.h>
@@ -94,13 +95,12 @@
 #include <kern/assert.h>
 #if KTRACE   
 #include <sys/ktrace.h>
-#include <sys/ubc.h>
 #endif
 
 extern char init_task_failure_data[];
 int exit1 __P((struct proc *, int, int *));
 void proc_prepareexit(struct proc *p);
-int vfork_exit(struct proc *p, int rv);
+void vfork_exit(struct proc *p, int rv);
 void vproc_exit(struct proc *p);
 
 /*
@@ -152,14 +152,12 @@ exit1(p, rv, retval)
 
 	 ut = get_bsdthread_info(self);
 	 if (ut->uu_flag & P_VFORK) {
-		if (!vfork_exit(p, rv)) {
+			vfork_exit(p, rv);
 			vfork_return(self, p->p_pptr, p , retval);
 			unix_syscall_return(0);
 			/* NOT REACHED */
-		}  
-		return(EINVAL);
 	 }
-	AUDIT_SYSCALL_EXIT(0, p, ut); /* Exit is always successfull */
+	audit_syscall_exit(0, p, ut); /* Exit is always successfull */
         signal_lock(p);
 	while (p->exit_thread != self) {
 		if (sig_try_locked(p) <= 0) {
@@ -321,9 +319,6 @@ proc_exit(struct proc *p)
 	if (p->p_tracep) {
 		struct vnode *tvp = p->p_tracep;
 		p->p_tracep = NULL;
-
-		if (UBCINFOEXISTS(tvp))
-		        ubc_rele(tvp);
 		vrele(tvp);
 	}
 #endif
@@ -522,7 +517,7 @@ owait3(p, uap, retval)
 {
 	struct wait4_args *a;
 
-	a = (struct wait4_args *)get_bsduthreadarg(current_act());
+	a = (struct wait4_args *)get_bsduthreadarg(current_act);
 
 	a->rusage = uap->rusage;
 	a->options = uap->options;
@@ -746,11 +741,8 @@ init_process(void)
 {
 	register struct proc *p = current_proc();
 
-	AUDIT_MACH_SYSCALL_ENTER(AUE_INITPROCESS);
-	if (suser(p->p_ucred, &p->p_acflag)) {
-		AUDIT_MACH_SYSCALL_EXIT(KERN_NO_ACCESS);
+	if (suser(p->p_ucred, &p->p_acflag))
 		return(KERN_NO_ACCESS);
-	}
 
 	if (p->p_pid != 1 && p->p_pgid != p->p_pid)
 		enterpgrp(p, p->p_pid, 0);
@@ -765,7 +757,6 @@ init_process(void)
 	p->p_sibling.le_next = NULL;
 	p->p_pptr = kernproc;
 
-	AUDIT_MACH_SYSCALL_EXIT(KERN_SUCCESS);
 	return(KERN_SUCCESS);
 }
 
@@ -786,7 +777,7 @@ process_terminate_self(void)
  * status and rusage for wait().  Check for child processes and orphan them.
  */
 
-int
+void
 vfork_exit(p, rv)
 	struct proc *p;
 	int rv;
@@ -798,12 +789,37 @@ vfork_exit(p, rv)
 	struct uthread *ut;
 	exception_data_t	code[EXCEPTION_CODE_MAX];
 
-	ut = get_bsdthread_info(self);
-	if (p->exit_thread) {
-		return(1);
-	} 
-	p->exit_thread = self;
-	
+	/*
+	 * If a thread in this task has already
+	 * called exit(), then halt any others
+	 * right here.
+	 */
+
+	 ut = get_bsdthread_info(self);
+#ifdef FIXME
+        signal_lock(p);
+	while (p->exit_thread != self) {
+		if (sig_try_locked(p) <= 0) {
+			if (get_threadtask(self) != task) {
+                                signal_unlock(p);
+				return;
+                        }
+			signal_unlock(p);
+			thread_terminate(self);
+			thread_funnel_set(kernel_flock, FALSE);
+			thread_exception_return();
+			/* NOTREACHED */
+		}
+		sig_lock_to_exit(p);
+	}
+        signal_unlock(p);
+	if (p->p_pid == 1) {
+		printf("pid 1 exited (signal %d, exit %d)",
+		    WTERMSIG(rv), WEXITSTATUS(rv));
+panic("init died\nState at Last Exception:\n\n%s", init_task_failure_data);
+	}
+#endif /* FIXME */
+
 	s = splsched();
 	p->p_flag |= P_WEXIT;
 	splx(s);
@@ -835,7 +851,6 @@ vfork_exit(p, rv)
 	p->p_xstat = rv;
 
 	vproc_exit(p);
-	return(0);
 }
 
 void 
@@ -902,9 +917,6 @@ vproc_exit(struct proc *p)
 	if (p->p_tracep) {
 		struct vnode *tvp = p->p_tracep;
 		p->p_tracep = NULL;
-
-		if (UBCINFOEXISTS(tvp))
-		        ubc_rele(tvp);
 		vrele(tvp);
 	}
 #endif

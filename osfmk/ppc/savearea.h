@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -92,11 +95,8 @@ typedef struct savearea {
 
 	savearea_comm	save_hdr;					/* Stuff common to all saveareas */
 
-	uint64_t		save_xdat0;					/* Exception data 0 */
-	uint64_t		save_xdat1;					/* Exception data 1 */
-	uint64_t		save_xdat2;					/* Exception data 2 */
-	uint64_t		save_xdat3;					/* Exception data 3 */
-                                             
+	unsigned int	save_060[8];				/* Fill 32 bytes */
+
                                                 /* offset 0x0080 */
 	uint64_t	 	save_r0;
 	uint64_t	 	save_r1;
@@ -363,8 +363,6 @@ void 			savearea_init(vm_offset_t addr);	/* Boot-time savearea initialization */
 #define SAVredriveb	13						/* Indicates that the low-level fault handler associated */
 #define	SAVinstrument 0x00080000			/* Indicates that we should return instrumentation data */
 #define	SAVinstrumentb 12					/* Indicates that we should return instrumentation data */
-#define	SAVeat 		0x00100000				/* Indicates that interruption should be ignored */
-#define	SAVeatb 	11						/* Indicates that interruption should be ignored */
 #define SAVtype		0x0000FF00				/* Shows type of savearea */
 #define SAVtypeshft	8						/* Shift to position type */
 #define SAVempty	0x86					/* Savearea is on free list */

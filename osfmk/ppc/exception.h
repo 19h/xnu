@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,6 +66,10 @@ struct procFeatures {
 #define pfCanNapb	5
 #define pfCanDoze	0x02000000
 #define pfCanDozeb	6
+#define pfThermal	0x01000000
+#define pfThermalb	7
+#define pfThermInt	0x00800000
+#define pfThermIntb	8
 #define pfSlowNap	0x00400000
 #define pfSlowNapb	9
 #define pfNoMuMMCK	0x00200000
@@ -131,18 +138,25 @@ struct procFeatures {
 #define pmDPLLVminb		15
 #define pmPowerTune		0x00000004
 #define pmPowerTuneb	29
-#define pmDFS			0x00000002
-#define pmDFSb			30
 #define pmDualPLL		0x00000001
 #define pmDualPLLb		31
-	unsigned int	pfPowerTune0;		/* 0x080 */
-	unsigned int	pfPowerTune1;		/* 0x084 */
-	unsigned int	rsrvd88[6];			/* 0x088 */
 };
 #pragma pack()
 
 typedef struct procFeatures procFeatures;
 
+#pragma pack(4)							/* Make sure the structure stays as we defined it */
+struct thrmControl {
+	unsigned int	maxTemp;			/* Maximum temprature before damage */
+	unsigned int	throttleTemp;		/* Temprature at which to throttle down */
+	unsigned int	lowTemp;			/* Interrupt when temprature drops below */
+	unsigned int	highTemp;			/* Interrupt when temprature exceeds this */
+	unsigned int	thrm3val;			/* Value for thrm3 register */
+	unsigned int	rsvd[3];			/* Pad to cache line */
+};
+#pragma pack()
+
+typedef struct thrmControl thrmControl;
 
 /*
  *
@@ -195,18 +209,13 @@ struct hwCtrs {
 	unsigned int	hwSoftPatches;			/* Soft Patch interruptions */
 	unsigned int	hwMaintenances;			/* Maintenance interruptions */
 	unsigned int	hwInstrumentations;		/* Instrumentation interruptions */
-	unsigned int	hwrsvd14;				/* Reserved */
-	unsigned int 	hwhdec;					/* 0B4 Hypervisor decrementer */
+	unsigned int	hwrsvd14;				/* Reswerved */
+/*											0x0B4 */
 
-	unsigned int	hwspare0[11];			/* 0B8 Reserved */
-	unsigned int	hwspare0a;				/* 0E4 Reserved */
-	unsigned int	hwspare0b;				/* 0E8 Reserved */
-	unsigned int	hwspare0c;				/* 0EC Reserved */
-	unsigned int	hwspare0d;				/* 0F0 Reserved */
-	unsigned int	hwIgnored;				/* 0F4 Interruptions ignored */
-	unsigned int	hwRedrives;				/* 0F8 Number of redriven interrupts */
-	unsigned int	hwSteals;				/* 0FC Steals */
-/*											   100 */
+	unsigned int	hwspare0[17];			/* Reserved */
+	unsigned int	hwRedrives;				/* Number of redriven interrupts */
+	unsigned int	hwSteals;				/* PTE Steals */
+/*											0x100 */
 
 	unsigned int 	hwMckHang;				/* ? */
 	unsigned int 	hwMckSLBPE;				/* ? */
@@ -237,9 +246,8 @@ struct hwCtrs {
 	unsigned int	numSIGPtimo;			/* Number of SIGP send timeouts */
 	unsigned int	numSIGPmast;			/* Number of SIGPast messages merged */
 	unsigned int	numSIGPmwake;			/* Number of SIGPwake messages merged */
-	unsigned int	numSIGPcall;			/* Number of SIGPcall messages received */
 	
-	unsigned int	hwspare3[20];			/* Pad to 512 */
+	unsigned int	hwspare3[21];			/* Pad to 512 */
 	
 };
 #pragma pack()
@@ -285,7 +293,7 @@ struct per_proc_info {
 
 	/* PPC cache line boundary here - 020 */
 
-	uint64_t		rtcPop;				/* Real Time Clock pop */
+	unsigned int	rsrvd020[2];
 	unsigned int	need_ast;			/* pointer to need_ast[CPU_NO] */
 /*
  *	Note: the following two pairs of words need to stay in order and each pair must
@@ -326,20 +334,15 @@ struct per_proc_info {
 #define MPsigpFunc		0x0000FF00		/* Current function */
 #define MPsigpIdle		0x00			/* No function pending */
 #define MPsigpSigp		0x04			/* Signal a processor */
-
 #define SIGPast		0					/* Requests an ast on target processor */
 #define SIGPcpureq	1					/* Requests CPU specific function */
 #define SIGPdebug	2					/* Requests a debugger entry */
 #define SIGPwake	3					/* Wake up a sleeping processor */
-#define SIGPcall	4					/* Call a function on a processor */
-
 #define CPRQtemp	0					/* Get temprature of processor */
-#define CPRQtimebase	1				/* Get timebase of processor */
+#define CPRQtimebase	1					/* Get timebase of processor */
 #define CPRQsegload	2					/* Segment registers reload */
 #define CPRQscom	3					/* SCOM */
 #define CPRQchud	4					/* CHUD perfmon */
-#define CPRQsps		5					/* Set Processor Speed */
-
 	unsigned int	MPsigpParm0;		/* SIGP parm 0 */
 	unsigned int	MPsigpParm1;		/* SIGP parm 1 */
 	unsigned int	MPsigpParm2;		/* SIGP parm 2 */
@@ -349,6 +352,9 @@ struct per_proc_info {
 
 	/* PPC cache line boundary here - 0A0 */
 	procFeatures 	pf;					/* Processor features */
+	
+	/* PPC cache line boundary here - 120 */
+	thrmControl		thrm;				/* Thermal controls */
 	
 	/* PPC cache line boundary here - 140 */
 	unsigned int	ppRsvd140[8];		/* Reserved */
@@ -598,7 +604,6 @@ extern char *trap_type[];
 #define T_MAINTENANCE			(0x2A * T_VECTOR_SIZE)
 #define T_INSTRUMENTATION		(0x2B * T_VECTOR_SIZE)
 #define T_ARCHDEP0				(0x2C * T_VECTOR_SIZE)
-#define T_HDEC					(0x2D * T_VECTOR_SIZE)
 
 #define T_AST					(0x100 * T_VECTOR_SIZE) 
 #define T_MAX					T_CHOKE		 /* Maximum exception no */

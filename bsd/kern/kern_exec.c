@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -86,12 +89,11 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/acct.h>
+#include <sys/kern_audit.h>
 #include <sys/exec.h>
 #include <sys/kdebug.h>
 #include <sys/signal.h>
 #include <sys/aio_kern.h>
-
-#include <bsm/audit_kernel.h>
 
 #include <mach/vm_param.h>
 
@@ -112,7 +114,6 @@ extern vm_map_t vm_map_switch(vm_map_t    map); /* XXX */
 #include <machine/vmparam.h>
 #if KTRACE   
 #include <sys/ktrace.h>
-#include <sys/ubc.h>
 #endif
 
 int	app_profile = 0;
@@ -127,8 +128,6 @@ static int load_return_to_errno(load_return_t lrtn);
 int execve(struct proc *p, struct execve_args *uap, register_t *retval);
 static int execargs_alloc(vm_offset_t *addrp);
 static int execargs_free(vm_offset_t addr);
-static int sugid_scripts = 0;
-SYSCTL_INT (_kern, OID_AUTO, sugid_scripts, CTLFLAG_RW, &sugid_scripts, 0, "");
 
 int
 execv(p, args, retval)
@@ -411,14 +410,6 @@ again:
 		  error = EBADARCH;
 		  goto bad;
 		}
-
-		/* Check to see if SUGID scripts are permitted.  If they aren't then
-		 * clear the SUGID bits.
-		 */
-	        if (sugid_scripts == 0) {
-		   origvattr.va_mode &= ~(VSUID | VSGID);
-        	}
-
 		cp = &exdata.ex_shell[2];		/* skip "#!" */
 		while (cp < &exdata.ex_shell[SHSIZE]) {
 			if (*cp == '\t')		/* convert all tabs to spaces */
@@ -811,9 +802,6 @@ again:
 			struct vnode *tvp = p->p_tracep;
 			p->p_tracep = NULL;
 			p->p_traceflag = 0;
-
-			if (UBCINFOEXISTS(tvp))
-			        ubc_rele(tvp);
 			vrele(tvp);
 		}
 #endif
@@ -830,6 +818,7 @@ again:
 		 */
 		ipc_task_reset(task);
 
+		set_security_token(p);
 		p->p_flag |= P_SUGID;
 
 		/* Radar 2261856; setuid security hole fix */
@@ -867,7 +856,6 @@ again:
 	}
 	p->p_cred->p_svuid = p->p_ucred->cr_uid;
 	p->p_cred->p_svgid = p->p_ucred->cr_gid;
-	set_security_token(p);
 
 	KNOTE(&p->p_klist, NOTE_EXEC);
 

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -339,7 +342,6 @@ zinit(
 	z->zone_name = name;
 	z->count = 0;
 	z->doing_alloc = FALSE;
-	z->doing_gc = FALSE;
 	z->exhaustible = FALSE;
 	z->collectable = TRUE;
 	z->allows_foreign = FALSE;
@@ -607,12 +609,6 @@ zalloc_canblock(
 
 	REMOVE_FROM_ZONE(zone, addr, vm_offset_t);
 
-	while ((addr == 0) && canblock && (zone->doing_gc)) {
-		zone->waiting = TRUE;
-		zone_sleep(zone);
-		REMOVE_FROM_ZONE(zone, addr, vm_offset_t);
-	}
-
 	while ((addr == 0) && canblock) {
 		/*
  		 *	If nothing was there, try to get more
@@ -678,8 +674,6 @@ zalloc_canblock(
 					        if (retry == TRUE)
 						        panic("zalloc");
 						retry = TRUE;
-					} else {
-					        break;
 					}
 				}
 				lock_zone(zone);
@@ -1162,9 +1156,9 @@ zone_gc(void)
 	zone_free_pages = NULL;
 
 	for (i = 0; i < max_zones; i++, z = z->next_zone) {
-		unsigned int				n, m;
+		unsigned int				n;
 		vm_size_t					elt_size, size_freed;
-		struct zone_free_element	*elt, *base_elt, *base_prev, *prev, *scan, *keep, *tail;
+		struct zone_free_element	*elt, *prev, *scan, *keep, *tail;
 
 		assert(z != ZONE_NULL);
 
@@ -1183,8 +1177,6 @@ zone_gc(void)
 			unlock_zone(z);		
 			continue;
 		}
-
-		z->doing_gc = TRUE;
 
 		/*
 		 * Snatch all of the free elements away from the zone.
@@ -1229,38 +1221,15 @@ zone_gc(void)
 			 * Dribble back the elements we are keeping.
 			 */
 
-			if (++n >= 50) {
-				if (z->waiting == TRUE) {
-					lock_zone(z);
+			if (++n >= 50 && keep != NULL) {
+				lock_zone(z);
 
-					if (keep != NULL) {
-						tail->next = (void *)z->free_elements;
-						(void *)z->free_elements = keep;
-						tail = keep = NULL;
-					} else {
-						m =0;
-						base_elt = elt;
-						base_prev = prev;
-						while ((elt != NULL) && (++m < 50)) { 
-							prev = elt;
-							elt = elt->next;
-						}
-						if (m !=0 ) {
-							prev->next = (void *)z->free_elements;
-							(void *)z->free_elements = (void *)base_elt;
-							base_prev->next = elt;
-							prev = base_prev;
-						}
-					}
+				tail->next = (void *)z->free_elements;
+				(void *)z->free_elements = keep;
 
-					if (z->waiting) {
-						z->waiting = FALSE;
-						zone_wakeup(z);
-					}
+				unlock_zone(z);
 
-					unlock_zone(z);
-				}
-				n =0;
+				n = 0; tail = keep = NULL;
 			}
 		}
 
@@ -1317,21 +1286,14 @@ zone_gc(void)
 			 * and update the zone size info.
 			 */
 
-			if (++n >= 50) {
+			if (++n >= 50 && keep != NULL) {
 				lock_zone(z);
 
 				z->cur_size -= size_freed;
 				size_freed = 0;
 
-				if (keep != NULL) {
-					tail->next = (void *)z->free_elements;
-					(void *)z->free_elements = keep;
-				}
-
-				if (z->waiting) {
-					z->waiting = FALSE;
-					zone_wakeup(z);
-				}
+				tail->next = (void *)z->free_elements;
+				(void *)z->free_elements = keep;
 
 				unlock_zone(z);
 
@@ -1344,9 +1306,8 @@ zone_gc(void)
 		 * the zone size info.
 		 */
 
-		lock_zone(z);
-
 		if (size_freed > 0 || keep != NULL) {
+			lock_zone(z);
 
 			z->cur_size -= size_freed;
 
@@ -1355,14 +1316,8 @@ zone_gc(void)
 				(void *)z->free_elements = keep;
 			}
 
+			unlock_zone(z);
 		}
-
-		z->doing_gc = FALSE;
-		if (z->waiting) {
-			z->waiting = FALSE;
-			zone_wakeup(z);
-		}
-		unlock_zone(z);
 	}
 
 	/*
