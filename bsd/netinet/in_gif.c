@@ -93,8 +93,6 @@
 
 #include <net/net_osdep.h>
 
-extern u_long  route_generation;
-
 int ip_gif_ttl = GIF_TTL;
 SYSCTL_INT(_net_inet_ip, IPCTL_GIF_TTL, gifttl, CTLFLAG_RW,
 	&ip_gif_ttl,	0, "");
@@ -113,7 +111,6 @@ in_gif_output(
 	struct ip iphdr;	/* capsule IP header, host byte ordered */
 	int proto, error;
 	u_int8_t tos;
-	struct ip_out_args ipoa = { IFSCOPE_NONE };
 
 	if (sin_src == NULL || sin_dst == NULL ||
 	    sin_src->sin_family != AF_INET ||
@@ -192,10 +189,7 @@ in_gif_output(
 	bcopy(&iphdr, mtod(m, struct ip *), sizeof(struct ip));
 
 	if (dst->sin_family != sin_dst->sin_family ||
-	    dst->sin_addr.s_addr != sin_dst->sin_addr.s_addr ||
-	    (sc->gif_ro.ro_rt != NULL &&
-	    (sc->gif_ro.ro_rt->generation_id != route_generation ||
-	    sc->gif_ro.ro_rt->rt_ifp == ifp))) {
+	    dst->sin_addr.s_addr != sin_dst->sin_addr.s_addr) {
 		/* cache route doesn't match */
 		dst->sin_family = sin_dst->sin_family;
 		dst->sin_len = sizeof(struct sockaddr_in);
@@ -227,7 +221,7 @@ in_gif_output(
 #endif
 	}
 
-	error = ip_output(m, NULL, &sc->gif_ro, IP_OUTARGS, NULL, &ipoa);
+	error = ip_output(m, NULL, &sc->gif_ro, 0, NULL, NULL);
 	return(error);
 }
 
@@ -387,10 +381,7 @@ gif_encapcheck4(
 		sin.sin_family = AF_INET;
 		sin.sin_len = sizeof(struct sockaddr_in);
 		sin.sin_addr = ip.ip_src;
-		lck_mtx_lock(rt_mtx);
-		rt = rtalloc1_scoped_locked((struct sockaddr *)&sin, 0, 0,
-		    m->m_pkthdr.rcvif->if_index);
-		lck_mtx_unlock(rt_mtx);
+		rt = rtalloc1((struct sockaddr *)&sin, 0, 0UL);
 		if (!rt || rt->rt_ifp != m->m_pkthdr.rcvif) {
 #if 0
 			log(LOG_WARNING, "%s: packet from 0x%x dropped "

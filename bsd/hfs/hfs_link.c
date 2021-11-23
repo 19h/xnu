@@ -438,25 +438,6 @@ hfs_vnop_link(struct vnop_link_args *ap)
 	}
 	tdcp = VTOC(tdvp);
 	cp = VTOC(vp);
-	
-	/*
-	 * Make sure we don't race the src or dst parent directories with rmdir.
-	 * Note that we should only have a src parent directory cnode lock 
-	 * if we're dealing with a directory hardlink here.
-	 */
-	if (fdcp) {
-		if (fdcp->c_flag & (C_NOEXISTS | C_DELETED)) {
-			error = ENOENT;
-			goto out;
-		}
-	}
-	
-	if (tdcp->c_flag & (C_NOEXISTS | C_DELETED)) {
-		error = ENOENT;
-		goto out;
-	}
-	
-	/* Check src for errors: too many links, immutable, race with unlink */
 	if (cp->c_linkcount >= HFS_LINK_MAX) {
 		error = EMLINK;
 		goto out;
@@ -696,10 +677,12 @@ hfs_unlink(struct hfsmount *hfsmp, struct vnode *dvp, struct vnode *vp, struct c
 		goto out;
 	}
 
-	/* Purge any cached origin entries for a directory or file hard link. */
-	hfs_relorigin(cp, dcp->c_fileid);
-	if (dcp->c_fileid != dcp->c_cnid) {
-		hfs_relorigin(cp, dcp->c_cnid);
+	/* Purge any cached origin entries for a directory hard link. */
+	if (cndesc.cd_flags & CD_ISDIR) {
+		hfs_relorigin(cp, dcp->c_fileid);
+		if (dcp->c_fileid != dcp->c_cnid) {
+			hfs_relorigin(cp, dcp->c_cnid);
+		}
 	}
 
 	/* Delete the link record. */
@@ -1013,7 +996,7 @@ hfs_lookuplink(struct hfsmount *hfsmp, cnid_t linkfileid, cnid_t *prevlinkid,  c
 }
 
 /*
- * Cache the origin of a directory or file hard link
+ * Cache the orgin of a directory hard link
  *
  * cnode must be lock on entry
  */
@@ -1024,7 +1007,6 @@ hfs_savelinkorigin(cnode_t *cp, cnid_t parentcnid)
 	linkorigin_t *origin = NULL;
 	void * thread = current_thread();
 	int count = 0;
-	int maxorigins = (S_ISDIR(cp->c_mode)) ? MAX_CACHED_ORIGINS : MAX_CACHED_FILE_ORIGINS;
 
 	/*
 	 *  Look for an existing origin first.  If not found, create/steal one.
@@ -1038,7 +1020,7 @@ hfs_savelinkorigin(cnode_t *cp, cnid_t parentcnid)
 	}
 	if (origin == NULL) {
 		/* Recycle the last (i.e., the oldest) if we have too many. */
-		if (count > maxorigins) {
+		if (count > MAX_CACHED_ORIGINS) {
 			origin = TAILQ_LAST(&cp->c_originlist, hfs_originhead);
 			TAILQ_REMOVE(&cp->c_originlist, origin, lo_link);
 		} else {
@@ -1052,7 +1034,7 @@ hfs_savelinkorigin(cnode_t *cp, cnid_t parentcnid)
 }
 
 /*
- * Release any cached origins for a directory or file hard link
+ * Release any cached origins for a directory hard link
  *
  * cnode must be lock on entry
  */
@@ -1069,7 +1051,7 @@ hfs_relorigins(struct cnode *cp)
 }
 
 /*
- * Release a specific origin for a directory or file hard link
+ * Release a specific origin for a directory hard link
  *
  * cnode must be lock on entry
  */
@@ -1091,7 +1073,7 @@ hfs_relorigin(struct cnode *cp, cnid_t parentcnid)
 }
 
 /*
- * Test if a directory or file hard link has a cached origin
+ * Test if a directory hard link has a cached origin
  *
  * cnode must be lock on entry
  */
@@ -1113,7 +1095,7 @@ hfs_haslinkorigin(cnode_t *cp)
 }
 
 /*
- * Obtain the current parent cnid of a directory or file hard link
+ * Obtain the current parent cnid of a directory hard link
  *
  * cnode must be lock on entry
  */
@@ -1135,7 +1117,7 @@ hfs_currentparent(cnode_t *cp)
 }
 
 /*
- * Obtain the current cnid of a directory or file hard link
+ * Obtain the current cnid of a directory hard link
  *
  * cnode must be lock on entry
  */

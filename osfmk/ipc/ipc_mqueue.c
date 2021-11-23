@@ -361,10 +361,9 @@ ipc_mqueue_send(
 	imq_lock(mqueue);
 
 	if (!imq_full(mqueue) ||
-	    (!imq_full_kernel(mqueue) && 
-	     ((option & MACH_SEND_ALWAYS) ||
-	      (MACH_MSGH_BITS_REMOTE(kmsg->ikm_header->msgh_bits) ==
-	       MACH_MSG_TYPE_PORT_SEND_ONCE)))) {
+		(option & MACH_SEND_ALWAYS) ||
+		(MACH_MSGH_BITS_REMOTE(kmsg->ikm_header->msgh_bits) ==
+		 MACH_MSG_TYPE_PORT_SEND_ONCE)) {
 		mqueue->imq_msgcount++;
 		assert(mqueue->imq_msgcount > 0);
 		imq_unlock(mqueue);
@@ -380,11 +379,6 @@ ipc_mqueue_send(
 			imq_unlock(mqueue);
 			splx(s);
 			return MACH_SEND_TIMED_OUT;
-		}
-		if (imq_full_kernel(mqueue)) {
-			imq_unlock(mqueue);
-			splx(s);
-			return MACH_SEND_NO_BUFFER;
 		}
 		mqueue->imq_fullwaiters = TRUE;
 		thread_lock(cur_thread);

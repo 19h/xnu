@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -25,46 +25,21 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-/*
- * Timer queue support routines.
- */
+#ifndef _I386_HW_DEFS_H_
+#define _I386_HW_DEFS_H_
 
-#ifndef _KERN_TIMER_QUEUE_H_
-#define _KERN_TIMER_QUEUE_H_
 
-#include <mach/mach_types.h>
+#define pmMwaitC1 	0x00
+#define pmMwaitC2	0x10
+#define pmMwaitC3 	0x20
+#define pmMwaitC4 	0x30
+#define pmMwaitBrInt 0x1
 
-#ifdef MACH_KERNEL_PRIVATE
+#define pmBase 		0x400
+#define pmCtl1 		0x04
+#define pmCtl2 		0x20
+#define pmC3Res 	0x54
+#define pmStatus 	0x00
+#define msrTSC 		0x10
 
-#include <kern/queue.h>
-
-/*
- *	Invoked by kernel, implemented by platform.
- */
-
-/* Request an expiration deadline, returns queue association */
-extern queue_t		timer_queue_assign(
-						uint64_t		deadline);
-
-/* Cancel an associated expiration deadline and specify new deadline */
-extern void			timer_queue_cancel(
-						queue_t			queue,
-						uint64_t		deadline,
-						uint64_t		new_deadline);
-
-/*
- *	Invoked by platform, implemented by kernel.
- */
-
-/* Process deadline expiration for queue, returns new deadline */
-extern uint64_t		timer_queue_expire(
-						queue_t			queue,
-						uint64_t		deadline);
-
-/* Shutdown a timer queue and reassign existing activities */
-extern void			timer_queue_shutdown(
-						queue_t			queue);
-
-#endif	/* MACH_KERNEL_PRIVATE */
-
-#endif	/* _KERN_TIMER_QUEUE_H_ */
+#endif /* _I386_HW_DEFS_H_ */

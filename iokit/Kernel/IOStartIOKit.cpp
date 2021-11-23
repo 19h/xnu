@@ -52,6 +52,7 @@
 extern "C" {
 
 extern void OSlibkernInit (void);
+extern void ml_hpet_cfg(uint32_t, uint32_t);
 
 #include <kern/clock.h>
 #include <sys/time.h>
@@ -99,7 +100,7 @@ void StartIOKit( void * p1, void * p2, void * p3, void * p4 )
     OSCollectionIterator *      kmodIter;   // must release
     OSString *                  kmodName;   // don't release
 
-    if( PE_parse_boot_argn( "io", &debugFlags, sizeof (debugFlags) ))
+    if( PE_parse_boot_arg( "io", &debugFlags ))
 	gIOKitDebug = debugFlags;
 
     // Check for the log synchronous bit set in io

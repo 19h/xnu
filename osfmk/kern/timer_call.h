@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 1993-1995, 1999-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 1993-1995, 1999-2000 Apple Computer, Inc.
+ * All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -27,6 +28,11 @@
  */
 /*
  * Declarations for timer interrupt callouts.
+ *
+ * HISTORY
+ *
+ * 20 December 2000 (debo)
+ *	Created.
  */
 
 #ifndef _KERN_TIMER_CALL_H_
@@ -42,28 +48,42 @@ typedef void				(*timer_call_func_t)(
 									timer_call_param_t		param0,
 									timer_call_param_t		param1);
 
-extern boolean_t	timer_call_enter(
-						timer_call_t	call,
-						uint64_t		deadline);
+boolean_t
+timer_call_enter(
+	timer_call_t			call,
+	uint64_t				deadline);
 
-extern boolean_t	timer_call_enter1(
-						timer_call_t		call,
-						timer_call_param_t	param1,
-						uint64_t			deadline);
+boolean_t
+timer_call_enter1(
+	timer_call_t			call,
+	timer_call_param_t		param1,
+	uint64_t				deadline);
 
-extern boolean_t	timer_call_cancel(
-						timer_call_t	call);
+boolean_t
+timer_call_cancel(
+	timer_call_t			call);
+
+boolean_t
+timer_call_is_delayed(
+	timer_call_t			call,
+	uint64_t				*deadline);
 
 #include <kern/call_entry.h>
 
 typedef struct call_entry	timer_call_data_t;
 
-extern void		timer_call_initialize(void);
+void
+timer_call_initialize(void);
 
-extern void		timer_call_setup(
-					timer_call_t		call,
-					timer_call_func_t	func,
-					timer_call_param_t	param0);
+void
+timer_call_setup(
+	timer_call_t			call,
+	timer_call_func_t		func,
+	timer_call_param_t		param0);
+
+void
+timer_call_shutdown(
+	processor_t			processor);
 
 #endif /* MACH_KERNEL_PRIVATE */
 

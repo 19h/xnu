@@ -248,6 +248,3 @@ _pmsRunLocal
 _scc
 _rc4_crypt
 _rc4_init
-_strcat
-_strcpy
-_sprintf

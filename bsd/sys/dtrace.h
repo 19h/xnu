@@ -2385,8 +2385,6 @@ extern void dtrace_invop_remove(int (*)(uintptr_t, uintptr_t *, uintptr_t));
 #define DTRACE_INVOP_BCTR               6
 #define DTRACE_INVOP_TAILJUMP           7
 #endif
-
-
 #endif /* __APPLE__ */
 
 #ifdef  __cplusplus

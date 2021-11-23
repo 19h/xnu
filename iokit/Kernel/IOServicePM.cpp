@@ -117,10 +117,6 @@ do {                                  \
 
 #define NS_TO_MS(nsec)                ((int)((nsec) / 1000000ULL))
 
-#if CONFIG_EMBEDDED
-#define SUPPORT_IDLE_CANCEL				1
-#endif
-
 //*********************************************************************************
 // PM machine states
 //*********************************************************************************
@@ -390,7 +386,6 @@ void IOService::PMinit ( void )
         fDeviceOverrides            = false;
         fMachineState               = kIOPM_Finished;
         fIdleTimerEventSource       = NULL;
-        fIdleTimerMinPowerState     = 0;
         fActivityLock               = IOLockAlloc();
         fClampOn                    = false;
         fStrictTreeOrder            = false;
@@ -1505,10 +1500,10 @@ void IOService::handlePowerDomainWillChangeTo ( IOPMRequest * request )
 	PM_ASSERT_IN_GATE();
     OUR_PMLog(kPMLogWillChange, newPowerFlags, 0);
 
-	if (!inPlane(gIOPowerPlane) || !whichParent || !whichParent->getAwaitingAck())
+	if (!inPlane(gIOPowerPlane))
 	{
 		PM_DEBUG("[%s] %s: not in power tree\n", getName(), __FUNCTION__);
-        goto exit_no_ack;
+		return;
 	}
 
 	savedParentsKnowState = fParentsKnowState;
@@ -1580,10 +1575,6 @@ void IOService::handlePowerDomainWillChangeTo ( IOPMRequest * request )
 			getName());
 		ask_parent( fDesiredPowerState );
 	}
-
-exit_no_ack:
-    // Drop the retain from notifyChild().
-    if (whichParent) whichParent->release();
 }
 
 //*********************************************************************************
@@ -1619,10 +1610,10 @@ void IOService::handlePowerDomainDidChangeTo ( IOPMRequest * request )
 	PM_ASSERT_IN_GATE();
     OUR_PMLog(kPMLogDidChange, newPowerFlags, 0);
 
-	if (!inPlane(gIOPowerPlane) || !whichParent || !whichParent->getAwaitingAck())
+	if (!inPlane(gIOPowerPlane))
 	{
 		PM_DEBUG("[%s] %s: not in power tree\n", getName(), __FUNCTION__);
-        goto exit_no_ack;
+		return;
 	}
 
 	savedParentsKnowState = fParentsKnowState;
@@ -1667,10 +1658,6 @@ void IOService::handlePowerDomainDidChangeTo ( IOPMRequest * request )
 			getName());
 		ask_parent( fDesiredPowerState );
 	}
-
-exit_no_ack:
-    // Drop the retain from notifyChild().
-    if (whichParent) whichParent->release();
 }
 
 //*********************************************************************************
@@ -1788,7 +1775,6 @@ IOReturn IOService::requestPowerDomainState (
     unsigned long		computedState;
     unsigned long		theDesiredState;
 	IOService *			child;
-	IOPMRequest *		childRequest;
 
     if (!initialized)
 		return IOPMNotYetInitialized;
@@ -1898,9 +1884,7 @@ IOReturn IOService::requestPowerDomainState (
 	}
 
 	// Record the child's desires on the connection.
-#if SUPPORT_IDLE_CANCEL
-	bool attemptCancel = ((kIOPMPreventIdleSleep & desiredState) && !whichChild->getPreventIdleSleepFlag());
-#endif
+
 	whichChild->setDesiredDomainState( computedState );
 	whichChild->setPreventIdleSleepFlag( desiredState & kIOPMPreventIdleSleep );
 	whichChild->setPreventSystemSleepFlag( desiredState & kIOPMPreventSystemSleep );
@@ -1914,6 +1898,8 @@ IOReturn IOService::requestPowerDomainState (
 
 	if (!fWillAdjustPowerState && !fDeviceOverrides)
 	{
+		IOPMRequest * childRequest;
+
 		childRequest = acquirePMRequest( this, kIOPMRequestTypeAdjustPowerState );
 		if (childRequest)
 		{
@@ -1921,16 +1907,6 @@ IOReturn IOService::requestPowerDomainState (
 			fWillAdjustPowerState = true;
 		}
 	}
-#if SUPPORT_IDLE_CANCEL
-	if (attemptCancel)
-	{
-		childRequest = acquirePMRequest( this, kIOPMRequestTypeIdleCancel );
-		if (childRequest)
-		{
-			submitPMRequest( childRequest );
-		}
-	}
-#endif
 
 	return IOPMNoErr;
 }
@@ -3289,7 +3265,6 @@ bool IOService::notifyChild ( IOPowerConnection * theNub, bool is_prechange )
 	childRequest = acquirePMRequest( theChild, requestType );
 	if (childRequest)
 	{
-        theNub->retain();
 		childRequest->fArg0 = (void *) fHeadNoteOutputFlags;
 		childRequest->fArg1 = (void *) theNub;
 		childRequest->fArg2 = (void *) (fHeadNoteState < fCurrentPowerState);
@@ -3713,14 +3688,6 @@ void IOService::all_done ( void )
         if (fCurrentCapabilityFlags & kIOPMStaticPowerValid)
             fCurrentPowerConsumption = powerStatePtr->staticPower;
     }
-
-    // When power rises enough to satisfy the tickle's desire for more power,
-    // the condition preventing idle-timer from dropping power is removed.
-
-    if (fCurrentPowerState >= fIdleTimerMinPowerState)
-    {
-        fIdleTimerMinPowerState = 0;
-    }
 }
 
 //*********************************************************************************
@@ -3913,7 +3880,11 @@ bool IOService::ackTimerTick( void )
 			// apps didn't respond in time
             cleanClientResponses(true);
             OUR_PMLog(kPMLogClientTardy, 0, 1);
-			// tardy equates to approval
+			if (fMachineState == kIOPM_OurChangeTellClientsPowerDown)
+			{
+				// tardy equates to veto
+				fDoNotPowerDown = true;
+			}
 			done = true;
             break;
 
@@ -4866,11 +4837,6 @@ IOReturn IOService::cancelPowerChange ( unsigned long refcon )
         return kIOReturnSuccess;
     }
 
-    OSString * name = IOCopyLogNameForPID(proc_selfpid());
-    PM_ERROR("PM notification cancel (%s)\n", name ? name->getCStringNoCopy() : "");
-    if (name)
-        name->release();
-
 	request = acquirePMRequest( this, kIOPMRequestTypeCancelPowerChange );
 	if (!request)
 	{
@@ -5392,6 +5358,11 @@ bool IOService::servicePMRequest( IOPMRequest * request, IOPMWorkQueue * queue )
 
 			case kIOPM_OurChangeTellClientsPowerDown:
 				// our change, was it vetoed?
+				if (fDesiredPowerState > fHeadNoteState)
+				{
+					PM_DEBUG("%s: idle cancel\n", fName);
+					fDoNotPowerDown = true;
+				}
 				if (!fDoNotPowerDown)
 				{
 					// no, we can continue
@@ -5399,8 +5370,6 @@ bool IOService::servicePMRequest( IOPMRequest * request, IOPMWorkQueue * queue )
 				}
 				else
 				{
-					OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
-					PM_ERROR("%s: idle cancel\n", fName);
 					// yes, rescind the warning
 					tellNoChangeDown(fHeadNoteState);
 					// mark the change note un-actioned
@@ -5411,25 +5380,7 @@ bool IOService::servicePMRequest( IOPMRequest * request, IOPMWorkQueue * queue )
 				break;
 
 			case kIOPM_OurChangeTellPriorityClientsPowerDown:
-				// our change, should it be acted on still?
-#if SUPPORT_IDLE_CANCEL
-				if (fDoNotPowerDown)
-				{
-					OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, fMachineState);
-					PM_ERROR("%s: idle revert\n", fName);
-					// no, tell clients we're back in the old state
-					tellChangeUp(fCurrentPowerState);
-					// mark the change note un-actioned
-					fHeadNoteFlags |= IOPMNotDone;
-					// and we're done
-					all_done();
-				}
-				else
-#endif
-				{
-					// yes, we can continue
-					OurChangeTellPriorityClientsPowerDown();  
-				}
+				OurChangeTellPriorityClientsPowerDown();  
 				break;
 
 			case kIOPM_OurChangeNotifyInterestedDriversWillChange:
@@ -5592,18 +5543,13 @@ void IOService::executePMRequest( IOPMRequest * request )
 
 				if (request->fArg1)
 				{
-					// Power rise from activity tickle.
-                    unsigned long ticklePowerState = (unsigned long) request->fArg0;
-                    if ((fDeviceDesire < ticklePowerState) &&
-                        (ticklePowerState < fNumberOfPowerStates))
-                    {
+					// power rise
+					if (fDeviceDesire < (unsigned long) request->fArg0)
 						setDeviceDesire = true;
-                        fIdleTimerMinPowerState = ticklePowerState;
-                    }
-                }
-				else if (fDeviceDesire > fIdleTimerMinPowerState)
+				}
+				else if (fDeviceDesire)
 				{
-					// Power drop from idle timer expiration.
+					// power drop and deviceDesire is not zero
 					request->fArg0 = (void *) (fDeviceDesire - 1);
 					setDeviceDesire = true;
 				}
@@ -5701,20 +5647,6 @@ bool IOService::servicePMReplyQueue( IOPMRequest * request, IOPMRequestQueue * q
 			handleInterestChanged( request );
 			more = true;
 			break;
-
-#if SUPPORT_IDLE_CANCEL
-		case kIOPMRequestTypeIdleCancel:
-			if ((fMachineState == kIOPM_OurChangeTellClientsPowerDown) 
-			 || (fMachineState == kIOPM_OurChangeTellPriorityClientsPowerDown))
-			{
-				OUR_PMLog(kPMLogIdleCancel, (uintptr_t) this, 0);
-				fDoNotPowerDown = true;
-				if (fMachineState == kIOPM_OurChangeTellPriorityClientsPowerDown)
-					cleanClientResponses(false);
-				more = true;
-			}
-			break;
-#endif
 
 		default:
 			IOPanic("servicePMReplyQueue: unknown reply type");

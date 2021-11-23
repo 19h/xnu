@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1993-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 1993-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -35,7 +35,6 @@
 #include <kern/processor.h>
 #include <kern/etimer.h>
 #include <kern/timer_call.h>
-#include <kern/timer_queue.h>
 #include <kern/call_entry.h>
 
 #include <sys/kdebug.h>
@@ -46,13 +45,27 @@
 
 decl_simple_lock_data(static,timer_call_lock)
 
+static void
+timer_call_interrupt(
+	uint64_t			timestamp);
+
 #define qe(x)		((queue_entry_t)(x))
 #define TC(x)		((timer_call_t)(x))
 
 void
 timer_call_initialize(void)
 {
+	spl_t				s;
+
 	simple_lock_init(&timer_call_lock, 0);
+
+	s = splclock();
+	simple_lock(&timer_call_lock);
+
+	clock_set_timer_func((clock_timer_func_t)timer_call_interrupt);
+
+	simple_unlock(&timer_call_lock);
+	splx(s);
 }
 
 void
@@ -64,205 +77,224 @@ timer_call_setup(
 	call_entry_setup(call, func, param0);
 }
 
-__inline__ queue_t
-call_entry_enqueue_deadline(
-	call_entry_t		entry,
-	queue_t				queue,
-	uint64_t			deadline)
+static __inline__
+void
+_delayed_call_enqueue(
+	queue_t					queue,
+	timer_call_t			call)
 {
-	queue_t			old_queue = entry->queue;
 	timer_call_t	current;
 
-	if (old_queue != queue || entry->deadline < deadline) {
-		if (old_queue != queue)
-			current = TC(queue_first(queue));
-		else
-			current = TC(queue_next(qe(entry)));
+	current = TC(queue_first(queue));
 
-		if (old_queue != NULL)
-			(void)remque(qe(entry));
-
-		while (TRUE) {
-			if (	queue_end(queue, qe(current))		||
-					deadline < current->deadline		) {
-				current = TC(queue_prev(qe(current)));
-				break;
-			}
-
-			current = TC(queue_next(qe(current)));
-		}
-
-		insque(qe(entry), qe(current));
-	}
-	else
-	if (deadline < entry->deadline) {
-		current = TC(queue_prev(qe(entry)));
-
-		(void)remque(qe(entry));
-
-		while (TRUE) {
-			if (	queue_end(queue, qe(current))		||
-					current->deadline <= deadline		) {
-				break;
-			}
-
+	while (TRUE) {
+		if (	queue_end(queue, qe(current))			||
+				call->deadline < current->deadline		) {
 			current = TC(queue_prev(qe(current)));
+			break;
 		}
 
-		insque(qe(entry), qe(current));
+		current = TC(queue_next(qe(current)));
 	}
 
-	entry->queue = queue;
-	entry->deadline = deadline;
+	insque(qe(call), qe(current));
 
-	return (old_queue);
+	call->state = DELAYED;
 }
 
-__inline__ queue_t
-call_entry_enqueue_tail(
-	call_entry_t		entry,
-	queue_t				queue)
+static __inline__
+void
+_delayed_call_dequeue(
+	timer_call_t			call)
 {
-	queue_t			old_queue = entry->queue;
+	(void)remque(qe(call));
 
-	if (old_queue != NULL)
-		(void)remque(qe(entry));
-
-	enqueue_tail(queue, qe(entry));
-
-	entry->queue = queue;
-
-	return (old_queue);
+	call->state = IDLE;
 }
 
-__inline__ queue_t
-call_entry_dequeue(
-	call_entry_t		entry)
+static __inline__
+void
+_set_delayed_call_timer(
+	timer_call_t			call)
 {
-	queue_t			old_queue = entry->queue;
-
-	if (old_queue != NULL)
-		(void)remque(qe(entry));
-
-	entry->queue = NULL;
-
-	return (old_queue);
+	etimer_set_deadline(call->deadline);
 }
 
 boolean_t
 timer_call_enter(
-	timer_call_t		call,
-	uint64_t			deadline)
+	timer_call_t			call,
+	uint64_t				deadline)
 {
-	queue_t			queue, old_queue;
+	boolean_t		result = TRUE;
+	queue_t			queue;
 	spl_t			s;
 
 	s = splclock();
 	simple_lock(&timer_call_lock);
 
-	queue = timer_queue_assign(deadline);
+	if (call->state == DELAYED)
+		_delayed_call_dequeue(call);
+	else
+		result = FALSE;
 
-	old_queue = call_entry_enqueue_deadline(call, queue, deadline);
+	call->param1	= NULL;
+	call->deadline	= deadline;
 
-	call->param1 = NULL;
+	queue = &PROCESSOR_DATA(current_processor(), timer_call_queue);
+
+	_delayed_call_enqueue(queue, call);
+
+	if (queue_first(queue) == qe(call))
+		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);
 	splx(s);
 
-	return (old_queue != NULL);
+	return (result);
 }
 
 boolean_t
 timer_call_enter1(
-	timer_call_t		call,
-	timer_call_param_t	param1,
-	uint64_t			deadline)
+	timer_call_t			call,
+	timer_call_param_t		param1,
+	uint64_t				deadline)
 {
-	queue_t			queue, old_queue;
+	boolean_t		result = TRUE;
+	queue_t			queue;
 	spl_t			s;
 
 	s = splclock();
 	simple_lock(&timer_call_lock);
 
-	queue = timer_queue_assign(deadline);
+	if (call->state == DELAYED)
+		_delayed_call_dequeue(call);
+	else
+		result = FALSE;
 
-	old_queue = call_entry_enqueue_deadline(call, queue, deadline);
+	call->param1	= param1;
+	call->deadline	= deadline;
 
-	call->param1 = param1;
+	queue = &PROCESSOR_DATA(current_processor(), timer_call_queue);
+
+	_delayed_call_enqueue(queue, call);
+
+	if (queue_first(queue) == qe(call))
+		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);
 	splx(s);
 
-	return (old_queue != NULL);
+	return (result);
 }
 
 boolean_t
 timer_call_cancel(
-	timer_call_t		call)
+	timer_call_t			call)
 {
-	queue_t			old_queue;
+	boolean_t		result = TRUE;
 	spl_t			s;
 
 	s = splclock();
 	simple_lock(&timer_call_lock);
 
-	old_queue = call_entry_dequeue(call);
+	if (call->state == DELAYED) {
+		queue_t			queue = &PROCESSOR_DATA(current_processor(), timer_call_queue);
 
-	if (old_queue != NULL) {
-		if (!queue_empty(old_queue))
-			timer_queue_cancel(old_queue, call->deadline, TC(queue_first(old_queue))->deadline);
+		if (queue_first(queue) == qe(call)) {
+			_delayed_call_dequeue(call);
+
+			if (!queue_empty(queue))
+				_set_delayed_call_timer((timer_call_t)queue_first(queue));
+		}
 		else
-			timer_queue_cancel(old_queue, call->deadline, UINT64_MAX);
+			_delayed_call_dequeue(call);
+	}
+	else
+		result = FALSE;
+
+	simple_unlock(&timer_call_lock);
+	splx(s);
+
+	return (result);
+}
+
+boolean_t
+timer_call_is_delayed(
+	timer_call_t			call,
+	uint64_t				*deadline)
+{
+	boolean_t		result = FALSE;
+	spl_t			s;
+
+	s = splclock();
+	simple_lock(&timer_call_lock);
+
+	if (call->state == DELAYED) {
+		if (deadline != NULL)
+			*deadline = call->deadline;
+		result = TRUE;
 	}
 
 	simple_unlock(&timer_call_lock);
 	splx(s);
 
-	return (old_queue != NULL);
+	return (result);
 }
 
-void
-timer_queue_shutdown(
-	queue_t			queue)
-{
-	timer_call_t	call;
-	queue_t			new_queue;
-	spl_t			s;
+/*
+ * Called at splclock.
+ */
 
-	s = splclock();
+void
+timer_call_shutdown(
+	processor_t			processor)
+{
+	timer_call_t		call;
+	queue_t				queue, myqueue;
+
+	assert(processor != current_processor());
+
+	queue = &PROCESSOR_DATA(processor, timer_call_queue);
+	myqueue = &PROCESSOR_DATA(current_processor(), timer_call_queue);
+
 	simple_lock(&timer_call_lock);
 
 	call = TC(queue_first(queue));
 
 	while (!queue_end(queue, qe(call))) {
-		new_queue = timer_queue_assign(call->deadline);
+		_delayed_call_dequeue(call);
 
-		call_entry_enqueue_deadline(call, new_queue, call->deadline);
+		_delayed_call_enqueue(myqueue, call);
 
 		call = TC(queue_first(queue));
 	}
 
+	call = TC(queue_first(myqueue));
+
+	if (!queue_end(myqueue, qe(call)))
+		_set_delayed_call_timer(call);
+
 	simple_unlock(&timer_call_lock);
-	splx(s);
 }
 
-uint64_t
-timer_queue_expire(
-	queue_t			queue,
-	uint64_t		deadline)
+static void
+timer_call_interrupt(uint64_t timestamp)
 {
-	timer_call_t	call;
+	timer_call_t		call;
+	queue_t				queue;
 
 	simple_lock(&timer_call_lock);
+
+	queue = &PROCESSOR_DATA(current_processor(), timer_call_queue);
 
 	call = TC(queue_first(queue));
 
 	while (!queue_end(queue, qe(call))) {
-		if (call->deadline <= deadline) {
+		if (call->deadline <= timestamp) {
 			timer_call_func_t		func;
 			timer_call_param_t		param0, param1;
 
-			call_entry_dequeue(call);
+			_delayed_call_dequeue(call);
 
 			func = call->func;
 			param0 = call->param0;
@@ -299,19 +331,14 @@ timer_queue_expire(
 					      (unsigned int)param1, 0, 0);
 
 			simple_lock(&timer_call_lock);
-		}
-		else
+		} else
 			break;
 
 		call = TC(queue_first(queue));
 	}
 
 	if (!queue_end(queue, qe(call)))
-		deadline = call->deadline;
-	else
-		deadline = UINT64_MAX;
+		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);
-
-	return (deadline);
 }

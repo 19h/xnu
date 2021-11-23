@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -165,15 +165,15 @@ thread_quantum_expire(
 	/*
 	 *	Context switch check.
 	 */
-	if ((preempt = csw_check(processor)) != AST_NONE)
+	if ((preempt = csw_check(thread, processor)) != AST_NONE)
 		ast_on(preempt);
 	else {
 		processor_set_t		pset = processor->processor_set;
 
 		pset_lock(pset);
 
-		pset_pri_hint(pset, processor, processor->current_pri);
-		pset_count_hint(pset, processor, processor->runq.count);
+		pset_hint_low(pset, processor);
+		pset_hint_high(pset, processor);
 
 		pset_unlock(pset);
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -34,12 +34,11 @@
 #include <i386/vmx/vmx_cpu.h>
 #include <i386/acpi.h>
 #include <i386/fpu.h>
-#include <i386/lapic.h>
 #include <i386/mp.h>
 #include <i386/mp_desc.h>
 #include <i386/serial_io.h>
+#include <i386/hpet.h>
 #include <i386/machine_check.h>
-#include <i386/pmCPU.h>
 
 #include <kern/cpu_data.h>
 #include <console/serial_protos.h>
@@ -136,23 +135,9 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	acpi_hibernate_callback_data_t data;
 	boolean_t did_hibernate;
 #endif
-	unsigned int	cpu;
-	kern_return_t	rc;
-	unsigned int	my_cpu;
 
 	kprintf("acpi_sleep_kernel hib=%d\n",
 			current_cpu_datap()->cpu_hibernate);
-
-	/* Geta ll CPUs to be in the "off" state */
-	my_cpu = cpu_number();
-	for (cpu = 0; cpu < real_ncpus; cpu += 1) {
-	    	if (cpu == my_cpu)
-			continue;
-		rc = pmCPUExitHaltToOff(cpu);
-		if (rc != KERN_SUCCESS)
-		    panic("Error %d trying to transition CPU %d to OFF",
-			  rc, cpu);
-	}
 
 	/* shutdown local APIC before passing control to BIOS */
 	lapic_shutdown();
@@ -162,8 +147,8 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	data.refcon = refcon;
 #endif
 
-	/* Save power management timer state */
-	pmTimerSave();
+	/* Save HPET state */
+	hpet_save();
 
 	/* 
 	 * Turn off VT, otherwise switching to legacy mode will fail
@@ -227,12 +212,6 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	/* set up PAT following boot processor power up */
 	pat_init();
 
-	/*
-	 * Go through all of the CPUs and mark them as requiring
-	 * a full restart.
-	 */
-	pmMarkAllCPUsOff();
-
 	/* let the realtime clock reset */
 	rtc_sleep_wakeup(acpi_sleep_abstime);
 
@@ -241,13 +220,10 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 
 	/* re-enable and re-init local apic */
 	if (lapic_probe())
-		lapic_configure();
+		lapic_init();
 
-	/* Restore power management register state */
-	pmCPUMarkRunning(current_cpu_datap());
-
-	/* Restore power management timer state */
-	pmTimerRestore();
+	/* Restore HPET state */
+	hpet_restore();
 
 	/* Restart tick interrupts from the LAPIC timer */
 	rtc_lapic_start_ticking();

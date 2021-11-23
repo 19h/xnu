@@ -279,7 +279,6 @@ ipflow_reap(
 	LIST_REMOVE(ipf, ipf_next);
 	ipflow_addstats(ipf);
 	rtfree(ipf->ipf_ro.ro_rt);
-	ipf->ipf_ro.ro_rt = NULL;
 	return ipf;
 }
 /* note: called under the ip_mutex lock */
@@ -345,7 +344,6 @@ ipflow_create(
 		LIST_REMOVE(ipf, ipf_next);
 		ipflow_addstats(ipf);
 		rtfree(ipf->ipf_ro.ro_rt);
-		ipf->ipf_ro.ro_rt = NULL;
 		ipf->ipf_uses = ipf->ipf_last_uses = 0;
 		ipf->ipf_errors = ipf->ipf_dropped = 0;
 	}

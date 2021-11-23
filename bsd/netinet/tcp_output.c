@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -717,7 +717,7 @@ after_sack_rexmit:
 	 * after the retransmission timer has been turned off.  Make sure
 	 * that the retransmission timer is set.
 	 */
-	if (tp->sack_enable && (tp->t_state >= TCPS_ESTABLISHED) && SEQ_GT(tp->snd_max, tp->snd_una) &&
+	if (tp->sack_enable && SEQ_GT(tp->snd_max, tp->snd_una) &&
 		tp->t_timer[TCPT_REXMT] == 0 &&
 	    tp->t_timer[TCPT_PERSIST] == 0) {
 			tp->t_timer[TCPT_REXMT] = tp->t_rxtcur;
@@ -1199,9 +1199,6 @@ send:
 #if CONFIG_MACF_NET
 	mac_mbuf_label_associate_inpcb(tp->t_inpcb, m);
 #endif
-#if CONFIG_IP_EDGEHOLE
-	ip_edgehole_mbuf_tag(tp->t_inpcb, m);
-#endif
 #if INET6
 	if (isipv6) {
 		ip6 = mtod(m, struct ip6_hdr *);
@@ -1638,13 +1635,6 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	int error = 0;
 	boolean_t chain;
 	boolean_t unlocked = FALSE;
-	struct inpcb *inp = tp->t_inpcb;
-	struct ip_out_args ipoa;
-
-	/* If socket was bound to an ifindex, tell ip_output about it */
-	ipoa.ipoa_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
-	    inp->inp_boundif : IFSCOPE_NONE;
-	flags |= IP_OUTARGS;
 
 	/* Make sure ACK/DELACK conditions are cleared before
 	 * we unlock the socket.
@@ -1662,7 +1652,7 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			unlocked = TRUE;
 			socket_unlock(so, 0);
 	}
-	
+
 	/*
 	 * Don't send down a chain of packets when:
 	 * - TCP chaining is disabled
@@ -1698,8 +1688,13 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			 */
 			cnt = 0;
 		}
-		error = ip_output_list(pkt, cnt, opt, &inp->inp_route,
-		    flags, 0, &ipoa);
+#if CONFIG_FORCE_OUT_IFP
+		error = ip_output_list(pkt, cnt, opt, &tp->t_inpcb->inp_route,
+		    flags, 0, tp->t_inpcb->pdp_ifp);
+#else
+		error = ip_output_list(pkt, cnt, opt, &tp->t_inpcb->inp_route,
+		    flags, 0, NULL);
+#endif
 		if (chain || error) {
 			/*
 			 * If we sent down a chain then we are done since

@@ -50,12 +50,9 @@
 #include <sys/types.h>
 #include <sys/ucred.h>
 #include <sys/uio.h>
-#include "tests.h"
-
-#if !TARGET_OS_EMBEDDED
 #include <XILog/XILog.h>
-#endif
 
+#include "tests.h"
 
 
 /* our table of tests to run  */
@@ -135,13 +132,12 @@ int main( int argc, const char * argv[] )
 	struct stat		my_stat_buf;
 	char			my_buffer[64];
 	/* vars for XILog */
-#if !TARGET_OS_EMBEDDED
 	XILogRef		logRef;
 	char			*logPath = "";
 	char			*config = NULL;
 	int				echo = 0;
 	int				xml = 0;
-#endif
+	
 	sranddev( );				/* set up seed for our random name generator */
 	g_cmd_namep = argv[0];
 	
@@ -227,13 +223,12 @@ int main( int argc, const char * argv[] )
 			g_skip_setuid_tests = 1;
 			continue;
 		}
-#if !TARGET_OS_EMBEDDED	
 		if ( strcmp( argv[i], "-x" ) == 0 ||
 			 strcmp( argv[i], "-xilog" ) == 0 ) {
 			g_xilog_active = 1;
 			continue;
 		}
-#endif
+
 		printf( "invalid argument \"%s\" \n", argv[i] );
 		usage( );
 	}
@@ -258,7 +253,7 @@ int main( int argc, const char * argv[] )
 		list_all_tests( );
 		return 0;
 	}
-#if !TARGET_OS_EMBEDDED
+
 	if (g_xilog_active == 1) {	
 		logRef = XILogOpenLogExtended( logPath, "xnu_quick_test", "com.apple.coreos", 
 										config, xml, echo, NULL, "ResultOwner", 
@@ -268,7 +263,6 @@ int main( int argc, const char * argv[] )
 			exit(-1);
 		}
 	}
-#endif
 	
 	/* build a test target directory that we use as our path to create any test
 	 * files and directories.
@@ -294,38 +288,30 @@ int main( int argc, const char * argv[] )
 		my_testp = &g_tests[i];
 		if ( my_testp->test_run_it == 0 || my_testp->test_routine == NULL )
 			continue;
-#if !TARGET_OS_EMBEDDED	
 		if (g_xilog_active == 1) {	
 			XILogBeginTestCase( logRef, my_testp->test_infop, my_testp->test_infop );	
 			XILogMsg( "test #%d - %s \n", (i + 1), my_testp->test_infop );
 		}
-#endif
 		printf( "test #%d - %s \n", (i + 1), my_testp->test_infop );
 		my_err = my_testp->test_routine( my_testp->test_input );
 		if ( my_err != 0 ) {
 			printf("\t--> FAILED \n");
-#if !TARGET_OS_EMBEDDED	
 			if (g_xilog_active == 1) {	
 				XILogMsg("SysCall %s failed", my_testp->test_infop);
 				XILogErr("Result %d", my_err);
 			}
-#endif
 			my_failures++;
 			if ( my_failures > g_max_failures ) {
-#if !TARGET_OS_EMBEDDED	
 				if (g_xilog_active == 1) {	
 					XILogEndTestCase( logRef, kXILogTestPassOnErrorLevel );
 				}
-#endif
 				printf( "\n too many failures - test aborted \n" );
 				goto exit_this_routine;
 			}
 		}
-#if !TARGET_OS_EMBEDDED	
 		if (g_xilog_active == 1) {	
 			XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
 		}
-#endif
 	}
 	
 exit_this_routine:
@@ -335,11 +321,9 @@ exit_this_routine:
 	/* clean up our test directory */
 	rmdir( &g_target_path[0] );	
 
-#if !TARGET_OS_EMBEDDED	
 	if (g_xilog_active == 1) {	
 		XILogCloseLog(logRef);
 	}
-#endif
 	
     return 0;
 } /* main */
@@ -529,9 +513,7 @@ static void usage( void )
 	printf( "\t -r[un] 1, 3, 10 - 19            # run specific tests.  enter individual test numbers and/or range of numbers.  use -list to list tests.   \n" );
 	printf( "\t -s[kip]                         # skip setuid tests   \n" );
 	printf( "\t -t[arget] TARGET_PATH           # path to directory where tool will create test files.  defaults to \"/tmp/\"   \n" );
-#if !TARGET_OS_EMBEDDED	
 	printf( "\t -x[ilog]                        # use XILog\n");
-#endif
 	printf( "\nexamples:  \n" );
 	printf( "--- Place all test files and directories at the root of volume \"test_vol\" --- \n" );
 	printf( "%s -t /Volumes/test_vol/ \n", (my_ptr != NULL) ? my_ptr : g_cmd_namep );

@@ -2145,9 +2145,6 @@ hibernate_write_image(void)
                uncompressedSize ? ((int) ((compressedSize * 100ULL) / uncompressedSize)) : 0,
                sum1, sum2);
 
-    if (vars->fileVars->io)
-        (void) IOHibernatePollerIODone(vars->fileVars, false);
-
     if (pollerOpen)
         IOHibernatePollerClose(vars->fileVars, kIOPolledBeforeSleepState);
 

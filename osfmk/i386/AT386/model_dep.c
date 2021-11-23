@@ -142,8 +142,6 @@ typedef struct _cframe_t {
 static unsigned panic_io_port;
 static unsigned	commit_paniclog_to_nvram;
 
-int debug_boot_arg;
-
 void
 machine_startup(void)
 {
@@ -154,23 +152,22 @@ machine_startup(void)
             halt_in_debugger = halt_in_debugger ? 0 : 1;
 #endif
 
-	if (PE_parse_boot_argn("debug", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("debug", &boot_arg)) {
 		if (boot_arg & DB_HALT) halt_in_debugger=1;
 		if (boot_arg & DB_PRT) disable_debug_output=FALSE; 
 		if (boot_arg & DB_SLOG) systemLogDiags=TRUE; 
 		if (boot_arg & DB_NMI) panicDebugging=TRUE; 
-		if (boot_arg & DB_LOG_PI_SCRN) logPanicDataToScreen=TRUE;
-		debug_boot_arg = boot_arg;
+		if (boot_arg & DB_LOG_PI_SCRN) logPanicDataToScreen=TRUE; 
 	}
 
-	if (!PE_parse_boot_argn("nvram_paniclog", &commit_paniclog_to_nvram, sizeof (commit_paniclog_to_nvram)))
+	if (!PE_parse_boot_arg("nvram_paniclog", &commit_paniclog_to_nvram))
 		commit_paniclog_to_nvram = 1;
 
 	/*
 	 * Entering the debugger will put the CPUs into a "safe"
 	 * power mode.
 	 */
-	if (PE_parse_boot_argn("pmsafe_debug", &boot_arg, sizeof (boot_arg)))
+	if (PE_parse_boot_arg("pmsafe_debug", &boot_arg))
 	    pmsafe_debug = boot_arg;
 
 #if NOTYET
@@ -202,25 +199,25 @@ machine_startup(void)
 	}
 #endif /* MACH_KDB */
 
-	if (PE_parse_boot_argn("preempt", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("preempt", &boot_arg)) {
 		default_preemption_rate = boot_arg;
 	}
-	if (PE_parse_boot_argn("unsafe", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("unsafe", &boot_arg)) {
 		max_unsafe_quanta = boot_arg;
 	}
-	if (PE_parse_boot_argn("poll", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("poll", &boot_arg)) {
 		max_poll_quanta = boot_arg;
 	}
-	if (PE_parse_boot_argn("yield", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("yield", &boot_arg)) {
 		sched_poll_yield_shift = boot_arg;
 	}
-	if (PE_parse_boot_argn("idlehalt", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("idlehalt", &boot_arg)) {
 		idlehalt = boot_arg;
 	}
 /* The I/O port to issue a read from, in the event of a panic. Useful for
  * triggering logic analyzers.
  */
-	if (PE_parse_boot_argn("panic_io_port", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("panic_io_port", &boot_arg)) {
 		/*I/O ports range from 0 through 0xFFFF */
 		panic_io_port = boot_arg & 0xffff;
 	}
@@ -717,7 +714,7 @@ Debugger(
 		__asm__ volatile("movl %%ebp, %0" : "=m" (stackptr));
 
 		/* Print backtrace - callee is internally synchronized */
-		panic_i386_backtrace(stackptr, 16, NULL, FALSE, NULL);
+		panic_i386_backtrace(stackptr, 16);
 
 		/* everything should be printed now so copy to NVRAM
 		 */
@@ -728,7 +725,6 @@ Debugger(
 		   */
 		    if (commit_paniclog_to_nvram) {
 			unsigned int bufpos;
-			uintptr_t cr0;
 
                         debug_putc(0);
 
@@ -753,17 +749,8 @@ Debugger(
 			 * since we can subsequently halt the system.
 			 */
 			kprintf("Attempting to commit panic log to NVRAM\n");
-/* The following sequence is a workaround for:
- * <rdar://problem/5915669> SnowLeopard10A67: AppleEFINVRAM should not invoke
- * any routines that use floating point (MMX in this case) when saving panic
- * logs to nvram/flash.
- */
-			cr0 = get_cr0();
-			clear_ts();
-
                         pi_size = PESavePanicInfo((unsigned char *)debug_buf,
 			    pi_size );
-			set_cr0(cr0);
 
 			/* Uncompress in-place, to permit examination of
 			 * the panic log by debuggers.
@@ -952,11 +939,10 @@ panic_print_symbol_name(vm_address_t search)
 #define DUMPFRAMES 32
 #define PBT_TIMEOUT_CYCLES (5 * 1000 * 1000 * 1000ULL)
 void
-panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdump, x86_saved_state_t *regs)
+panic_i386_backtrace(void *_frame, int nframes)
 {
 	cframe_t	*frame = (cframe_t *)_frame;
 	vm_offset_t raddrs[DUMPFRAMES];
-	vm_offset_t PC = 0;
 	int frame_index;
 	volatile uint32_t *ppbtcnt = &pbtcnt;
 	uint64_t bt_tsc_timeout;
@@ -971,27 +957,10 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 		pbtcpu = cpu_number();
 	}
 
-	PE_parse_boot_argn("keepsyms", &keepsyms, sizeof (keepsyms));
+	PE_parse_boot_arg("keepsyms", &keepsyms);
 
-	if (msg != NULL) {
-		kdb_printf(msg);
-	}
-
-	if ((regdump == TRUE) && (regs != NULL)) {
-		x86_saved_state32_t	*ss32p = saved_state32(regs);
-
-		kdb_printf(
-		    "EAX: 0x%08x, EBX: 0x%08x, ECX: 0x%08x, EDX: 0x%08x\n"
-		    "CR2: 0x%08x, EBP: 0x%08x, ESI: 0x%08x, EDI: 0x%08x\n"
-		    "EFL: 0x%08x, EIP: 0x%08x, CS:  0x%08x, DS:  0x%08x\n",
-		    ss32p->eax,ss32p->ebx,ss32p->ecx,ss32p->edx,
-		    ss32p->cr2,ss32p->ebp,ss32p->esi,ss32p->edi,
-		    ss32p->efl,ss32p->eip,ss32p->cs, ss32p->ds);
-		PC = ss32p->eip;
-	}
-
-	kdb_printf("Backtrace (CPU %d), "
-		"Frame : Return Address (4 potential args on stack)\n", cpu_number());
+	kdb_printf("Backtrace, "
+	    "Format - Frame : Return Address (4 potential args on stack) \n");
 
 	for (frame_index = 0; frame_index < nframes; frame_index++) {
 		vm_offset_t curframep = (vm_offset_t) frame;
@@ -1051,13 +1020,7 @@ out:
 	if (frame_index)
 		kmod_dump((vm_offset_t *)&raddrs[0], frame_index);
 
-	if (PC != 0)
-		kmod_dump(&PC, 1);
-
 	panic_display_system_configuration();
-	panic_display_zprint();
-	dump_kext_info(&kdb_log);
-
 	/* Release print backtrace lock, to permit other callers in the
 	 * event of panics on multiple processors.
 	 */

@@ -52,8 +52,7 @@ enum {
     UART_LCR = 3,  /* line control register         */
     UART_MCR = 4,  /* modem control register        */
     UART_LSR = 5,  /* line status register          */
-    UART_MSR = 6,  /* modem status register         */
-    UART_SCR = 7   /* scratch register              */
+    UART_MSR = 6   /* modem status register         */
 };
 
 enum {
@@ -91,12 +90,14 @@ static int uart_initted = 0;   /* 1 if init'ed */
 static int
 uart_probe( void )
 {
-    /* Verify that the Scratch Register is accessible */
+    /* Verify that the Divisor Register is accessible */
 
-    WRITE( SCR, 0x5a );
-    if (READ(SCR) != 0x5a) return 0;
-    WRITE( SCR, 0xa5 );
-    if (READ(SCR) != 0xa5) return 0;
+    WRITE( LCR, UART_LCR_DLAB );
+    WRITE( DLL, 0x5a );
+    if (READ(DLL) != 0x5a) return 0;
+    WRITE( DLL, 0xa5 );
+    if (READ(DLL) != 0xa5) return 0;
+    WRITE( LCR, 0x00 );
     return 1;
 }
 
@@ -176,7 +177,7 @@ int serial_init( void )
 
     /* Set baud rate - use the supplied boot-arg if available */
 
-    if (PE_parse_boot_argn("serialbaud", &serial_baud_rate, sizeof (serial_baud_rate)))
+    if (PE_parse_boot_arg("serialbaud", &serial_baud_rate))
     {
 	    /* Valid divisor? */
 	    if (!((UART_CLOCK / 16) % serial_baud_rate)) {

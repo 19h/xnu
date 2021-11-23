@@ -359,17 +359,7 @@ enum {
 #define kIOPMPSLegacyBatteryInfoKey                 "LegacyBatteryInfo"
 #define kIOPMPSBatteryHealthKey                     "BatteryHealth"
 #define kIOPMPSHealthConfidenceKey                  "HealthConfidence"
-#define kIOPMPSCapacityEstimatedKey	                "CapacityEstimated"
-#define kIOPMPSBatteryChargeStatusKey               "ChargeStatus"
-#define kIOPMPSBatteryTemperatureKey                "Temperature"
-
-// kIOPMBatteryChargeStatusKey may have one of the following values, or may have
-// no value. If kIOPMBatteryChargeStatusKey has a NULL value (or no value) associated with it
-// then charge is proceeding normally. If one of these battery charge status reasons is listed,
-// then the charge may have been interrupted.
-#define kIOPMBatteryChargeStatusTooHot              "HighTemperature"
-#define kIOPMBatteryChargeStatusTooCold             "LowTemperature"
-#define kIOPMBatteryChargeStatusGradient            "BatteryTemperatureGradient"
+#define kIOPMPSCapacityEstimatedKey		    "CapacityEstimated"
 
 // Definitions for battery location, in case of multiple batteries.
 // A location of 0 is unspecified
@@ -485,7 +475,6 @@ enum {
 #define kIOPMSettingDisplaySleepUsesDimKey          "Display Sleep Uses Dim"
 #define kIOPMSettingTimeZoneOffsetKey               "TimeZoneOffsetSeconds"
 #define kIOPMSettingMobileMotionModuleKey           "MobileMotionModule"
-#define kIOPMSettingGraphicsSwitchKey               "GPUSwitch"
 
 // Setting controlling drivers can register to receive scheduled wake data
 // Either in "CF seconds" type, or structured calendar data in a formatted

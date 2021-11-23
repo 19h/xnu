@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -729,15 +729,15 @@ tcp_timers(tp, timer)
 		 * growth is 2 mss.  We don't allow the threshhold
 		 * to go below this.)
 		 */
-		if (tp->t_state >=  TCPS_ESTABLISHED) {
-			u_int win = min(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
-			if (win < 2)
-				win = 2;
-			tp->snd_cwnd = tp->t_maxseg;
-			tp->snd_ssthresh = win * tp->t_maxseg;
-			tp->t_bytes_acked = 0;
-			tp->t_dupacks = 0;
-			tp->t_unacksegs = 0;
+		{
+		u_int win = min(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
+		if (win < 2)
+			win = 2;
+		tp->snd_cwnd = tp->t_maxseg;
+		tp->snd_ssthresh = win * tp->t_maxseg;
+		tp->t_bytes_acked = 0;
+		tp->t_dupacks = 0;
+		tp->t_unacksegs = 0;
 		}
 		EXIT_FASTRECOVERY(tp);
 		(void) tcp_output(tp);
@@ -800,16 +800,9 @@ tcp_timers(tp, timer)
 			tcpstat.tcps_keepprobe++;
 			t_template = tcp_maketemplate(tp);
 			if (t_template) {
-				unsigned int ifscope;
-
-				if (tp->t_inpcb->inp_flags & INP_BOUND_IF)
-					ifscope = tp->t_inpcb->inp_boundif;
-				else
-					ifscope = IFSCOPE_NONE;
-
 				tcp_respond(tp, t_template->tt_ipgen,
 				    &t_template->tt_t, (struct mbuf *)NULL,
-				    tp->rcv_nxt, tp->snd_una - 1, 0, ifscope);
+				    tp->rcv_nxt, tp->snd_una - 1, 0, NULL);
 				(void) m_free(dtom(t_template));
 			}
 			tp->t_timer[TCPT_KEEP] = tcp_keepintvl;

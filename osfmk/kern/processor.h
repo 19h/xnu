@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -84,8 +84,10 @@
 struct processor_set {
 	queue_head_t		active_queue;	/* active processors */
 	queue_head_t		idle_queue;		/* idle processors */
+	int					idle_count;
 
-	processor_t			low_pri, low_count;
+	processor_t			low_hint;
+	processor_t			high_hint;
 
 	int					processor_count;
 
@@ -127,7 +129,6 @@ struct processor {
 	processor_set_t		processor_set;	/* assigned set */
 
 	int					current_pri;	/* priority of current thread */
-	int					cpu_num;		/* platform numeric id */
 
 	timer_call_data_t	quantum_timer;	/* timer for quantum expiration */
 	uint64_t			quantum_end;	/* time when current quantum ends */
@@ -149,9 +150,7 @@ extern processor_t		processor_list;
 extern unsigned int		processor_count;
 decl_simple_lock_data(extern,processor_list_lock)
 
-extern uint32_t			processor_avail_count;
-
-extern processor_t		master_processor;
+extern processor_t	master_processor;
 
 /*
  *	Processor state is accessed by locking the scheduling lock
@@ -160,10 +159,9 @@ extern processor_t		master_processor;
 #define PROCESSOR_OFF_LINE		0	/* Not available */
 #define PROCESSOR_SHUTDOWN		1	/* Going off-line */
 #define PROCESSOR_START			2	/* Being started */
-#define PROCESSOR_INACTIVE		3	/* Inactive (unavailable) */
-#define	PROCESSOR_IDLE			4	/* Idle (available) */
-#define PROCESSOR_DISPATCHING	5	/* Dispatching (idle -> active) */
-#define	PROCESSOR_RUNNING		6	/* Normal execution */
+#define	PROCESSOR_IDLE			3	/* Idle */
+#define PROCESSOR_DISPATCHING	4	/* Dispatching (idle -> running) */
+#define	PROCESSOR_RUNNING		5	/* Normal execution */
 
 extern processor_t	current_processor(void);
 
@@ -182,33 +180,35 @@ extern processor_t	cpu_to_processor(
 
 /* Update hints */
 
-#define pset_pri_hint(ps, p, pri)		\
-MACRO_BEGIN												\
-	if ((p) != (ps)->low_pri) {							\
-		if ((pri) < (ps)->low_pri->current_pri)			\
-			(ps)->low_pri = (p);						\
-		else											\
-		if ((ps)->low_pri->state < PROCESSOR_IDLE)		\
-			(ps)->low_pri = (p);						\
-	}													\
+#define pset_hint_low(ps, p)	\
+MACRO_BEGIN														\
+	if ((ps)->low_hint != PROCESSOR_NULL) {						\
+		if ((p) != (ps)->low_hint) {							\
+			if ((p)->runq.count < (ps)->low_hint->runq.count)	\
+				(ps)->low_hint = (p);							\
+		}														\
+	}															\
+	else														\
+		(ps)->low_hint = (p);									\
 MACRO_END
 
-#define pset_count_hint(ps, p, cnt)		\
-MACRO_BEGIN												\
-	if ((p) != (ps)->low_count) {						\
-		if ((cnt) < (ps)->low_count->runq.count)		\
-			(ps)->low_count = (p);						\
-		else											\
-		if ((ps)->low_count->state < PROCESSOR_IDLE)	\
-			(ps)->low_count = (p);						\
-	}													\
+#define pset_hint_high(ps, p)	\
+MACRO_BEGIN														\
+	if ((ps)->high_hint != PROCESSOR_NULL) {					\
+		if ((p) != (ps)->high_hint) {							\
+			if ((p)->runq.count > (ps)->high_hint->runq.count)	\
+				(ps)->high_hint = (p);							\
+		}														\
+	}															\
+	else														\
+		(ps)->high_hint = (p);									\
 MACRO_END
 
 extern void		processor_bootstrap(void) __attribute__((section("__TEXT, initcode")));
 
 extern void		processor_init(
 					processor_t		processor,
-					int				cpu_num,
+					int				slot_num,
 					processor_set_t	processor_set) __attribute__((section("__TEXT, initcode")));
 
 extern kern_return_t	processor_shutdown(
@@ -236,12 +236,6 @@ extern kern_return_t	processor_info_count(
 #define pset_deallocate(x)
 #define pset_reference(x)
 
-extern void		machine_run_count(
-					uint32_t	count);
-
-extern boolean_t	machine_cpu_is_inactive(
-						int				num);
-
 #else	/* MACH_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
@@ -256,4 +250,9 @@ __END_DECLS
 
 #endif	/* MACH_KERNEL_PRIVATE */
 
+#ifdef	XNU_KERNEL_PRIVATE
+
+extern uint32_t		processor_avail_count;
+
+#endif
 #endif	/* _KERN_PROCESSOR_H_ */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -477,7 +477,11 @@ tcp_respond(
 	tcp_seq ack,
 	tcp_seq seq,
 	int flags,
-	unsigned int ifscope
+#if CONFIG_FORCE_OUT_IFP
+	ifnet_t	ifp
+#else
+	__unused ifnet_t ifp
+#endif
 	)
 {
 	register int tlen;
@@ -492,6 +496,7 @@ tcp_respond(
 	struct ip6_hdr *ip6;
 	int isipv6;
 #endif /* INET6 */
+	int ipflags = 0;
 
 #if INET6
 	isipv6 = IP_VHL_V(((struct ip *)ipgen)->ip_vhl) == 6;
@@ -603,12 +608,6 @@ tcp_respond(
 		mac_netinet_tcp_reply(m);
 	}
 #endif
-	
-#if CONFIG_IP_EDGEHOLE
-	if (tp && tp->t_inpcb)
-		ip_edgehole_mbuf_tag(tp->t_inpcb, m);
-#endif
-	
 	nth->th_seq = htonl(seq);
 	nth->th_ack = htonl(ack);
 	nth->th_x2 = 0;
@@ -649,7 +648,7 @@ tcp_respond(
 #endif
 #if INET6
 	if (isipv6) {
-		(void)ip6_output(m, NULL, ro6, 0, NULL, NULL, 0);
+		(void)ip6_output(m, NULL, ro6, ipflags, NULL, NULL, 0);
 		if (ro6 == &sro6 && ro6->ro_rt) {
 			rtfree(ro6->ro_rt);
 			ro6->ro_rt = NULL;
@@ -657,10 +656,11 @@ tcp_respond(
 	} else
 #endif /* INET6 */
 	{
-		struct ip_out_args ipoa = { ifscope };
-
-		(void) ip_output(m, NULL, ro, IP_OUTARGS, NULL, &ipoa);
-
+#if CONFIG_FORCE_OUT_IFP
+		ifp = (tp && tp->t_inpcb) ? tp->t_inpcb->pdp_ifp :
+			  (ifp && (ifp->if_flags & IFF_POINTOPOINT) != 0) ? ifp : NULL;
+#endif
+		(void) ip_output_list(m, 0, NULL, ro, ipflags, NULL, ifp);
 		if (ro == &sro && ro->ro_rt) {
 			rtfree(ro->ro_rt);
 			ro->ro_rt = NULL;
@@ -717,7 +717,6 @@ tcp_newtcpcb(inp)
 	tp->snd_cwnd = TCP_MAXWIN << TCP_MAX_WINSHIFT;
 	tp->snd_bwnd = TCP_MAXWIN << TCP_MAX_WINSHIFT;
 	tp->snd_ssthresh = TCP_MAXWIN << TCP_MAX_WINSHIFT;
-	tp->snd_ssthresh_prev = TCP_MAXWIN << TCP_MAX_WINSHIFT;
 	tp->t_rcvtime = 0;
 	tp->t_bw_rtttime = 0;
 	/*
@@ -1433,6 +1432,11 @@ tcp6_ctlinput(cmd, sa, d)
 
 #define ISN_BYTES_PER_SECOND 1048576
 
+//PWC - md5 routines cause alignment exceptions.  Need to figure out why.  For now use lame incremental
+// isn.  how's that for not easily guessable!?
+
+int pwc_bogus;
+
 tcp_seq
 tcp_new_isn(tp)
 	struct tcpcb *tp;
@@ -1555,7 +1559,7 @@ tcp_mtudisc(
 			rt = tcp_rtlookup6(inp);
 		else
 #endif /* INET6 */
-		rt = tcp_rtlookup(inp, IFSCOPE_NONE);
+		rt = tcp_rtlookup(inp);
 		if (!rt || !rt->rt_rmx.rmx_mtu) {
 			tp->t_maxopd = tp->t_maxseg =
 #if INET6
@@ -1620,14 +1624,13 @@ tcp_mtudisc(
 
 /*
  * Look-up the routing entry to the peer of this inpcb.  If no route
- * is found and it cannot be allocated then return NULL.  This routine
+ * is found and it cannot be allocated the return NULL.  This routine
  * is called by TCP routines that access the rmx structure and by tcp_mss
  * to get the interface MTU.
  */
 struct rtentry *
-tcp_rtlookup(inp, input_ifscope)
+tcp_rtlookup(inp)
 	struct inpcb *inp;
-	unsigned int input_ifscope;
 {
 	struct route *ro;
 	struct rtentry *rt;
@@ -1643,24 +1646,11 @@ tcp_rtlookup(inp, input_ifscope)
 	if (rt == NULL || !(rt->rt_flags & RTF_UP) || rt->generation_id != route_generation) {
 		/* No route yet, so try to acquire one */
 		if (inp->inp_faddr.s_addr != INADDR_ANY) {
-			unsigned int ifscope;
-
 			ro->ro_dst.sa_family = AF_INET;
 			ro->ro_dst.sa_len = sizeof(struct sockaddr_in);
 			((struct sockaddr_in *) &ro->ro_dst)->sin_addr =
 				inp->inp_faddr;
-
-			/*
-			 * If the socket was bound to an interface, then
-			 * the bound-to-interface takes precedence over
-			 * the inbound interface passed in by the caller
-			 * (if we get here as part of the output path then
-			 * input_ifscope is IFSCOPE_NONE).
-			 */
-			ifscope = (inp->inp_flags & INP_BOUND_IF) ?
-			    inp->inp_boundif : input_ifscope;
-
-			rtalloc_scoped_ign_locked(ro, 0UL, ifscope);
+			rtalloc_ign_locked(ro, 0UL);
 			rt = ro->ro_rt;
 		}
 	}
@@ -1683,15 +1673,6 @@ tcp_rtlookup(inp, input_ifscope)
 		tp->t_flags &= ~TF_PMTUD;
 	else
 		tp->t_flags |= TF_PMTUD;
-
-#ifdef IFEF_NOWINDOWSCALE
-	if (tp->t_state == TCPS_SYN_SENT && rt != NULL && rt->rt_ifp != NULL &&
-		(rt->rt_ifp->if_eflags & IFEF_NOWINDOWSCALE) != 0)
-	{
-		// Timestamps are not enabled on this interface
-		tp->t_flags &= ~(TF_REQ_SCALE);
-	}
-#endif
 
 	return rt;
 }
@@ -1815,7 +1796,7 @@ tcp_gettaocache(inp)
 		rt = tcp_rtlookup6(inp);
 	else
 #endif /* INET6 */
-	rt = tcp_rtlookup(inp, IFSCOPE_NONE);
+	rt = tcp_rtlookup(inp);
 
 	/* Make sure this is a host route and is up. */
 	if (rt == NULL ||

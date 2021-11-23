@@ -146,11 +146,11 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 	if (error || (utf8chars == 0))
 		(void) mac_roman_to_utf8(mdb->drVN, NAME_MAX, &utf8chars, vcb->vcbVN);
 
-	hfsmp->hfs_logBlockSize = BestBlockSizeFit(vcb->blockSize, MAXBSIZE, hfsmp->hfs_logical_block_size);
+	hfsmp->hfs_logBlockSize = BestBlockSizeFit(vcb->blockSize, MAXBSIZE, hfsmp->hfs_phys_block_size);
 	vcb->vcbVBMIOSize = kHFSBlockSize;
 
-	hfsmp->hfs_alt_id_sector = HFS_ALT_SECTOR(hfsmp->hfs_logical_block_size,
-	                                          hfsmp->hfs_logical_block_count);
+	hfsmp->hfs_alt_id_sector = HFS_ALT_SECTOR(hfsmp->hfs_phys_block_size,
+	                                          hfsmp->hfs_phys_block_count);
 
 	bzero(&cndesc, sizeof(cndesc));
 	cndesc.cd_parentcnid = kHFSRootParentID;
@@ -243,6 +243,13 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
       	/* mark the volume dirty (clear clean unmount bit) */
 	vcb->vcbAtrb &=	~kHFSVolumeUnmountedMask;
 
+	/*
+	 * all done with system files so we can unlock now...
+	 */
+	hfs_unlock(VTOC(hfsmp->hfs_allocation_vp));
+	hfs_unlock(VTOC(hfsmp->hfs_catalog_vp));
+	hfs_unlock(VTOC(hfsmp->hfs_extents_vp));
+
     if (error == noErr)
       {
 		error = cat_idlookup(hfsmp, kHFSRootFolderID, 0, NULL, NULL, NULL);
@@ -255,14 +262,6 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
             MarkVCBDirty( vcb );								//	mark VCB dirty so it will be written
           }
       }
-
-	/*
-	 * all done with system files so we can unlock now...
-	 */
-	hfs_unlock(VTOC(hfsmp->hfs_allocation_vp));
-	hfs_unlock(VTOC(hfsmp->hfs_catalog_vp));
-	hfs_unlock(VTOC(hfsmp->hfs_extents_vp));
-
     goto	CmdDone;
 
     //--	Release any resources allocated so far before exiting with an error:
@@ -330,25 +329,11 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 		return (EINVAL);
 
 	/* Make sure we can live with the physical block size. */
-	if ((disksize & (hfsmp->hfs_logical_block_size - 1)) ||
-	    (embeddedOffset & (hfsmp->hfs_logical_block_size - 1)) ||
-	    (blockSize < hfsmp->hfs_logical_block_size)) {
+	if ((disksize & (hfsmp->hfs_phys_block_size - 1)) ||
+	    (embeddedOffset & (hfsmp->hfs_phys_block_size - 1)) ||
+	    (blockSize < hfsmp->hfs_phys_block_size)) {
 		return (ENXIO);
 	}
-
-	/* If allocation block size is less than the physical 
-	 * block size, we assume that the physical block size 
-	 * is same as logical block size.  The physical block 
-	 * size value is used to round down the offsets for 
-	 * reading and writing the primary and alternate volume 
-	 * headers at physical block boundary and will cause 
-	 * problems if it is less than the block size.
-	 */
-	if (blockSize < hfsmp->hfs_physical_block_size) {
-		hfsmp->hfs_physical_block_size = hfsmp->hfs_logical_block_size;
-		hfsmp->hfs_log_per_phys = 1;
-	}
-
 	/*
 	 * The VolumeHeader seems OK: transfer info from it into VCB
 	 * Note - the VCB starts out clear (all zeros)
@@ -392,22 +377,22 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	 * (currently set up from the wrapper MDB) using the
 	 * new blocksize value:
 	 */
-	hfsmp->hfs_logBlockSize = BestBlockSizeFit(vcb->blockSize, MAXBSIZE, hfsmp->hfs_logical_block_size);
+	hfsmp->hfs_logBlockSize = BestBlockSizeFit(vcb->blockSize, MAXBSIZE, hfsmp->hfs_phys_block_size);
 	vcb->vcbVBMIOSize = min(vcb->blockSize, MAXPHYSIO);
 
 	/*
 	 * Validate and initialize the location of the alternate volume header.
 	 */
-	spare_sectors = hfsmp->hfs_logical_block_count -
+	spare_sectors = hfsmp->hfs_phys_block_count -
 	                (((daddr64_t)vcb->totalBlocks * blockSize) /
-	                   hfsmp->hfs_logical_block_size);
+	                   hfsmp->hfs_phys_block_size);
 
-	if (spare_sectors > (daddr64_t)(blockSize / hfsmp->hfs_logical_block_size)) {
+	if (spare_sectors > (blockSize / hfsmp->hfs_phys_block_size)) {
 		hfsmp->hfs_alt_id_sector = 0;  /* partition has grown! */
 	} else {
-		hfsmp->hfs_alt_id_sector = (hfsmp->hfsPlusIOPosOffset / hfsmp->hfs_logical_block_size) +
-					   HFS_ALT_SECTOR(hfsmp->hfs_logical_block_size,
-							  hfsmp->hfs_logical_block_count);
+		hfsmp->hfs_alt_id_sector = (hfsmp->hfsPlusIOPosOffset / hfsmp->hfs_phys_block_size) +
+					   HFS_ALT_SECTOR(hfsmp->hfs_phys_block_size,
+							  hfsmp->hfs_phys_block_count);
 	}
 
 	bzero(&cndesc, sizeof(cndesc));
@@ -425,7 +410,6 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	cndesc.cd_cnid = cnattr.ca_fileid = kHFSExtentsFileID;
 
 	cfork.cf_size    = SWAP_BE64 (vhp->extentsFile.logicalSize);
-	cfork.cf_new_size= 0;
 	cfork.cf_clump   = SWAP_BE32 (vhp->extentsFile.clumpSize);
 	cfork.cf_blocks  = SWAP_BE32 (vhp->extentsFile.totalBlocks);
 	cfork.cf_vblocks = 0;
@@ -439,18 +423,14 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	retval = hfs_getnewvnode(hfsmp, NULL, NULL, &cndesc, 0, &cnattr, &cfork,
 	                         &hfsmp->hfs_extents_vp);
 	if (retval)
-	{
 		goto ErrorExit;
-	}
 	hfsmp->hfs_extents_cp = VTOC(hfsmp->hfs_extents_vp);
 	hfs_unlock(hfsmp->hfs_extents_cp);
 
 	retval = MacToVFSError(BTOpenPath(VTOF(hfsmp->hfs_extents_vp),
 	                                  (KeyCompareProcPtr) CompareExtentKeysPlus));
 	if (retval)
-	{
 		goto ErrorExit;
-	}
 	/*
 	 * Set up Catalog B-tree vnode
 	 */ 
@@ -626,11 +606,9 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 				    
 				mdb_offset = (daddr64_t)((embeddedOffset / blockSize) + HFS_PRI_SECTOR(blockSize));
 
-				retval = (int)buf_meta_bread(hfsmp->hfs_devvp, 
-						HFS_PHYSBLK_ROUNDDOWN(mdb_offset, hfsmp->hfs_log_per_phys),
-						hfsmp->hfs_physical_block_size, cred, &bp);
+				retval = (int)buf_meta_bread(hfsmp->hfs_devvp, mdb_offset, blockSize, cred, &bp);
 				if (retval == 0) {
-					jvhp = (HFSPlusVolumeHeader *)(buf_dataptr(bp) + HFS_PRI_OFFSET(hfsmp->hfs_physical_block_size));
+					jvhp = (HFSPlusVolumeHeader *)(buf_dataptr(bp) + HFS_PRI_OFFSET(blockSize));
 					    
 					if (SWAP_BE16(jvhp->signature) == kHFSPlusSigWord || SWAP_BE16(jvhp->signature) == kHFSXSigWord) {
 						printf ("hfs(3): Journal replay fail.  Writing lastMountVersion as FSK!\n");
@@ -1781,8 +1759,7 @@ hfs_early_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	JournalInfoBlock *jibp;
 	struct buf       *jinfo_bp, *bp;
 	int               sectors_per_fsblock, arg_flags=0, arg_tbufsz=0;
-	int               retval;
-	uint32_t		  blksize = hfsmp->hfs_logical_block_size;
+	int               retval, blksize = hfsmp->hfs_phys_block_size;
 	struct vnode     *devvp;
 	struct hfs_mount_args *args = _args;
 	u_int32_t	  jib_flags;
@@ -1830,7 +1807,7 @@ hfs_early_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 		                      jib_offset + embeddedOffset,
 				      jib_size,
 				      devvp,
-		                      hfsmp->hfs_logical_block_size);
+		                      hfsmp->hfs_phys_block_size);
 
 	    hfsmp->jnl = NULL;
 
@@ -1887,16 +1864,14 @@ hfs_early_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 			if (mdb_offset == 0) {
 				mdb_offset = (daddr64_t)((embeddedOffset / blksize) + HFS_PRI_SECTOR(blksize));
 			}
-			retval = (int)buf_meta_bread(devvp, 
-					HFS_PHYSBLK_ROUNDDOWN(mdb_offset, hfsmp->hfs_log_per_phys),
-					hfsmp->hfs_physical_block_size, cred, &bp);
+			retval = (int)buf_meta_bread(devvp, mdb_offset, blksize, cred, &bp);
 			if (retval) {
 				buf_brelse(bp);
 				printf("hfs: failed to reload the mdb after opening the journal (retval %d)!\n",
 					   retval);
 				return retval;
 			}
-			bcopy((char *)buf_dataptr(bp) + HFS_PRI_OFFSET(hfsmp->hfs_physical_block_size), mdbp, 512);
+			bcopy((char *)buf_dataptr(bp) + HFS_PRI_OFFSET(blksize), mdbp, 512);
 			buf_brelse(bp);
 			bp = NULL;
 		}
@@ -1979,9 +1954,9 @@ hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_a
 	}
 
 
-	sectors_per_fsblock = SWAP_BE32(vhp->blockSize) / hfsmp->hfs_logical_block_size;
+	sectors_per_fsblock = SWAP_BE32(vhp->blockSize) / hfsmp->hfs_phys_block_size;
 	retval = (int)buf_meta_bread(devvp,
-						(daddr64_t)(vcb->hfsPlusIOPosOffset / hfsmp->hfs_logical_block_size + 
+						(daddr64_t)(vcb->hfsPlusIOPosOffset / hfsmp->hfs_phys_block_size + 
 						(SWAP_BE32(vhp->journalInfoBlock)*sectors_per_fsblock)),
 						SWAP_BE32(vhp->blockSize), NOCRED, &jinfo_bp);
 	if (retval) {
@@ -2045,7 +2020,7 @@ hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_a
 		                      jib_offset + (off_t)vcb->hfsPlusIOPosOffset,
 				      jib_size,
 				      devvp,
-		                      hfsmp->hfs_logical_block_size);
+		                      hfsmp->hfs_phys_block_size);
 
 	    hfsmp->jnl = NULL;
 
@@ -2066,7 +2041,7 @@ hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_a
 									jib_offset + (off_t)vcb->hfsPlusIOPosOffset,
 									jib_size,
 									devvp,
-									hfsmp->hfs_logical_block_size,
+									hfsmp->hfs_phys_block_size,
 									arg_flags,
 									arg_tbufsz,
 									hfs_sync_metadata, hfsmp->hfs_mp);
@@ -2095,7 +2070,7 @@ hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_a
 								  jib_offset + (off_t)vcb->hfsPlusIOPosOffset,
 								  jib_size,
 								  devvp,
-								  hfsmp->hfs_logical_block_size,
+								  hfsmp->hfs_phys_block_size,
 								  arg_flags,
 								  arg_tbufsz,
 								  hfs_sync_metadata, hfsmp->hfs_mp);
@@ -2347,46 +2322,6 @@ hfs_virtualmetafile(struct cnode *cp)
 }
 
 
-
-//
-// Fire off a timed callback to sync the disk if the
-// volume is on ejectable media.
-//
- __private_extern__
-void
-hfs_sync_ejectable(struct hfsmount *hfsmp)
-{
-	if (hfsmp->hfs_syncer)	{
-		uint32_t secs, usecs;
-		uint64_t now;
-
-		clock_get_calendar_microtime(&secs, &usecs);
-		now = ((uint64_t)secs * 1000000) + usecs;
-
-		if (hfsmp->hfs_sync_scheduled == 0) {
-			uint64_t deadline;
-
-			hfsmp->hfs_last_sync_request_time = now;
-
-			clock_interval_to_deadline(HFS_META_DELAY, HFS_MILLISEC_SCALE, &deadline);
-
-			/*
-			 * Increment hfs_sync_scheduled on the assumption that we're the
-			 * first thread to schedule the timer.  If some other thread beat
-			 * us, then we'll decrement it.  If we *were* the first to
-			 * schedule the timer, then we need to keep track that the
-			 * callback is waiting to complete.
-			 */
-			OSIncrementAtomic((volatile SInt32 *)&hfsmp->hfs_sync_scheduled);
-			if (thread_call_enter_delayed(hfsmp->hfs_syncer, deadline))
-				OSDecrementAtomic((volatile SInt32 *)&hfsmp->hfs_sync_scheduled);
-			else
-				OSIncrementAtomic((volatile SInt32 *)&hfsmp->hfs_sync_incomplete);
-		}		
-	}
-}
-
-
 __private_extern__
 int
 hfs_start_transaction(struct hfsmount *hfsmp)
@@ -2414,19 +2349,8 @@ hfs_start_transaction(struct hfsmount *hfsmp)
 
     if (hfsmp->jnl == NULL || journal_owner(hfsmp->jnl) != thread) {
 	lck_rw_lock_shared(&hfsmp->hfs_global_lock);
-	OSAddAtomic(1, (SInt32 *)&hfsmp->hfs_active_threads);
 	unlock_on_err = 1;
     }
-
-	/* If a downgrade to read-only mount is in progress, no other
-	 * process than the downgrade process is allowed to modify 
-	 * the file system.
-	 */
-	if ((hfsmp->hfs_flags & HFS_RDONLY_DOWNGRADE) && 
-			(hfsmp->hfs_downgrading_proc != thread)) {
-		ret = EROFS;
-		goto out;
-	}
 
     if (hfsmp->jnl) {
 	ret = journal_start_transaction(hfsmp->jnl);
@@ -2437,10 +2361,8 @@ hfs_start_transaction(struct hfsmount *hfsmp)
 	ret = 0;
     }
 
-out:
     if (ret != 0 && unlock_on_err) {
 	lck_rw_unlock_shared(&hfsmp->hfs_global_lock);
-	OSAddAtomic(-1, (SInt32 *)&hfsmp->hfs_active_threads);
     }
 
     return ret;
@@ -2466,9 +2388,7 @@ hfs_end_transaction(struct hfsmount *hfsmp)
     }
 
     if (need_unlock) {
-	OSAddAtomic(-1, (SInt32 *)&hfsmp->hfs_active_threads);
 	lck_rw_unlock_shared(&hfsmp->hfs_global_lock);
-	hfs_sync_ejectable(hfsmp);
     }
 
     return ret;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -36,7 +36,6 @@
 #include <kern/misc_protos.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
-#include <kern/timer_queue.h>
 #include <kern/processor.h>
 #include <kern/pms.h>
 
@@ -242,9 +241,6 @@ cpu_per_proc_alloc(
 	proc_info->debstackptr = (vm_offset_t)debugger_stack + KERNEL_STACK_SIZE - FM_SIZE;
 	proc_info->debstack_top_ss = proc_info->debstackptr;
 
-	queue_init(&proc_info->rtclock_timer.queue);
-	proc_info->rtclock_timer.deadline = EndOfAllTime;
-
 	return proc_info;
 
 }
@@ -430,11 +426,6 @@ cpu_sleep(
 	proc_info = getPerProc();
 
 	proc_info->running = FALSE;
-
-	if (proc_info->cpu_number != master_cpu) {
-		timer_queue_shutdown(&proc_info->rtclock_timer.queue);
-		proc_info->rtclock_timer.deadline = EndOfAllTime;
-	}
 
 	fowner = proc_info->FPU_owner;					/* Cache this */
 	if(fowner) /* If anyone owns FPU, save it */

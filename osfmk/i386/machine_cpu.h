@@ -38,6 +38,9 @@ __BEGIN_DECLS
 void	cpu_machine_init(
 	void);
 
+void	cpu_signal_handler(
+	x86_saved_state_t *regs);
+
 void	handle_pending_TLB_flushes(
 	void);
 

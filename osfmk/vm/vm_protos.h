@@ -144,17 +144,15 @@ extern mach_vm_offset_t mach_get_vm_end(vm_map_t);
 extern vm_offset_t get_vm_start(vm_map_t);
 extern vm_offset_t get_vm_end(vm_map_t);
 
-#if CONFIG_CODE_DECRYPTION
-struct pager_crypt_info;
+#ifdef __i386__
 extern kern_return_t vm_map_apple_protected(
-					    vm_map_t	map,
-					    vm_map_offset_t	start,
-					    vm_map_offset_t	end,
-					    struct pager_crypt_info *crypt_info);
+	vm_map_t	map,
+	vm_map_offset_t	start,
+	vm_map_offset_t	end);
 extern void apple_protect_pager_bootstrap(void);
-extern memory_object_t apple_protect_pager_setup(vm_object_t backing_object,
-						 struct pager_crypt_info *crypt_info);
-#endif	/* CONFIG_CODE_DECRYPTION */
+extern memory_object_t apple_protect_pager_setup(vm_object_t backing_object);
+extern void apple_protect_pager_map(memory_object_t mem_obj);
+#endif	/* __i386__ */
 
 
 /*
@@ -240,10 +238,7 @@ extern kern_return_t vnode_pager_synchronize(
 	memory_object_offset_t	offset,
 	vm_size_t		length,
 	vm_sync_t		sync_flags);
-extern kern_return_t vnode_pager_map(
-	memory_object_t		mem_obj,
-	vm_prot_t		prot);
-extern kern_return_t vnode_pager_last_unmap(
+extern kern_return_t vnode_pager_unmap(
 	memory_object_t		mem_obj);
 extern void vnode_pager_deallocate(
 	memory_object_t);
@@ -253,9 +248,6 @@ extern void vnode_pager_vrele(
 	struct vnode *vp);
 extern void vnode_pager_release_from_cache(
 	int	*);
-extern int  ubc_map(
-	struct vnode *vp,
-	int flags);
 extern void ubc_unmap(
 	struct vnode *vp);
 
@@ -290,9 +282,7 @@ extern kern_return_t dp_memory_object_synchronize(memory_object_t,
 						  memory_object_offset_t,
 						  vm_size_t,
 						  vm_sync_t);
-extern kern_return_t dp_memory_object_map(memory_object_t,
-					  vm_prot_t);
-extern kern_return_t dp_memory_object_last_unmap(memory_object_t);
+extern kern_return_t dp_memory_object_unmap(memory_object_t);
 #endif /* _memory_object_server_ */
 #ifndef _memory_object_default_server_
 extern kern_return_t default_pager_memory_object_create(
@@ -331,8 +321,7 @@ extern kern_return_t device_pager_synchronize(memory_object_t,
 					      memory_object_offset_t,
 					      vm_size_t,
 					      vm_sync_t);
-extern kern_return_t device_pager_map(memory_object_t, vm_prot_t);
-extern kern_return_t device_pager_last_unmap(memory_object_t);
+extern kern_return_t device_pager_unmap(memory_object_t);
 extern kern_return_t device_pager_populate_object(
 	memory_object_t		device,
 	memory_object_offset_t	offset,
@@ -358,7 +347,7 @@ extern int macx_swapinfo(
 	boolean_t		*encrypted_p);
 
 extern void log_stack_execution_failure(addr64_t vaddr, vm_prot_t prot);
-extern int cs_invalid_page(addr64_t vaddr);
+extern int cs_invalid_page(void);
 extern boolean_t cs_validate_page(void *blobs,
 				  memory_object_offset_t offset, 
 				  const void *data,

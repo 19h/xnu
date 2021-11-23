@@ -388,6 +388,7 @@ typedef struct mcl_slab {
  * whenever a new piece of memory mapped in from the VM crosses the 1MB
  * boundary.
  */
+#define	MBSHIFT		20				/* 1MB */
 #define	NSLABSPMB	((1 << MBSHIFT) >> MCLSHIFT)	/* 512 slabs/grp */
 
 typedef struct mcl_slabg {
@@ -1025,7 +1026,7 @@ mbinit(void)
 	VERIFY(slabstbl != NULL);
 
 	/* Allocate audit structures if needed */
-	PE_parse_boot_argn("mbuf_debug", &mbuf_debug, sizeof (mbuf_debug));
+	PE_parse_boot_arg("mbuf_debug", &mbuf_debug);
 	mbuf_debug |= mcache_getflags();
 	if (mbuf_debug & MCF_AUDIT) {
 		MALLOC(mclaudit, mcl_audit_t *,
@@ -1050,7 +1051,7 @@ mbinit(void)
 	embutl = (union mcluster *)
 	    ((unsigned char *)mbutl + (nmbclusters * MCLBYTES));
 
-	PE_parse_boot_argn("initmcl", &initmcl, sizeof (initmcl));
+	PE_parse_boot_arg("initmcl", &initmcl);
 
 	lck_mtx_lock(mbuf_mlock);
 
@@ -3010,9 +3011,8 @@ m_copy_pkthdr(struct mbuf *to, struct mbuf *from)
 #endif /* MAC_NET */
 	to->m_pkthdr = from->m_pkthdr;		/* especially tags */
 	m_tag_init(from);			/* purge tags from src */
-	to->m_flags = (from->m_flags & M_COPYFLAGS) | (to->m_flags & M_EXT);
-	if ((to->m_flags & M_EXT) == 0)
-		to->m_data = to->m_pktdat;
+	to->m_flags = from->m_flags & M_COPYFLAGS;
+	to->m_data = (to)->m_pktdat;
 }
 
 /*

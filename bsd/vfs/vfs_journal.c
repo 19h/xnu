@@ -1126,15 +1126,6 @@ replay_journal(journal *jnl)
 		last_sequence_num = blhdr->binfo[0].b.sequence_num;
 
 		if (blhdr_offset >= jnl->jhdr->end && jnl->jhdr->start <= jnl->jhdr->end) {
-		    if (last_sequence_num == 0) {
-			check_past_jnl_end = 0;
-			printf("jnl: %s: pre-sequence-num-enabled txn's - can not go further than end (%lld %lld).\n",
-			    jnl->jdev_name, jnl->jhdr->start, jnl->jhdr->end);
-			if (jnl->jhdr->start != jnl->jhdr->end) {
-			    jnl->jhdr->start = jnl->jhdr->end;
-			}
-			continue;
-		    }
 		    printf("jnl: %s: examining extra transactions starting @ %lld / 0x%llx\n", jnl->jdev_name, blhdr_offset, blhdr_offset);
 		}
 
@@ -1704,28 +1695,16 @@ journal_open(struct vnode *jvp,
 	}
 
     if (phys_blksz != (size_t)jnl->jhdr->jhdr_size && jnl->jhdr->jhdr_size != 0) {
-    	/*
-    	 * The volume has probably been resized (such that we had to adjust the
-    	 * logical sector size), or copied to media with a different logical
-    	 * sector size.  If the journal is empty, then just switch to the
-    	 * current logical sector size.  If the journal is not empty, then
-    	 * fail to open the journal.
-    	 */
-    	 
-    	if (jnl->jhdr->start == jnl->jhdr->end) {
-    	    int err;
-    	    printf("jnl: %s: open: changing journal header size from %d to %lu\n",
-		jdev_name, jnl->jhdr->jhdr_size, phys_blksz);
-	    jnl->jhdr->jhdr_size = phys_blksz;
-	    if (write_journal_header(jnl)) {
-		printf("jnl: %s: open: failed to update journal header size\n", jdev_name);
-		goto bad_journal;
-	    }
-	} else {
-	    printf("jnl: %s: open: phys_blksz %lu does not match journal header size %d, and journal is not empty!\n",
-		jdev_name, phys_blksz, jnl->jhdr->jhdr_size);
-	    goto bad_journal;
-	}
+		printf("jnl: %s: open: phys_blksz %lu does not match journal header size %d\n",
+		    jdev_name, phys_blksz, jnl->jhdr->jhdr_size);
+
+		orig_blksz = phys_blksz;
+		phys_blksz = jnl->jhdr->jhdr_size;
+		if (VNOP_IOCTL(jvp, DKIOCSETBLOCKSIZE, (caddr_t)&phys_blksz, FWRITE, &context)) {
+		    printf("jnl: %s: could not set block size to %lu bytes.\n", jdev_name, phys_blksz);
+		    goto bad_journal;
+		}
+//		goto bad_journal;
     }
 
     if (   jnl->jhdr->start <= 0
@@ -2094,7 +2073,7 @@ check_free_space(journal *jnl, int desired_size)
 
 			lcl_counter = 0;
 			while (jnl->old_start[i] & 0x8000000000000000LL) {
-				if (lcl_counter++ > 1000) {
+				if (lcl_counter++ > 100) {
 					panic("jnl: check_free_space: tr starting @ 0x%llx not flushing (jnl %p).\n",
 						  jnl->old_start[i], jnl);
 				}

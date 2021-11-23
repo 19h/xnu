@@ -31,7 +31,6 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMapper.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
-#include <libkern/OSDebug.h>
 
 #include "IOKitKernelInternal.h"
 #include "IOCopyMapper.h"
@@ -133,8 +132,8 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     range.length  = 0;
     _ranges.v64   = &range;
 
-    // Grab IOMD bits from the Buffer MD options
-    iomdOptions  |= (options & kIOBufferDescriptorMemoryFlags);
+    // Grab the direction and the Auto Prepare bits from the Buffer MD options
+    iomdOptions  |= options & (kIOMemoryDirectionMask | kIOMemoryAutoPrepare);
 
     if ((options & (kIOMemorySharingTypeMask | kIOMapCacheMask)) && (alignment < page_size))
 	alignment = page_size;

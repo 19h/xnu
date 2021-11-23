@@ -227,9 +227,7 @@ struct vnode {
 #define	VAGE		0x001000	/* Insert vnode at head of free list */
 #define	VRAOFF		0x002000	/* read ahead disabled */
 #define	VNCACHEABLE	0x004000	/* vnode is allowed to be put back in name cache */
-#if NAMEDSTREAMS
-#define VISSHADOW       0x008000        /* vnode is a shadow file */
-#endif
+#define	VUINACTIVE	0x008000	/* UBC vnode is on inactive list */
 #define	VSWAP		0x010000	/* vnode is being used as swapfile */
 #define	VTHROTTLED	0x020000	/* writes or pageouts have been throttled */
 		/* wakeup tasks waiting when count falls below threshold */
@@ -415,9 +413,6 @@ int	vnode_ref_ext(vnode_t, int);
 void	vnode_rele_ext(vnode_t, int, int);
 void	vnode_rele_internal(vnode_t, int, int, int);
 int	vnode_getwithref(vnode_t);
-#ifdef BSD_KERNEL_PRIVATE
-int	vnode_getalways(vnode_t);
-#endif /* BSD_KERNEL_PRIVATE */
 int	vnode_get_locked(vnode_t);
 int	vnode_put_locked(vnode_t);
 

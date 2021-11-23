@@ -172,7 +172,6 @@ private:
         Idle timer's period in seconds.
     */
     unsigned long           IdleTimerPeriod;
-    unsigned long           IdleTimerMinPowerState;
 
     /*! @var DriverDesire
         Power state desired by our controlling driver.
@@ -327,7 +326,6 @@ private:
 #define fActivityLock               pwrMgt->ActivityLock
 #define fIdleTimerEventSource       pwrMgt->IdleTimerEventSource
 #define fIdleTimerPeriod            pwrMgt->IdleTimerPeriod
-#define fIdleTimerMinPowerState     pwrMgt->IdleTimerMinPowerState
 #define fDeviceActive               pwrMgt->DeviceActive
 #define fDeviceActiveTimestamp      pwrMgt->DeviceActiveTimestamp
 #define fDriverDesire               pwrMgt->DriverDesire
@@ -462,8 +460,7 @@ enum {
     kIOPMRequestTypeAckSetPowerState       = 0x82,
     kIOPMRequestTypeAllowPowerChange       = 0x83,
     kIOPMRequestTypeCancelPowerChange      = 0x84,
-    kIOPMRequestTypeInterestChanged        = 0x85,
-    kIOPMRequestTypeIdleCancel             = 0x86
+    kIOPMRequestTypeInterestChanged        = 0x85
 };
 
 //*********************************************************************************

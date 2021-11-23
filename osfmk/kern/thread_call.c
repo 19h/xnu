@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1993-1995, 1999-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 1993-1995, 1999-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -30,7 +30,7 @@
 #include <mach/thread_act.h>
 
 #include <kern/kern_types.h>
-#include <kern/zalloc.h>
+#include <kern/kalloc.h>
 #include <kern/sched_prim.h>
 #include <kern/clock.h>
 #include <kern/task.h>
@@ -46,125 +46,149 @@
 
 #include <sys/kdebug.h>
 
-decl_simple_lock_data(static,thread_call_lock)
-
-static zone_t		thread_call_zone;
-
-struct thread_call_group {
-	queue_head_t		pending_queue;
-	uint32_t			pending_count;
-
-	queue_head_t		delayed_queue;
-
-	timer_call_data_t	delayed_timer;
-
-	struct wait_queue	idle_wqueue;
-	uint32_t			idle_count, active_count;
-};
-
-typedef struct thread_call_group	*thread_call_group_t;
-
-static struct thread_call_group		thread_call_group0;
-
-static boolean_t			thread_call_daemon_awake;
+#define internal_call_num	768
 
 #define thread_call_thread_min	4
 
-#define internal_call_count	768
+static
+thread_call_data_t
+	internal_call_storage[internal_call_num];
 
-static thread_call_data_t	internal_call_storage[internal_call_count];
-static queue_head_t			thread_call_internal_queue;
+decl_simple_lock_data(static,thread_call_lock)
 
-static __inline__ thread_call_t		_internal_call_allocate(void);
+static
+timer_call_data_t
+	thread_call_delaytimer;
 
-static __inline__ void	_internal_call_release(
-							thread_call_t		call);
+static
+queue_head_t
+	thread_call_xxx_queue,
+	thread_call_pending_queue, thread_call_delayed_queue;
 
-static __inline__ boolean_t	_pending_call_enqueue(
-								thread_call_t		call,
-								thread_call_group_t	group),
-							_delayed_call_enqueue(
-								thread_call_t		call,
-								thread_call_group_t	group,
-								uint64_t			deadline),
-							_call_dequeue(
-								thread_call_t		call,
-								thread_call_group_t	group);
+static
+struct wait_queue
+	call_thread_waitqueue;
 
-static __inline__ void	thread_call_wake(
-							thread_call_group_t	group);
+static
+boolean_t
+	activate_thread_awake;
 
-static __inline__ void	_set_delayed_call_timer(
-							thread_call_t		call,
-							thread_call_group_t	group);
+static struct {
+	int		pending_num,
+			pending_hiwat;
+	int		active_num,
+			active_hiwat,
+			active_lowat;
+	int		delayed_num,
+			delayed_hiwat;
+	int		idle_thread_num;
+	int		thread_num,
+			thread_hiwat,
+			thread_lowat;
+} thread_call_vars;
+
+static __inline__ thread_call_t
+	_internal_call_allocate(void);
+
+static __inline__ void
+_internal_call_release(
+	thread_call_t		call
+);
+
+static __inline__ void
+_pending_call_enqueue(
+	thread_call_t		call
+),
+_pending_call_dequeue(
+	thread_call_t		call
+),
+_delayed_call_enqueue(
+	thread_call_t		call
+),
+_delayed_call_dequeue(
+	thread_call_t		call
+);
+
+static __inline__ void
+_set_delayed_call_timer(
+	thread_call_t		call
+);
 					
-static boolean_t	_remove_from_pending_queue(
-						thread_call_func_t		func,
-						thread_call_param_t		param0,
-						boolean_t				remove_all),
-					_remove_from_delayed_queue(
-						thread_call_func_t		func,
-						thread_call_param_t		param0,
-						boolean_t				remove_all);
+static boolean_t
+_remove_from_pending_queue(
+	thread_call_func_t	func,
+	thread_call_param_t	param0,
+	boolean_t			remove_all
+),
+_remove_from_delayed_queue(
+	thread_call_func_t	func,
+	thread_call_param_t	param0,
+	boolean_t			remove_all
+);
 
-static void		thread_call_daemon(
-					thread_call_group_t		group),
-				thread_call_thread(
-					thread_call_group_t		group);
+static inline void
+	_call_thread_wake(void);
 
-static void		thread_call_delayed_timer(
-					timer_call_param_t		p0,
-					timer_call_param_t		p1);
+static void
+	_call_thread(void),
+	_activate_thread(void);
+
+static void
+_delayed_call_timer(
+	timer_call_param_t		p0,
+	timer_call_param_t		p1
+);
 
 #define qe(x)		((queue_entry_t)(x))
 #define TC(x)		((thread_call_t)(x))
 
 /*
- *	thread_call_initialize:
+ * Routine:	thread_call_initialize [public]
  *
- *	Initialize this module, called
- *	early during system initialization.
+ * Description:	Initialize this module, called
+ *		early during system initialization.
+ *
+ * Preconditions:	None.
+ *
+ * Postconditions:	None.
  */
+
 void
 thread_call_initialize(void)
 {
-    thread_call_t			call;
-	thread_call_group_t		group = &thread_call_group0;
-	kern_return_t			result;
-	thread_t				thread;
-	int						i;
-	spl_t					s;
-
-	i = sizeof (thread_call_data_t);
-	thread_call_zone = zinit(i, 4096 * i, 16 * i, "thread_call");
+	kern_return_t	result;
+	thread_t		thread;
+    thread_call_t	call;
+	spl_t			s;
 
     simple_lock_init(&thread_call_lock, 0);
 
 	s = splsched();
 	simple_lock(&thread_call_lock);
 
-    queue_init(&group->pending_queue);
-    queue_init(&group->delayed_queue);
+    queue_init(&thread_call_pending_queue);
+    queue_init(&thread_call_delayed_queue);
 
-	timer_call_setup(&group->delayed_timer, thread_call_delayed_timer, group);
-
-	wait_queue_init(&group->idle_wqueue, SYNC_POLICY_FIFO);
-
-    queue_init(&thread_call_internal_queue);
+    queue_init(&thread_call_xxx_queue);
     for (
 	    	call = internal_call_storage;
-			call < &internal_call_storage[internal_call_count];
+			call < &internal_call_storage[internal_call_num];
 			call++) {
 
-		enqueue_tail(&thread_call_internal_queue, qe(call));
+		enqueue_tail(&thread_call_xxx_queue, qe(call));
     }
 
-	thread_call_daemon_awake = TRUE;
+	timer_call_setup(&thread_call_delaytimer, _delayed_call_timer, NULL);
+
+	wait_queue_init(&call_thread_waitqueue, SYNC_POLICY_FIFO);
+	thread_call_vars.thread_lowat = thread_call_thread_min;
+
+	activate_thread_awake = TRUE;
 
 	simple_unlock(&thread_call_lock);
 	splx(s);
 
-	result = kernel_thread_start_priority((thread_continue_t)thread_call_daemon, group, BASEPRI_PREEMPT + 1, &thread);
+	result = kernel_thread_start_priority((thread_continue_t)_activate_thread, NULL, MAXPRI_KERNEL - 2, &thread);
 	if (result != KERN_SUCCESS)
 		panic("thread_call_initialize");
 
@@ -175,170 +199,218 @@ void
 thread_call_setup(
 	thread_call_t			call,
 	thread_call_func_t		func,
-	thread_call_param_t		param0)
+	thread_call_param_t		param0
+)
 {
 	call_entry_setup(call, func, param0);
 }
 
 /*
- *	_internal_call_allocate:
+ * Routine:	_internal_call_allocate [private, inline]
  *
- *	Allocate an internal callout entry.
+ * Purpose:	Allocate an internal callout entry.
  *
- *	Called with thread_call_lock held.
+ * Preconditions:	thread_call_lock held.
+ *
+ * Postconditions:	None.
  */
+
 static __inline__ thread_call_t
 _internal_call_allocate(void)
 {
     thread_call_t		call;
     
-    if (queue_empty(&thread_call_internal_queue))
+    if (queue_empty(&thread_call_xxx_queue))
     	panic("_internal_call_allocate");
 	
-    call = TC(dequeue_head(&thread_call_internal_queue));
+    call = TC(dequeue_head(&thread_call_xxx_queue));
     
     return (call);
 }
 
 /*
- *	_internal_call_release:
+ * Routine:	_internal_call_release [private, inline]
  *
- *	Release an internal callout entry which
- *	is no longer pending (or delayed).
+ * Purpose:	Release an internal callout entry which
+ *		is no longer pending (or delayed).
  *
- * 	Called with thread_call_lock held.
+ * Preconditions:	thread_call_lock held.
+ *
+ * Postconditions:	None.
  */
-static __inline__ void
+
+static __inline__
+void
 _internal_call_release(
-    thread_call_t		call)
+    thread_call_t		call
+)
 {
     if (    call >= internal_call_storage						&&
-	   	    call < &internal_call_storage[internal_call_count]		)
-		enqueue_head(&thread_call_internal_queue, qe(call));
+	   	    call < &internal_call_storage[internal_call_num]		)
+		enqueue_head(&thread_call_xxx_queue, qe(call));
 }
 
 /*
- *	_pending_call_enqueue:
+ * Routine:	_pending_call_enqueue [private, inline]
  *
- *	Place an entry at the end of the
- *	pending queue, to be executed soon.
+ * Purpose:	Place an entry at the end of the
+ *		pending queue, to be executed soon.
  *
- *	Returns TRUE if the entry was already
- *	on a queue.
+ * Preconditions:	thread_call_lock held.
  *
- *	Called with thread_call_lock held.
+ * Postconditions:	None.
  */
-static __inline__ boolean_t
+
+static __inline__
+void
 _pending_call_enqueue(
-    thread_call_t		call,
-	thread_call_group_t	group)
+    thread_call_t		call
+)
 {
-	queue_t		old_queue;
+    enqueue_tail(&thread_call_pending_queue, qe(call));
+	if (++thread_call_vars.pending_num > thread_call_vars.pending_hiwat)
+		thread_call_vars.pending_hiwat = thread_call_vars.pending_num;
 
-	old_queue = call_entry_enqueue_tail(call, &group->pending_queue);
-
-	group->pending_count++;
-
-	return (old_queue != NULL);
+    call->state = PENDING;
 }
 
 /*
- *	_delayed_call_enqueue:
+ * Routine:	_pending_call_dequeue [private, inline]
  *
- *	Place an entry on the delayed queue,
- *	after existing entries with an earlier
- * 	(or identical) deadline.
+ * Purpose:	Remove an entry from the pending queue,
+ *		effectively unscheduling it.
  *
- *	Returns TRUE if the entry was already
- *	on a queue.
+ * Preconditions:	thread_call_lock held.
  *
- *	Called with thread_call_lock held.
+ * Postconditions:	None.
  */
-static __inline__ boolean_t
+
+static __inline__
+void
+_pending_call_dequeue(
+    thread_call_t		call
+)
+{
+    (void)remque(qe(call));
+	thread_call_vars.pending_num--;
+    
+    call->state = IDLE;
+}
+
+/*
+ * Routine:	_delayed_call_enqueue [private, inline]
+ *
+ * Purpose:	Place an entry on the delayed queue,
+ *		after existing entries with an earlier
+ * 		(or identical) deadline.
+ *
+ * Preconditions:	thread_call_lock held.
+ *
+ * Postconditions:	None.
+ */
+
+static __inline__
+void
 _delayed_call_enqueue(
-    thread_call_t		call,
-	thread_call_group_t	group,
-	uint64_t			deadline)
+    thread_call_t		call
+)
 {
-	queue_t			old_queue;
+    thread_call_t		current;
+    
+    current = TC(queue_first(&thread_call_delayed_queue));
+    
+    while (TRUE) {
+    	if (	queue_end(&thread_call_delayed_queue, qe(current))		||
+					call->deadline < current->deadline			) {
+			current = TC(queue_prev(qe(current)));
+			break;
+		}
+	    
+		current = TC(queue_next(qe(current)));
+    }
 
-	old_queue = call_entry_enqueue_deadline(call, &group->delayed_queue, deadline);
-
-	if (old_queue == &group->pending_queue)
-		group->pending_count--;
-
-	return (old_queue != NULL);
+    insque(qe(call), qe(current));
+	if (++thread_call_vars.delayed_num > thread_call_vars.delayed_hiwat)
+		thread_call_vars.delayed_hiwat = thread_call_vars.delayed_num;
+    
+    call->state = DELAYED;
 }
 
 /*
- *	_call_dequeue:
+ * Routine:	_delayed_call_dequeue [private, inline]
  *
- *	Remove an entry from a queue.
+ * Purpose:	Remove an entry from the delayed queue,
+ *		effectively unscheduling it.
  *
- *	Returns TRUE if the entry was on a queue.
+ * Preconditions:	thread_call_lock held.
  *
- *	Called with thread_call_lock held.
+ * Postconditions:	None.
  */
-static __inline__ boolean_t
-_call_dequeue(
-	thread_call_t		call,
-	thread_call_group_t	group)
+
+static __inline__
+void
+_delayed_call_dequeue(
+    thread_call_t		call
+)
 {
-	queue_t			old_queue;
-
-	old_queue = call_entry_dequeue(call);
-
-	if (old_queue == &group->pending_queue)
-		group->pending_count--;
-
-	return (old_queue != NULL);
+    (void)remque(qe(call));
+	thread_call_vars.delayed_num--;
+    
+    call->state = IDLE;
 }
 
 /*
- *	_set_delayed_call_timer:
+ * Routine:	_set_delayed_call_timer [private]
  *
- *	Reset the timer so that it
- *	next expires when the entry is due.
+ * Purpose:	Reset the timer so that it
+ *		next expires when the entry is due.
  *
- *	Called with thread_call_lock held.
+ * Preconditions:	thread_call_lock held.
+ *
+ * Postconditions:	None.
  */
+
 static __inline__ void
 _set_delayed_call_timer(
-    thread_call_t		call,
-	thread_call_group_t	group)
+    thread_call_t		call
+)
 {
-    timer_call_enter(&group->delayed_timer, call->deadline);
+    timer_call_enter(&thread_call_delaytimer, call->deadline);
 }
 
 /*
- *	_remove_from_pending_queue:
+ * Routine:	_remove_from_pending_queue [private]
  *
- *	Remove the first (or all) matching
- *	entries	from the pending queue.
+ * Purpose:	Remove the first (or all) matching
+ *		entries	from the pending queue,
+ *		effectively unscheduling them.
+ *		Returns	whether any matching entries
+ *		were found.
  *
- *	Returns	TRUE if any matching entries
- *	were found.
+ * Preconditions:	thread_call_lock held.
  *
- *	Called with thread_call_lock held.
+ * Postconditions:	None.
  */
-static boolean_t
+
+static
+boolean_t
 _remove_from_pending_queue(
     thread_call_func_t		func,
     thread_call_param_t		param0,
-    boolean_t				remove_all)
+    boolean_t				remove_all
+)
 {
-	boolean_t				call_removed = FALSE;
-	thread_call_t			call;
-	thread_call_group_t		group = &thread_call_group0;
+	boolean_t			call_removed = FALSE;
+	thread_call_t		call;
     
-    call = TC(queue_first(&group->pending_queue));
+    call = TC(queue_first(&thread_call_pending_queue));
     
-    while (!queue_end(&group->pending_queue, qe(call))) {
+    while (!queue_end(&thread_call_pending_queue, qe(call))) {
     	if (	call->func == func			&&
 				call->param0 == param0			) {
 			thread_call_t	next = TC(queue_next(qe(call)));
 		
-			_call_dequeue(call, group);
+			_pending_call_dequeue(call);
 
 			_internal_call_release(call);
 	    
@@ -356,34 +428,38 @@ _remove_from_pending_queue(
 }
 
 /*
- *	_remove_from_delayed_queue:
+ * Routine:	_remove_from_delayed_queue [private]
  *
- *	Remove the first (or all) matching
- *	entries	from the delayed queue.
+ * Purpose:	Remove the first (or all) matching
+ *		entries	from the delayed queue,
+ *		effectively unscheduling them.
+ *		Returns	whether any matching entries
+ *		were found.
  *
- *	Returns	TRUE if any matching entries
- *	were found.
+ * Preconditions:	thread_call_lock held.
  *
- *	Called with thread_call_lock held.
+ * Postconditions:	None.
  */
-static boolean_t
+
+static
+boolean_t
 _remove_from_delayed_queue(
     thread_call_func_t		func,
     thread_call_param_t		param0,
-    boolean_t				remove_all)
+    boolean_t				remove_all
+)
 {
-    boolean_t				call_removed = FALSE;
-    thread_call_t			call;
-	thread_call_group_t		group = &thread_call_group0;
+    boolean_t			call_removed = FALSE;
+    thread_call_t		call;
     
-    call = TC(queue_first(&group->delayed_queue));
+    call = TC(queue_first(&thread_call_delayed_queue));
     
-    while (!queue_end(&group->delayed_queue, qe(call))) {
+    while (!queue_end(&thread_call_delayed_queue, qe(call))) {
     	if (	call->func == func			&&
 				call->param0 == param0			) {
 			thread_call_t	next = TC(queue_next(qe(call)));
 		
-			_call_dequeue(call, group);
+			_delayed_call_dequeue(call);
 	    
 			_internal_call_release(call);
 	    
@@ -401,29 +477,34 @@ _remove_from_delayed_queue(
 }
 
 /*
- *	thread_call_func:
+ * Routine:	thread_call_func [public]
  *
- *	Enqueue a function callout.
+ * Purpose:	Schedule a function callout.
+ *		Guarantees { function, argument }
+ *		uniqueness if unique_call is TRUE.
  *
- *	Guarantees { function, argument }
- *	uniqueness if unique_call is TRUE.
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
+ *
+ * Postconditions:	None.
  */
+
 void
 thread_call_func(
     thread_call_func_t		func,
     thread_call_param_t		param,
-    boolean_t				unique_call)
+    boolean_t				unique_call
+)
 {
-    thread_call_t			call;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+    thread_call_t		call;
+    spl_t				s;
     
     s = splsched();
     simple_lock(&thread_call_lock);
     
-    call = TC(queue_first(&group->pending_queue));
+    call = TC(queue_first(&thread_call_pending_queue));
     
-	while (unique_call && !queue_end(&group->pending_queue, qe(call))) {
+	while (unique_call && !queue_end(&thread_call_pending_queue, qe(call))) {
     	if (	call->func == func			&&
 				call->param0 == param			) {
 			break;
@@ -432,16 +513,16 @@ thread_call_func(
 		call = TC(queue_next(qe(call)));
     }
     
-    if (!unique_call || queue_end(&group->pending_queue, qe(call))) {
+    if (!unique_call || queue_end(&thread_call_pending_queue, qe(call))) {
 		call = _internal_call_allocate();
 		call->func			= func;
 		call->param0		= param;
 		call->param1		= NULL;
 	
-		_pending_call_enqueue(call, group);
+		_pending_call_enqueue(call);
 		
-		if (group->active_count == 0)
-			thread_call_wake(group);
+		if (thread_call_vars.active_num <= 0)
+			_call_thread_wake();
     }
 
 	simple_unlock(&thread_call_lock);
@@ -449,20 +530,26 @@ thread_call_func(
 }
 
 /*
- *	thread_call_func_delayed:
+ * Routine:	thread_call_func_delayed [public]
  *
- *	Enqueue a function callout to
- *	occur at the stated time.
+ * Purpose:	Schedule a function callout to
+ *		occur at the stated time.
+ *
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
+ *
+ * Postconditions:	None.
  */
+
 void
 thread_call_func_delayed(
     thread_call_func_t		func,
     thread_call_param_t		param,
-    uint64_t				deadline)
+    uint64_t				deadline
+)
 {
-    thread_call_t			call;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+    thread_call_t		call;
+    spl_t				s;
     
     s = splsched();
     simple_lock(&thread_call_lock);
@@ -471,33 +558,41 @@ thread_call_func_delayed(
     call->func			= func;
     call->param0		= param;
     call->param1		= 0;
+    call->deadline		= deadline;
     
-    _delayed_call_enqueue(call, group, deadline);
+    _delayed_call_enqueue(call);
     
-    if (queue_first(&group->delayed_queue) == qe(call))
-    	_set_delayed_call_timer(call, group);
+    if (queue_first(&thread_call_delayed_queue) == qe(call))
+    	_set_delayed_call_timer(call);
     
     simple_unlock(&thread_call_lock);
     splx(s);
 }
 
 /*
- *	thread_call_func_cancel:
+ * Routine:	thread_call_func_cancel [public]
  *
- *	Dequeue a function callout.
+ * Purpose:	Unschedule a function callout.
+ *		Removes one (or all)
+ *		{ function, argument }
+ *		instance(s) from either (or both)
+ *		the pending and	the delayed queue,
+ *		in that order.  Returns a boolean
+ *		indicating whether any calls were
+ *		cancelled.
  *
- *	Removes one (or all) { function, argument }
- *	instance(s) from either (or both)
- *	the pending and	the delayed queue,
- *	in that order.
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
  *
- *	Returns TRUE if any calls were cancelled.
+ * Postconditions:	None.
  */
+
 boolean_t
 thread_call_func_cancel(
     thread_call_func_t		func,
     thread_call_param_t		param,
-    boolean_t				cancel_all)
+    boolean_t				cancel_all
+)
 {
 	boolean_t			result;
     spl_t				s;
@@ -519,37 +614,53 @@ thread_call_func_cancel(
 }
 
 /*
- *	thread_call_allocate:
+ * Routine:	thread_call_allocate [public]
  *
- *	Allocate a callout entry.
+ * Purpose:	Allocate an external callout
+ *		entry.
+ *
+ * Preconditions:	None.
+ *
+ * Postconditions:	None.
  */
+
 thread_call_t
 thread_call_allocate(
     thread_call_func_t		func,
-    thread_call_param_t		param0)
+    thread_call_param_t		param0
+)
 {
-    thread_call_t		call = zalloc(thread_call_zone);
-
-	call_entry_setup(call, func, param0);
-
+    thread_call_t		call = (void *)kalloc(sizeof (thread_call_data_t));
+    
+    call->func			= func;
+    call->param0		= param0;
+    call->state			= IDLE;
+    
     return (call);
 }
 
 /*
- *	thread_call_free:
+ * Routine:	thread_call_free [public]
  *
- *	Free a callout entry.
+ * Purpose:	Free an external callout
+ *		entry.
+ *
+ * Preconditions:	None.
+ *
+ * Postconditions:	None.
  */
+
 boolean_t
 thread_call_free(
-    thread_call_t		call)
+    thread_call_t		call
+)
 {
     spl_t		s;
     
     s = splsched();
     simple_lock(&thread_call_lock);
     
-    if (call->queue != NULL) {
+    if (call->state != IDLE) {
     	simple_unlock(&thread_call_lock);
 		splx(s);
 
@@ -559,35 +670,46 @@ thread_call_free(
     simple_unlock(&thread_call_lock);
     splx(s);
     
-	zfree(thread_call_zone, call);
+    kfree(call, sizeof (thread_call_data_t));
 
 	return (TRUE);
 }
 
 /*
- *	thread_call_enter:
+ * Routine:	thread_call_enter [public]
  *
- *	Enqueue a callout entry to occur "soon".
+ * Purpose:	Schedule an external callout 
+ *		entry to occur "soon".  Returns a
+ *		boolean indicating whether the call
+ *		had been already scheduled.
  *
- *	Returns TRUE if the call was
- *	already on a queue.
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
+ *
+ * Postconditions:	None.
  */
+
 boolean_t
 thread_call_enter(
-    thread_call_t		call)
+    thread_call_t		call
+)
 {
-	boolean_t				result = TRUE;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+	boolean_t		result = TRUE;
+    spl_t			s;
     
     s = splsched();
     simple_lock(&thread_call_lock);
     
-    if (call->queue != &group->pending_queue) {
-    	result = _pending_call_enqueue(call, group);
+    if (call->state != PENDING) {
+		if (call->state == DELAYED)
+			_delayed_call_dequeue(call);
+		else if (call->state == IDLE)
+			result = FALSE;
+
+    	_pending_call_enqueue(call);
 		
-		if (group->active_count == 0)
-			thread_call_wake(group);
+		if (thread_call_vars.active_num <= 0)
+			_call_thread_wake();
 	}
 
 	call->param1 = 0;
@@ -601,21 +723,26 @@ thread_call_enter(
 boolean_t
 thread_call_enter1(
     thread_call_t			call,
-    thread_call_param_t		param1)
+    thread_call_param_t		param1
+)
 {
-	boolean_t				result = TRUE;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+	boolean_t			result = TRUE;
+    spl_t				s;
     
     s = splsched();
     simple_lock(&thread_call_lock);
     
-    if (call->queue != &group->pending_queue) {
-    	result = _pending_call_enqueue(call, group);
-		
-		if (group->active_count == 0)
-			thread_call_wake(group);
-	}
+    if (call->state != PENDING) {
+		if (call->state == DELAYED)
+			_delayed_call_dequeue(call);
+		else if (call->state == IDLE)
+			result = FALSE;
+
+    	_pending_call_enqueue(call);
+
+		if (thread_call_vars.active_num <= 0)
+			_call_thread_wake();
+    }
 
 	call->param1 = param1;
 
@@ -626,32 +753,45 @@ thread_call_enter1(
 }
 
 /*
- *	thread_call_enter_delayed:
+ * Routine:	thread_call_enter_delayed [public]
  *
- *	Enqueue a callout entry to occur
- *	at the stated time.
+ * Purpose:	Schedule an external callout 
+ *		entry to occur at the stated time.
+ *		Returns a boolean indicating whether
+ *		the call had been already scheduled.
  *
- *	Returns TRUE if the call was
- *	already on a queue.
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
+ *
+ * Postconditions:	None.
  */
+
 boolean_t
 thread_call_enter_delayed(
     thread_call_t		call,
-    uint64_t			deadline)
+    uint64_t			deadline
+)
 {
-	boolean_t				result = TRUE;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+	boolean_t		result = TRUE;
+    spl_t			s;
 
     s = splsched();
     simple_lock(&thread_call_lock);
 
-	result = _delayed_call_enqueue(call, group, deadline);
+	if (call->state == PENDING)
+		_pending_call_dequeue(call);
+	else if (call->state == DELAYED)
+		_delayed_call_dequeue(call);
+	else if (call->state == IDLE)
+		result = FALSE;
 
-	if (queue_first(&group->delayed_queue) == qe(call))
-		_set_delayed_call_timer(call, group);
+	call->param1	= 0;
+	call->deadline	= deadline;
 
-	call->param1 = 0;
+	_delayed_call_enqueue(call);
+
+	if (queue_first(&thread_call_delayed_queue) == qe(call))
+		_set_delayed_call_timer(call);
 
     simple_unlock(&thread_call_lock);
     splx(s);
@@ -663,21 +803,29 @@ boolean_t
 thread_call_enter1_delayed(
     thread_call_t			call,
     thread_call_param_t		param1,
-    uint64_t				deadline)
+    uint64_t				deadline
+)
 {
-	boolean_t				result = TRUE;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+	boolean_t			result = TRUE;
+    spl_t				s;
 
     s = splsched();
     simple_lock(&thread_call_lock);
 
-	result = _delayed_call_enqueue(call, group, deadline);
+	if (call->state == PENDING)
+		_pending_call_dequeue(call);
+	else if (call->state == DELAYED)
+		_delayed_call_dequeue(call);
+	else if (call->state == IDLE)
+		result = FALSE;
 
-	if (queue_first(&group->delayed_queue) == qe(call))
-		_set_delayed_call_timer(call, group);
+	call->param1	= param1;
+	call->deadline	= deadline;
 
-	call->param1 = param1;
+	_delayed_call_enqueue(call);
+
+	if (queue_first(&thread_call_delayed_queue) == qe(call))
+		_set_delayed_call_timer(call);
 
     simple_unlock(&thread_call_lock);
     splx(s);
@@ -686,25 +834,36 @@ thread_call_enter1_delayed(
 }
 
 /*
- *	thread_call_cancel:
+ * Routine:	thread_call_cancel [public]
  *
- *	Dequeue a callout entry.
+ * Purpose:	Unschedule a callout entry.
+ *		Returns a boolean indicating
+ *		whether the call had actually
+ *		been scheduled.
  *
- *	Returns TRUE if the call was
- *	on a queue.
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
+ *
+ * Postconditions:	None.
  */
+
 boolean_t
 thread_call_cancel(
-    thread_call_t		call)
+    thread_call_t		call
+)
 {
-	boolean_t				result;
-	thread_call_group_t		group = &thread_call_group0;
-    spl_t					s;
+	boolean_t		result = TRUE;
+    spl_t			s;
     
     s = splsched();
     simple_lock(&thread_call_lock);
-
-	result = _call_dequeue(call, group);
+    
+    if (call->state == PENDING)
+    	_pending_call_dequeue(call);
+    else if (call->state == DELAYED)
+    	_delayed_call_dequeue(call);
+    else
+    	result = FALSE;
 	
     simple_unlock(&thread_call_lock);
     splx(s);
@@ -713,26 +872,31 @@ thread_call_cancel(
 }
 
 /*
- *	thread_call_is_delayed:
+ * Routine:	thread_call_is_delayed [public]
  *
- *	Returns TRUE if the call is
- *	currently on a delayed queue.
+ * Purpose:	Returns a boolean indicating
+ *		whether a call is currently scheduled
+ *		to occur at a later time.  Optionally
+ *		returns the expiration time.
  *
- *	Optionally returns the expiration time.
+ * Preconditions:	Callable from an interrupt context
+ *					below splsched.
+ *
+ * Postconditions:	None.
  */
+
 boolean_t
 thread_call_is_delayed(
 	thread_call_t		call,
 	uint64_t			*deadline)
 {
-	boolean_t				result = FALSE;
-	thread_call_group_t		group = &thread_call_group0;
-	spl_t					s;
+	boolean_t		result = FALSE;
+	spl_t			s;
 
 	s = splsched();
 	simple_lock(&thread_call_lock);
 
-	if (call->queue == &group->delayed_queue) {
+	if (call->state == DELAYED) {
 		if (deadline != NULL)
 			*deadline = call->deadline;
 		result = TRUE;
@@ -745,26 +909,31 @@ thread_call_is_delayed(
 }
 
 /*
- *	thread_call_wake:
+ * Routine:	_call_thread_wake [private, inline]
  *
- *	Wake a call thread to service
- *	pending call entries.  May wake
- *	the daemon thread in order to
- *	create additional call threads.
+ * Purpose:	Wake a callout thread to service
+ *		pending callout entries.  May wake
+ *		the activate thread in order to
+ *		create additional callout threads.
  *
- *	Called with thread_call_lock held.
+ * Preconditions:	thread_call_lock held.
+ *
+ * Postconditions:	None.
  */
-static __inline__ void
-thread_call_wake(
-	thread_call_group_t		group)
+
+static inline void
+_call_thread_wake(void)
 {
-	if (group->idle_count > 0 && wait_queue_wakeup_one(&group->idle_wqueue, NULL, THREAD_AWAKENED) == KERN_SUCCESS) {
-		group->idle_count--; group->active_count++;
+	if (wait_queue_wakeup_one(&call_thread_waitqueue, NULL, THREAD_AWAKENED) == KERN_SUCCESS) {
+		thread_call_vars.idle_thread_num--;
+
+		if (++thread_call_vars.active_num > thread_call_vars.active_hiwat)
+			thread_call_vars.active_hiwat = thread_call_vars.active_num;
 	}
 	else
-	if (!thread_call_daemon_awake) {
-		thread_call_daemon_awake = TRUE;
-		thread_wakeup_one(&thread_call_daemon_awake);
+	if (!activate_thread_awake) {
+		thread_wakeup_one(&activate_thread_awake);
+		activate_thread_awake = TRUE;
 	}
 }
 
@@ -773,24 +942,28 @@ thread_call_wake(
  *
  *	Call out invoked by the scheduler.
  */
+
 static void
 sched_call_thread(
-	int				type,
-__unused	thread_t		thread)
+			int			type,
+__unused	thread_t	thread)
 {
-	thread_call_group_t		group = &thread_call_group0;
-
 	simple_lock(&thread_call_lock);
 
 	switch (type) {
 
 	case SCHED_CALL_BLOCK:
-		if (--group->active_count == 0 && group->pending_count > 0)
-			thread_call_wake(group);
+		if (--thread_call_vars.active_num < thread_call_vars.active_lowat)
+			thread_call_vars.active_lowat = thread_call_vars.active_num;
+
+		if (	thread_call_vars.active_num <= 0	&&
+				thread_call_vars.pending_num > 0		)
+			_call_thread_wake();
 		break;
 
 	case SCHED_CALL_UNBLOCK:
-		group->active_count++;
+		if (++thread_call_vars.active_num > thread_call_vars.active_hiwat)
+			thread_call_vars.active_hiwat = thread_call_vars.active_num;
 		break;
 	}
 
@@ -798,11 +971,18 @@ __unused	thread_t		thread)
 }
 
 /*
- *	thread_call_thread:
+ * Routine:	_call_thread [private]
+ *
+ * Purpose:	Executed by a callout thread.
+ *
+ * Preconditions:	None.
+ *
+ * Postconditions:	None.
  */
-static void
-thread_call_thread(
-	thread_call_group_t		group)
+
+static
+void
+_call_thread_continue(void)
 {
 	thread_t		self = current_thread();
 
@@ -811,19 +991,19 @@ thread_call_thread(
 
 	thread_sched_call(self, sched_call_thread);
 
-    while (group->pending_count > 0) {
+    while (thread_call_vars.pending_num > 0) {
 		thread_call_t			call;
 		thread_call_func_t		func;
 		thread_call_param_t		param0, param1;
 
-		call = TC(dequeue_head(&group->pending_queue));
-		group->pending_count--;
+		call = TC(dequeue_head(&thread_call_pending_queue));
+		thread_call_vars.pending_num--;
 
 		func = call->func;
 		param0 = call->param0;
 		param1 = call->param1;
 	
-		call->queue = NULL;
+		call->state = IDLE;
 
 		_internal_call_release(call);
 
@@ -836,27 +1016,31 @@ thread_call_thread(
 
 		(*func)(param0, param1);
 
-		(void)thread_funnel_set(self->funnel_lock, FALSE);		/* XXX */
+		(void)thread_funnel_set(self->funnel_lock, FALSE);
 
 		(void) splsched();
 		simple_lock(&thread_call_lock);
     }
 
 	thread_sched_call(self, NULL);
-	group->active_count--;
 
-    if (group->idle_count < thread_call_thread_min) {
-		group->idle_count++;
+	if (--thread_call_vars.active_num < thread_call_vars.active_lowat)
+		thread_call_vars.active_lowat = thread_call_vars.active_num;
+	
+    if (thread_call_vars.idle_thread_num < thread_call_vars.thread_lowat) {
+		thread_call_vars.idle_thread_num++;
 
-		wait_queue_assert_wait(&group->idle_wqueue, NULL, THREAD_UNINT, 0);
+		wait_queue_assert_wait(&call_thread_waitqueue, NULL, THREAD_UNINT, 0);
 	
 		simple_unlock(&thread_call_lock);
 		(void) spllo();
 
-		thread_block_parameter((thread_continue_t)thread_call_thread, group);
+		thread_block((thread_continue_t)_call_thread_continue);
 		/* NOTREACHED */
     }
-
+    
+    thread_call_vars.thread_num--;
+    
     simple_unlock(&thread_call_lock);
     (void) spllo();
     
@@ -864,12 +1048,27 @@ thread_call_thread(
 	/* NOTREACHED */
 }
 
+static
+void
+_call_thread(void)
+{
+    _call_thread_continue();
+    /* NOTREACHED */
+}
+
 /*
- *	thread_call_daemon:
+ * Routine:	_activate_thread [private]
+ *
+ * Purpose:	Executed by the activate thread.
+ *
+ * Preconditions:	None.
+ *
+ * Postconditions:	Never terminates.
  */
-static void
-thread_call_daemon_continue(
-	thread_call_group_t		group)
+
+static
+void
+_activate_thread_continue(void)
 {
 	kern_return_t	result;
 	thread_t		thread;
@@ -877,78 +1076,89 @@ thread_call_daemon_continue(
     (void) splsched();
     simple_lock(&thread_call_lock);
         
-	while (group->active_count == 0	&& group->pending_count > 0) {
-		group->active_count++;
+	while (		thread_call_vars.active_num <= 0	&&
+				thread_call_vars.pending_num > 0		) {
+
+		if (++thread_call_vars.active_num > thread_call_vars.active_hiwat)
+			thread_call_vars.active_hiwat = thread_call_vars.active_num;
+
+		if (++thread_call_vars.thread_num > thread_call_vars.thread_hiwat)
+			thread_call_vars.thread_hiwat = thread_call_vars.thread_num;
 
 		simple_unlock(&thread_call_lock);
 		(void) spllo();
 	
-		result = kernel_thread_start_priority((thread_continue_t)thread_call_thread, group, BASEPRI_PREEMPT, &thread);
+		result = kernel_thread_start_priority((thread_continue_t)_call_thread, NULL, MAXPRI_KERNEL - 1, &thread);
 		if (result != KERN_SUCCESS)
-			panic("thread_call_daemon");
+			panic("activate_thread");
 
 		thread_deallocate(thread);
 
 		(void) splsched();
 		simple_lock(&thread_call_lock);
     }
-
-	thread_call_daemon_awake = FALSE;
-    assert_wait(&thread_call_daemon_awake, THREAD_UNINT);
+		
+    assert_wait(&activate_thread_awake, THREAD_INTERRUPTIBLE);
+	activate_thread_awake = FALSE;
     
     simple_unlock(&thread_call_lock);
 	(void) spllo();
     
-	thread_block_parameter((thread_continue_t)thread_call_daemon_continue, group);
+	thread_block((thread_continue_t)_activate_thread_continue);
 	/* NOTREACHED */
 }
 
-static void
-thread_call_daemon(
-	thread_call_group_t		group)
+static
+void
+_activate_thread(void)
 {
 	thread_t	self = current_thread();
 
 	self->options |= TH_OPT_VMPRIV;
 	vm_page_free_reserve(2);	/* XXX */
     
-    thread_call_daemon_continue(group);
+    _activate_thread_continue();
     /* NOTREACHED */
 }
 
-static void
-thread_call_delayed_timer(
-	timer_call_param_t				p0,
+static
+void
+_delayed_call_timer(
+	__unused timer_call_param_t		p0,
 	__unused timer_call_param_t		p1
 )
 {
-    thread_call_t			call;
-	thread_call_group_t		group = p0;
-	boolean_t				new_pending = FALSE;
-	uint64_t				timestamp;
+	uint64_t			timestamp;
+    thread_call_t		call;
+	boolean_t			new_pending = FALSE;
+    spl_t				s;
 
+    s = splsched();
     simple_lock(&thread_call_lock);
 
-	timestamp = mach_absolute_time();
+	clock_get_uptime(&timestamp);
     
-    call = TC(queue_first(&group->delayed_queue));
+    call = TC(queue_first(&thread_call_delayed_queue));
     
-    while (!queue_end(&group->delayed_queue, qe(call))) {
+    while (!queue_end(&thread_call_delayed_queue, qe(call))) {
     	if (call->deadline <= timestamp) {
-			_pending_call_enqueue(call, group);
+			_delayed_call_dequeue(call);
+
+			_pending_call_enqueue(call);
 			new_pending = TRUE;
 		}
 		else
 			break;
 	    
-		call = TC(queue_first(&group->delayed_queue));
+		call = TC(queue_first(&thread_call_delayed_queue));
     }
 
-	if (!queue_end(&group->delayed_queue, qe(call)))
-		_set_delayed_call_timer(call, group);
+	if (!queue_end(&thread_call_delayed_queue, qe(call)))
+		_set_delayed_call_timer(call);
 
-    if (new_pending && group->active_count == 0)
-		thread_call_wake(group);
+    if (new_pending && thread_call_vars.active_num <= 0)
+		_call_thread_wake();
 
     simple_unlock(&thread_call_lock);
+    splx(s);
 }

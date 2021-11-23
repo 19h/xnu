@@ -402,7 +402,7 @@ kdbg_lock_init(void)
 	/* get the number of cpus and cache it */
 #define BSD_HOST 1
 	host_info((host_t)BSD_HOST, HOST_BASIC_INFO, (host_info_t)&hinfo, &count);
-	kd_cpus = hinfo.logical_cpu_max;
+	kd_cpus = hinfo.physical_cpu_max;
 
 	if (kmem_alloc(kernel_map, (unsigned int *)&kdbip,
 		       sizeof(struct kd_bufinfo) * kd_cpus) != KERN_SUCCESS)
@@ -1043,27 +1043,17 @@ kdbg_control_chud(int val, void *fn)
 
 	
 int
-kdbg_control(int *name, u_int namelen, user_addr_t where, size_t *sizep)
+kdbg_control(int *name, __unused u_int namelen, user_addr_t where, size_t *sizep)
 {
         int ret=0;
 	size_t size=*sizep;
-	unsigned int value = 0;
+	unsigned int value = name[1];
 	kd_regtype kd_Reg;
 	kbufinfo_t kd_bufinfo;
 	pid_t curpid;
 	struct proc *p, *curproc;
 
-	if (name[0] == KERN_KDGETENTROPY ||
-		name[0] == KERN_KDEFLAGS ||
-		name[0] == KERN_KDDFLAGS ||
-		name[0] == KERN_KDENABLE ||
-		name[0] == KERN_KDSETBUF) {
-		
-		if ( namelen < 2 )
-	        return(EINVAL);
-		value = name[1];
-	}
-	
+
 	kdbg_lock_init();
 
 	if ( !(kdebug_flags & KDBG_LOCKINIT))

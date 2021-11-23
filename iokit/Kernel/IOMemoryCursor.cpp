@@ -72,7 +72,7 @@ IOMemoryCursor::initWithSpecification(SegmentFunction  inSegFunc,
 static UInt sMaxDBDMASegment;
 if (!sMaxDBDMASegment) {
     sMaxDBDMASegment = (UInt) -1;
-    if (PE_parse_boot_argn("mseg", &sMaxDBDMASegment, sizeof (sMaxDBDMASegment)))
+    if (PE_parse_boot_arg("mseg", &sMaxDBDMASegment))
         IOLog("Setting MaxDBDMASegment to %d\n", sMaxDBDMASegment);
 }
 

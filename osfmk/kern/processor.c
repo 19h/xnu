@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -132,36 +132,36 @@ processor_bootstrap(void)
 
 /*
  *	Initialize the given processor for the cpu
- *	indicated by cpu_num, and assign to the
+ *	indicated by slot_num, and assign to the
  *	specified processor set.
  */
 void
 processor_init(
-	processor_t			processor,
-	int					cpu_num,
-	processor_set_t		pset)
+	processor_t		p,
+	int				slot_num,
+	processor_set_t	pset)
 {
-	run_queue_init(&processor->runq);
+	run_queue_init(&p->runq);
 
-	processor->state = PROCESSOR_OFF_LINE;
-	processor->active_thread = processor->next_thread = processor->idle_thread = THREAD_NULL;
-	processor->processor_set = pset;
-	processor->current_pri = MINPRI;
-	processor->cpu_num = cpu_num;
-	timer_call_setup(&processor->quantum_timer, thread_quantum_expire, processor);
-	processor->deadline = UINT64_MAX;
-	processor->timeslice = 0;
-	processor->processor_self = IP_NULL;
-	simple_lock_init(&processor->lock, 0);
-	processor_data_init(processor);
-	processor->processor_list = NULL;
+	p->state = PROCESSOR_OFF_LINE;
+	p->active_thread = p->next_thread = p->idle_thread = THREAD_NULL;
+	p->processor_set = pset;
+	p->current_pri = MINPRI;
+	timer_call_setup(&p->quantum_timer, thread_quantum_expire, p);
+	p->deadline = UINT64_MAX;
+	p->timeslice = 0;
+	p->processor_self = IP_NULL;
+	simple_lock_init(&p->lock, 0);
+	processor_data_init(p);
+	PROCESSOR_DATA(p, slot_num) = slot_num;
+	p->processor_list = NULL;
 
 	simple_lock(&processor_list_lock);
 	if (processor_list == NULL)
-		processor_list = processor;
+		processor_list = p;
 	else
-		processor_list_tail->processor_list = processor;
-	processor_list_tail = processor;
+		processor_list_tail->processor_list = p;
+	processor_list_tail = p;
 	processor_count++;
 	simple_unlock(&processor_list_lock);
 }
@@ -212,8 +212,10 @@ pset_init(
 {
 	queue_init(&pset->active_queue);
 	queue_init(&pset->idle_queue);
+	pset->idle_count = 0;
 	pset->processor_count = 0;
-	pset->low_pri = pset->low_count = PROCESSOR_NULL;
+	pset->high_hint = PROCESSOR_NULL;
+	pset->low_hint = PROCESSOR_NULL;
 	pset_lock_init(pset);
 	pset->pset_self = IP_NULL;
 	pset->pset_name_self = IP_NULL;
@@ -252,13 +254,13 @@ processor_info(
 	processor_info_t		info,
 	mach_msg_type_number_t	*count)
 {
-	register int	cpu_num, state;
+	register int	slot_num, state;
 	kern_return_t	result;
 
 	if (processor == PROCESSOR_NULL)
 		return (KERN_INVALID_ARGUMENT);
 
-	cpu_num = processor->cpu_num;
+	slot_num = PROCESSOR_DATA(processor, slot_num);
 
 	switch (flavor) {
 
@@ -270,14 +272,14 @@ processor_info(
 			return (KERN_FAILURE);
 
 		basic_info = (processor_basic_info_t) info;
-		basic_info->cpu_type = slot_type(cpu_num);
-		basic_info->cpu_subtype = slot_subtype(cpu_num);
+		basic_info->cpu_type = slot_type(slot_num);
+		basic_info->cpu_subtype = slot_subtype(slot_num);
 		state = processor->state;
 		if (state == PROCESSOR_OFF_LINE)
 			basic_info->running = FALSE;
 		else
 			basic_info->running = TRUE;
-		basic_info->slot_num = cpu_num;
+		basic_info->slot_num = slot_num;
 		if (processor == master_processor) 
 			basic_info->is_master = TRUE;
 		else
@@ -312,7 +314,7 @@ processor_info(
 	}
 
 	default:
-	    result = cpu_info(flavor, cpu_num, info, count);
+	    result = cpu_info(flavor, slot_num, info, count);
 	    if (result == KERN_SUCCESS)
 			*host = &realhost;		   
 
@@ -338,7 +340,7 @@ processor_start(
 		prev = thread_bind(processor);
 		thread_block(THREAD_CONTINUE_NULL);
 
-		result = cpu_start(processor->cpu_num);
+		result = cpu_start(PROCESSOR_DATA(processor, slot_num));
 
 		thread_bind(prev);
 
@@ -407,11 +409,12 @@ processor_start(
 	if (processor->processor_self == IP_NULL)
 		ipc_processor_init(processor);
 
-	result = cpu_start(processor->cpu_num);
+	result = cpu_start(PROCESSOR_DATA(processor, slot_num));
 	if (result != KERN_SUCCESS) {
 		s = splsched();
 		pset_lock(pset);
 		processor->state = PROCESSOR_OFF_LINE;
+		timer_call_shutdown(processor);
 		pset_unlock(pset);
 		splx(s);
 
@@ -442,7 +445,7 @@ processor_control(
 	if (processor == PROCESSOR_NULL)
 		return(KERN_INVALID_ARGUMENT);
 
-	return(cpu_control(processor->cpu_num, info, count));
+	return(cpu_control(PROCESSOR_DATA(processor, slot_num), info, count));
 }
 	    
 kern_return_t
@@ -883,15 +886,6 @@ processor_set_threads(
 	__unused mach_msg_type_number_t	*count)
 {
     return KERN_FAILURE;
-}
-#elif defined(CONFIG_EMBEDDED)
-kern_return_t
-processor_set_threads(
-	__unused processor_set_t		pset,
-	__unused thread_array_t		*thread_list,
-	__unused mach_msg_type_number_t	*count)
-{
-    return KERN_NOT_SUPPORTED;
 }
 #else
 kern_return_t

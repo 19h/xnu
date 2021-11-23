@@ -132,7 +132,7 @@ static int	unp_connect(struct socket *, struct sockaddr *, proc_t);
 static void	unp_disconnect(struct unpcb *);
 static void	unp_shutdown(struct unpcb *);
 static void	unp_drop(struct unpcb *, int);
-__private_extern__ void	unp_gc(void);
+static void	unp_gc(void);
 static void	unp_scan(struct mbuf *, void (*)(struct fileglob *));
 static void	unp_mark(struct fileglob *);
 static void	unp_discard(struct fileglob *);
@@ -749,11 +749,7 @@ unp_detach(struct unpcb *unp)
 		 * gets them (resulting in a "panic: closef: count < 0").
 		 */
 		sorflush(unp->unp_socket);
-
-		/* Per domain mutex deadlock avoidance */
-		socket_unlock(unp->unp_socket, 0);
 		unp_gc();
-		socket_lock(unp->unp_socket, 0);
 	}
 	if (unp->unp_addr)
 		FREE(unp->unp_addr, M_SONAME);
@@ -1366,15 +1362,11 @@ unp_internalize(struct mbuf *control, proc_t p)
 }
 
 static int	unp_defer, unp_gcing, unp_gcwait;
-static thread_t unp_gcthread = NULL;
 
 /* always called under uipc_lock */
 void
 unp_gc_wait(void)
 {
-	if (unp_gcthread == current_thread())
-		return;
-
 	while (unp_gcing != 0) {
 		unp_gcwait = 1;
 		msleep(&unp_gcing, uipc_lock, 0 , "unp_gc_wait", NULL);
@@ -1382,13 +1374,12 @@ unp_gc_wait(void)
 }
 
 
-__private_extern__ void
+static void
 unp_gc(void)
 {
 	struct fileglob *fg, *nextfg;
 	struct socket *so;
-	static struct fileglob **extra_ref;
-        struct fileglob **fpp;
+	struct fileglob **extra_ref, **fpp;
 	int nunref, i;
 	int need_gcwakeup = 0;
 
@@ -1399,7 +1390,6 @@ unp_gc(void)
 	}
 	unp_gcing = 1;
 	unp_defer = 0;
-	unp_gcthread = current_thread();
 	lck_mtx_unlock(uipc_lock);
 	/*
 	 * before going through all this, set all FDs to
@@ -1494,13 +1484,9 @@ unp_gc(void)
 			 * to see if we hold any file descriptors in its
 			 * message buffers. Follow those links and mark them
 			 * as accessible too.
-			 *
-			 * In case a file is passed onto itself we need to
-			 * release the file lock.
 			 */
-			lck_mtx_unlock(&fg->fg_lock);
-
 			unp_scan(so->so_rcv.sb_mb, unp_mark);
+			lck_mtx_unlock(&fg->fg_lock);
 		}
 	} while (unp_defer);
 	/*
@@ -1578,13 +1564,20 @@ unp_gc(void)
 		tfg = *fpp;
 
 		if (tfg->fg_type == DTYPE_SOCKET && tfg->fg_data != NULL) {
+			int locked = 0;
+
 			so = (struct socket *)(tfg->fg_data);
 
-			socket_lock(so, 0);
-
+			/* XXXX */
+			/* Assume local sockets use a global lock */
+			if (so->so_proto->pr_domain->dom_family != PF_LOCAL) {
+				socket_lock(so, 0);
+				locked = 1;
+			}
 			sorflush(so);
 
-			socket_unlock(so, 0);
+			if (locked)
+				socket_unlock(so, 0);
 		}
 	}
 	for (i = nunref, fpp = extra_ref; --i >= 0; ++fpp)
@@ -1592,7 +1585,6 @@ unp_gc(void)
 
         lck_mtx_lock(uipc_lock);
 	unp_gcing = 0;
-	unp_gcthread = NULL;
 
 	if (unp_gcwait != 0) {
 		unp_gcwait = 0;

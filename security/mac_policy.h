@@ -528,10 +528,6 @@ typedef int mpo_cred_label_internalize_t(
   The final label, execlabel, corresponds to a label supplied by a
   user space application through the use of the mac_execve system call.
 
-  If non-NULL, the value pointed to by disjointp will be set to 0 to
-  indicate that the old and new credentials are not disjoint, or 1 to
-  indicate that they are.
-
   The vnode lock is held during this operation.  No changes should be
   made to the old credential structure.
 */
@@ -541,8 +537,7 @@ typedef void mpo_cred_label_update_execve_t(
 	struct vnode *vp,
 	struct label *vnodelabel,
 	struct label *scriptvnodelabel,
-	struct label *execlabel,
-	int *disjointp
+	struct label *execlabel
 );
 /**
   @brief Update a credential label
@@ -4412,25 +4407,6 @@ typedef int mpo_proc_check_get_task_t(
 	kauth_cred_t cred,
 	struct proc *p
 );
-
-
-/**
- @brief Access control check for manipulating a proc's vm_map
- @param cred Subject credential
- @param proc Object process
- 
- Determine whether the vm_map map belonging to process proc with 
- credential cred allows the VM_PROT_COPY operation.
- 
- @return Return 0 if access is granted, otherwise an appropriate value for
- errno should be returned.
- */
-typedef int mpo_proc_check_map_prot_copy_allow_t(
-	kauth_cred_t cred,
-	struct proc *p
-);
-
-
 /**
   @brief Assign a label to a new kernelspace Mach task
   @param kproc New task
@@ -4738,13 +4714,6 @@ typedef int mpo_vnode_check_exec_t(
 	struct componentname *cnp,
 	u_int *csflags
 );
-/**
-  @brief Access control check after determining the code directory hash
- */
-typedef int mpo_vnode_check_signature_t(struct vnode *vp,  struct label *label, 
-					unsigned char *sha1, void *signature, 
-					int size);
-
 /**
   @brief Access control check for retrieving file attributes
   @param cred Subject credential
@@ -6034,8 +6003,8 @@ struct mac_policy_ops {
 	mpo_vnode_label_update_extattr_t	*mpo_vnode_label_update_extattr;
 	mpo_vnode_label_update_t		*mpo_vnode_label_update;
 	mpo_vnode_notify_create_t		*mpo_vnode_notify_create;
-	mpo_vnode_check_signature_t		*mpo_vnode_check_signature;
-	mpo_proc_check_map_prot_copy_allow_t	*mpo_proc_check_map_prot_copy_allow;
+	mpo_reserved_hook_t			*mpo_reserved0;
+	mpo_reserved_hook_t			*mpo_reserved1;
 	mpo_reserved_hook_t			*mpo_reserved2;
 	mpo_reserved_hook_t			*mpo_reserved3;
 	mpo_reserved_hook_t			*mpo_reserved4;

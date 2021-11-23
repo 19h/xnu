@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -40,14 +40,12 @@
 
 #include <kern/kern_types.h>
 #include <kern/startup.h>
-#include <kern/timer_queue.h>
 #include <kern/processor.h>
 #include <kern/cpu_number.h>
 #include <kern/cpu_data.h>
 #include <kern/assert.h>
 #include <kern/machine.h>
 #include <kern/pms.h>
-#include <kern/misc_protos.h>
 
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
@@ -57,7 +55,7 @@
 #include <i386/mp.h>
 #include <i386/mp_events.h>
 #include <i386/mp_slave_boot.h>
-#include <i386/lapic.h>
+#include <i386/apic.h>
 #include <i386/ipl.h>
 #include <i386/fpu.h>
 #include <i386/cpuid.h>
@@ -73,6 +71,7 @@
 #include <i386/trap.h>
 #include <i386/machine_routines.h>
 #include <i386/pmCPU.h>
+#include <i386/hpet.h>
 #include <i386/machine_check.h>
 
 #include <chud/chud_xnu.h>
@@ -98,8 +97,20 @@
 #define PAUSE
 #endif	/* MP_DEBUG */
 
-#define FULL_SLAVE_INIT	(NULL)
-#define FAST_SLAVE_INIT	((void *)(uintptr_t)1)
+/* Initialize lapic_id so cpu_number() works on non SMP systems */
+unsigned long	lapic_id_initdata = 0;
+unsigned long	lapic_id = (unsigned long)&lapic_id_initdata;
+vm_offset_t	lapic_start;
+
+static i386_intr_func_t	lapic_timer_func;
+static i386_intr_func_t	lapic_pmi_func;
+static i386_intr_func_t	lapic_thermal_func;
+
+/* TRUE if local APIC was enabled by the OS not by the BIOS */
+static boolean_t lapic_os_enabled = FALSE;
+
+/* Base vector for local APIC interrupt sources */
+int lapic_interrupt_base = LAPIC_DEFAULT_INTERRUPT_BASE;
 
 void 		slave_boot_init(void);
 
@@ -113,13 +124,12 @@ static void	mp_kdp_wait(boolean_t flush);
 static void	mp_rendezvous_action(void);
 static void 	mp_broadcast_action(void);
 
-static boolean_t	cpu_signal_pending(int cpu, mp_event_t event);
-static int		cpu_signal_handler(x86_saved_state_t *regs);
 static int		NMIInterruptHandler(x86_saved_state_t *regs);
+static boolean_t	cpu_signal_pending(int cpu, mp_event_t event);
+static void		cpu_NMI_interrupt(int cpu);
 
 boolean_t 	smp_initialized = FALSE;
-volatile boolean_t	force_immediate_debugger_NMI = FALSE;
-volatile boolean_t	pmap_tlb_flush_timeout = FALSE;
+boolean_t	force_immediate_debugger_NMI = FALSE;
 
 decl_simple_lock_data(,mp_kdp_lock);
 
@@ -140,13 +150,76 @@ static volatile long	mp_rv_complete __attribute__((aligned(64)));
 /* Variables needed for MP broadcast. */
 static void        (*mp_bc_action_func)(void *arg);
 static void        *mp_bc_func_arg;
-static int     	mp_bc_ncpus;
+static int     mp_bc_ncpus;
 static volatile long   mp_bc_count;
 decl_mutex_data(static, mp_bc_lock);
-static	volatile int 	debugger_cpu = -1;
 
 static void	mp_cpus_call_action(void); 
-static void	mp_call_PM(void);
+
+int		lapic_to_cpu[MAX_CPUS];
+int		cpu_to_lapic[MAX_CPUS];
+
+static void
+lapic_cpu_map_init(void)
+{
+	int	i;
+
+	for (i = 0; i < MAX_CPUS; i++) {
+		lapic_to_cpu[i] = -1;
+		cpu_to_lapic[i] = -1;
+	}
+}
+
+void
+lapic_cpu_map(int apic_id, int cpu)
+{
+	cpu_to_lapic[cpu] = apic_id;
+	lapic_to_cpu[apic_id] = cpu;
+}
+
+/*
+ * Retrieve the local apic ID a cpu.
+ *
+ * Returns the local apic ID for the given processor.
+ * If the processor does not exist or apic not configured, returns -1.
+ */
+
+uint32_t
+ml_get_apicid(uint32_t cpu)
+{
+	if(cpu >= (uint32_t)MAX_CPUS)
+		return 0xFFFFFFFF;	/* Return -1 if cpu too big */
+	
+	/* Return the apic ID (or -1 if not configured) */
+	return (uint32_t)cpu_to_lapic[cpu];
+
+}
+
+#ifdef MP_DEBUG
+static void
+lapic_cpu_map_dump(void)
+{
+	int	i;
+
+	for (i = 0; i < MAX_CPUS; i++) {
+		if (cpu_to_lapic[i] == -1)
+			continue;
+		kprintf("cpu_to_lapic[%d]: %d\n",
+			i, cpu_to_lapic[i]);
+	}
+	for (i = 0; i < MAX_CPUS; i++) {
+		if (lapic_to_cpu[i] == -1)
+			continue;
+		kprintf("lapic_to_cpu[%d]: %d\n",
+			i, lapic_to_cpu[i]);
+	}
+}
+#define LAPIC_CPU_MAP_DUMP()	lapic_cpu_map_dump()
+#define LAPIC_DUMP()		lapic_dump()
+#else
+#define LAPIC_CPU_MAP_DUMP()
+#define LAPIC_DUMP()
+#endif /* MP_DEBUG */
 
 #if GPROF
 /*
@@ -170,6 +243,14 @@ struct profile_vars *_profile_vars_cpus[MAX_CPUS] = { &_profile_vars };
 void
 smp_init(void)
 {
+	int		result;
+	vm_map_entry_t	entry;
+	uint32_t	lo;
+	uint32_t	hi;
+	boolean_t	is_boot_processor;
+	boolean_t	is_lapic_enabled;
+	vm_offset_t	lapic_base;
+
 	simple_lock_init(&mp_kdp_lock, 0);
 	simple_lock_init(&mp_rv_lock, 0);
 	mutex_init(&mp_cpu_boot_lock, 0);
@@ -180,10 +261,48 @@ smp_init(void)
 	if (!lapic_probe())
 		return;
 
+	/* Examine the local APIC state */
+	rdmsr(MSR_IA32_APIC_BASE, lo, hi);
+	is_boot_processor = (lo & MSR_IA32_APIC_BASE_BSP) != 0;
+	is_lapic_enabled  = (lo & MSR_IA32_APIC_BASE_ENABLE) != 0;
+	lapic_base = (lo &  MSR_IA32_APIC_BASE_BASE);
+	kprintf("MSR_IA32_APIC_BASE 0x%x %s %s\n", lapic_base,
+		is_lapic_enabled ? "enabled" : "disabled",
+		is_boot_processor ? "BSP" : "AP");
+	if (!is_boot_processor || !is_lapic_enabled)
+		panic("Unexpected local APIC state\n");
+
+	/* Establish a map to the local apic */
+	lapic_start = vm_map_min(kernel_map);
+	result = vm_map_find_space(kernel_map,
+				   (vm_map_address_t *) &lapic_start,
+				   round_page(LAPIC_SIZE), 0,
+				   VM_MAKE_TAG(VM_MEMORY_IOKIT), &entry);
+	if (result != KERN_SUCCESS) {
+		panic("smp_init: vm_map_find_entry FAILED (err=%d)", result);
+	}
+	vm_map_unlock(kernel_map);
+/* Map in the local APIC non-cacheable, as recommended by Intel
+ * in section 8.4.1 of the "System Programming Guide".
+ */
+	pmap_enter(pmap_kernel(),
+			lapic_start,
+			(ppnum_t) i386_btop(lapic_base),
+			VM_PROT_READ|VM_PROT_WRITE,
+			VM_WIMG_IO,
+			TRUE);
+	lapic_id = (unsigned long)(lapic_start + LAPIC_ID);
+
+	if ((LAPIC_REG(VERSION)&LAPIC_VERSION_MASK) != 0x14) {
+		printf("Local APIC version not 0x14 as expected\n");
+	}
+
+	/* Set up the lapic_id <-> cpu_number map and add this boot processor */
+	lapic_cpu_map_init();
+	lapic_cpu_map((LAPIC_REG(ID)>>LAPIC_ID_SHIFT)&LAPIC_ID_MASK, 0);
+	kprintf("Boot cpu local APIC id 0x%x\n", cpu_to_lapic[0]);
+
 	lapic_init();
-	lapic_configure();
-	lapic_set_intr_func(LAPIC_NMI_INTERRUPT,  NMIInterruptHandler);
-	lapic_set_intr_func(LAPIC_VECTOR(INTERPROCESSOR), cpu_signal_handler);
 
 	cpu_thread_init();
 
@@ -197,64 +316,429 @@ smp_init(void)
 	return;
 }
 
-/*
- * Poll a CPU to see when it has marked itself as running.
- */
-static void
-mp_wait_for_cpu_up(int slot_num, unsigned int iters, unsigned int usecdelay)
+
+static int
+lapic_esr_read(void)
 {
-    	while (iters-- > 0) {
-		if (cpu_datap(slot_num)->cpu_running)
-	    		break;
-		delay(usecdelay);
-	}
+	/* write-read register */
+	LAPIC_REG(ERROR_STATUS) = 0;
+	return LAPIC_REG(ERROR_STATUS);
 }
 
-typedef struct {
-	int		target_cpu;
-	int		target_lapic;
-	int		starter_cpu;
- 	boolean_t	is_nehalem;
-} processor_start_info_t;
-
-static processor_start_info_t start_info;
-
-static void
-start_cpu(void *arg)
+static void 
+lapic_esr_clear(void)
 {
-	int			i = 1000;
-	processor_start_info_t	*psip = (processor_start_info_t *) arg;
+	LAPIC_REG(ERROR_STATUS) = 0;
+	LAPIC_REG(ERROR_STATUS) = 0;
+}
 
-	/* Ignore this if the current processor is not the starter */
-	if (cpu_number() != psip->starter_cpu)
-		return;
+static const char *DM[8] = {
+	"Fixed",
+	"Lowest Priority",
+	"Invalid",
+	"Invalid",
+	"NMI",
+	"Reset",
+	"Invalid",
+	"ExtINT"};
 
-	LAPIC_WRITE(ICRD, psip->target_lapic << LAPIC_ICRD_DEST_SHIFT);
-	LAPIC_WRITE(ICR, LAPIC_ICR_DM_INIT);
-	delay(psip->is_nehalem ? 100 : 10000);
+void
+lapic_dump(void)
+{
+	int	i;
 
-	LAPIC_WRITE(ICRD, psip->target_lapic << LAPIC_ICRD_DEST_SHIFT);
-	LAPIC_WRITE(ICR, LAPIC_ICR_DM_STARTUP|(MP_BOOT>>12));
+#define BOOL(a) ((a)?' ':'!')
 
-	if (!psip->is_nehalem) {
-		delay(200);
-		LAPIC_WRITE(ICRD, psip->target_lapic << LAPIC_ICRD_DEST_SHIFT);
-		LAPIC_WRITE(ICR, LAPIC_ICR_DM_STARTUP|(MP_BOOT>>12));
+	kprintf("LAPIC %d at 0x%x version 0x%x\n", 
+		(LAPIC_REG(ID)>>LAPIC_ID_SHIFT)&LAPIC_ID_MASK,
+		lapic_start,
+		LAPIC_REG(VERSION)&LAPIC_VERSION_MASK);
+	kprintf("Priorities: Task 0x%x  Arbitration 0x%x  Processor 0x%x\n",
+		LAPIC_REG(TPR)&LAPIC_TPR_MASK,
+		LAPIC_REG(APR)&LAPIC_APR_MASK,
+		LAPIC_REG(PPR)&LAPIC_PPR_MASK);
+	kprintf("Destination Format 0x%x Logical Destination 0x%x\n",
+		LAPIC_REG(DFR)>>LAPIC_DFR_SHIFT,
+		LAPIC_REG(LDR)>>LAPIC_LDR_SHIFT);
+	kprintf("%cEnabled %cFocusChecking SV 0x%x\n",
+		BOOL(LAPIC_REG(SVR)&LAPIC_SVR_ENABLE),
+		BOOL(!(LAPIC_REG(SVR)&LAPIC_SVR_FOCUS_OFF)),
+		LAPIC_REG(SVR) & LAPIC_SVR_MASK);
+	kprintf("LVT_TIMER:   Vector 0x%02x %s %cmasked %s\n",
+		LAPIC_REG(LVT_TIMER)&LAPIC_LVT_VECTOR_MASK,
+		(LAPIC_REG(LVT_TIMER)&LAPIC_LVT_DS_PENDING)?"SendPending":"Idle",
+		BOOL(LAPIC_REG(LVT_TIMER)&LAPIC_LVT_MASKED),
+		(LAPIC_REG(LVT_TIMER)&LAPIC_LVT_PERIODIC)?"Periodic":"OneShot");
+	kprintf("  Initial Count: 0x%08x \n", LAPIC_REG(TIMER_INITIAL_COUNT));
+	kprintf("  Current Count: 0x%08x \n", LAPIC_REG(TIMER_CURRENT_COUNT));
+	kprintf("  Divide Config: 0x%08x \n", LAPIC_REG(TIMER_DIVIDE_CONFIG));
+	kprintf("LVT_PERFCNT: Vector 0x%02x [%s] %s %cmasked\n",
+		LAPIC_REG(LVT_PERFCNT)&LAPIC_LVT_VECTOR_MASK,
+		DM[(LAPIC_REG(LVT_PERFCNT)>>LAPIC_LVT_DM_SHIFT)&LAPIC_LVT_DM_MASK],
+		(LAPIC_REG(LVT_PERFCNT)&LAPIC_LVT_DS_PENDING)?"SendPending":"Idle",
+		BOOL(LAPIC_REG(LVT_PERFCNT)&LAPIC_LVT_MASKED));
+	kprintf("LVT_THERMAL: Vector 0x%02x [%s] %s %cmasked\n",
+		LAPIC_REG(LVT_THERMAL)&LAPIC_LVT_VECTOR_MASK,
+		DM[(LAPIC_REG(LVT_THERMAL)>>LAPIC_LVT_DM_SHIFT)&LAPIC_LVT_DM_MASK],
+		(LAPIC_REG(LVT_THERMAL)&LAPIC_LVT_DS_PENDING)?"SendPending":"Idle",
+		BOOL(LAPIC_REG(LVT_THERMAL)&LAPIC_LVT_MASKED));
+	kprintf("LVT_LINT0:   Vector 0x%02x [%s][%s][%s] %s %cmasked\n",
+		LAPIC_REG(LVT_LINT0)&LAPIC_LVT_VECTOR_MASK,
+		DM[(LAPIC_REG(LVT_LINT0)>>LAPIC_LVT_DM_SHIFT)&LAPIC_LVT_DM_MASK],
+		(LAPIC_REG(LVT_LINT0)&LAPIC_LVT_TM_LEVEL)?"Level":"Edge ",
+		(LAPIC_REG(LVT_LINT0)&LAPIC_LVT_IP_PLRITY_LOW)?"Low ":"High",
+		(LAPIC_REG(LVT_LINT0)&LAPIC_LVT_DS_PENDING)?"SendPending":"Idle",
+		BOOL(LAPIC_REG(LVT_LINT0)&LAPIC_LVT_MASKED));
+	kprintf("LVT_LINT1:   Vector 0x%02x [%s][%s][%s] %s %cmasked\n",
+		LAPIC_REG(LVT_LINT1)&LAPIC_LVT_VECTOR_MASK,
+		DM[(LAPIC_REG(LVT_LINT1)>>LAPIC_LVT_DM_SHIFT)&LAPIC_LVT_DM_MASK],
+		(LAPIC_REG(LVT_LINT1)&LAPIC_LVT_TM_LEVEL)?"Level":"Edge ",
+		(LAPIC_REG(LVT_LINT1)&LAPIC_LVT_IP_PLRITY_LOW)?"Low ":"High",
+		(LAPIC_REG(LVT_LINT1)&LAPIC_LVT_DS_PENDING)?"SendPending":"Idle",
+		BOOL(LAPIC_REG(LVT_LINT1)&LAPIC_LVT_MASKED));
+	kprintf("LVT_ERROR:   Vector 0x%02x %s %cmasked\n",
+		LAPIC_REG(LVT_ERROR)&LAPIC_LVT_VECTOR_MASK,
+		(LAPIC_REG(LVT_ERROR)&LAPIC_LVT_DS_PENDING)?"SendPending":"Idle",
+		BOOL(LAPIC_REG(LVT_ERROR)&LAPIC_LVT_MASKED));
+	kprintf("ESR: %08x \n", lapic_esr_read());
+	kprintf("       ");
+	for(i=0xf; i>=0; i--)
+		kprintf("%x%x%x%x",i,i,i,i);
+	kprintf("\n");
+	kprintf("TMR: 0x");
+	for(i=7; i>=0; i--)
+		kprintf("%08x",LAPIC_REG_OFFSET(TMR_BASE, i*0x10));
+	kprintf("\n");
+	kprintf("IRR: 0x");
+	for(i=7; i>=0; i--)
+		kprintf("%08x",LAPIC_REG_OFFSET(IRR_BASE, i*0x10));
+	kprintf("\n");
+	kprintf("ISR: 0x");
+	for(i=7; i >= 0; i--)
+		kprintf("%08x",LAPIC_REG_OFFSET(ISR_BASE, i*0x10));
+	kprintf("\n");
+}
+
+#if MACH_KDB
+/*
+ *	Displays apic junk
+ *
+ *	da
+ */
+void 
+db_apic(__unused db_expr_t addr,
+	__unused int have_addr,
+	__unused db_expr_t count,
+	__unused char *modif)
+{
+
+	lapic_dump();
+
+	return;
+}
+
+#endif
+
+boolean_t
+lapic_probe(void)
+{
+	uint32_t	lo;
+	uint32_t	hi;
+
+	if (cpuid_features() & CPUID_FEATURE_APIC)
+		return TRUE;
+
+	if (cpuid_family() == 6 || cpuid_family() == 15) {
+		/*
+		 * Mobile Pentiums:
+		 * There may be a local APIC which wasn't enabled by BIOS.
+		 * So we try to enable it explicitly.
+		 */
+		rdmsr(MSR_IA32_APIC_BASE, lo, hi);
+		lo &= ~MSR_IA32_APIC_BASE_BASE;
+		lo |= MSR_IA32_APIC_BASE_ENABLE | LAPIC_START;
+		lo |= MSR_IA32_APIC_BASE_ENABLE;
+		wrmsr(MSR_IA32_APIC_BASE, lo, hi);
+
+		/*
+		 * Re-initialize cpu features info and re-check.
+		 */
+		cpuid_set_info();
+		if (cpuid_features() & CPUID_FEATURE_APIC) {
+			printf("Local APIC discovered and enabled\n");
+			lapic_os_enabled = TRUE;
+			lapic_interrupt_base = LAPIC_REDUCED_INTERRUPT_BASE;
+			return TRUE;
+		}
 	}
 
-#ifdef	POSTCODE_DELAY
-	/* Wait much longer if postcodes are displayed for a delay period. */
-	i *= 10000;
-#endif
-	mp_wait_for_cpu_up(psip->target_cpu, i*100, 100);
+	return FALSE;
+}
+
+void
+lapic_shutdown(void)
+{
+	uint32_t lo;
+	uint32_t hi;
+	uint32_t value;
+
+	/* Shutdown if local APIC was enabled by OS */
+	if (lapic_os_enabled == FALSE)
+		return;
+
+	mp_disable_preemption();
+
+	/* ExtINT: masked */
+	if (get_cpu_number() == master_cpu) {
+		value = LAPIC_REG(LVT_LINT0);
+		value |= LAPIC_LVT_MASKED;
+		LAPIC_REG(LVT_LINT0) = value;
+	}
+
+	/* Timer: masked */
+	LAPIC_REG(LVT_TIMER) |= LAPIC_LVT_MASKED;
+
+	/* Perfmon: masked */
+	LAPIC_REG(LVT_PERFCNT) |= LAPIC_LVT_MASKED;
+
+	/* Error: masked */
+	LAPIC_REG(LVT_ERROR) |= LAPIC_LVT_MASKED;
+
+	/* APIC software disabled */
+	LAPIC_REG(SVR) &= ~LAPIC_SVR_ENABLE;
+
+	/* Bypass the APIC completely and update cpu features */
+	rdmsr(MSR_IA32_APIC_BASE, lo, hi);
+	lo &= ~MSR_IA32_APIC_BASE_ENABLE;
+	wrmsr(MSR_IA32_APIC_BASE, lo, hi);
+	cpuid_set_info();
+
+	mp_enable_preemption();
+}
+
+void
+lapic_init(void)
+{
+	int	value;
+
+	/* Set flat delivery model, logical processor id */
+	LAPIC_REG(DFR) = LAPIC_DFR_FLAT;
+	LAPIC_REG(LDR) = (get_cpu_number()) << LAPIC_LDR_SHIFT;
+
+	/* Accept all */
+	LAPIC_REG(TPR) =  0;
+
+	LAPIC_REG(SVR) = LAPIC_VECTOR(SPURIOUS) | LAPIC_SVR_ENABLE;
+
+	/* ExtINT */
+	if (get_cpu_number() == master_cpu) {
+		value = LAPIC_REG(LVT_LINT0);
+		value &= ~LAPIC_LVT_MASKED;
+		value |= LAPIC_LVT_DM_EXTINT;
+		LAPIC_REG(LVT_LINT0) = value;
+	}
+
+	/* Timer: unmasked, one-shot */
+	LAPIC_REG(LVT_TIMER) = LAPIC_VECTOR(TIMER);
+
+	/* Perfmon: unmasked */
+	LAPIC_REG(LVT_PERFCNT) = LAPIC_VECTOR(PERFCNT);
+
+	/* Thermal: unmasked */
+	LAPIC_REG(LVT_THERMAL) = LAPIC_VECTOR(THERMAL);
+
+	lapic_esr_clear();
+
+	LAPIC_REG(LVT_ERROR) = LAPIC_VECTOR(ERROR);
+}
+
+void
+lapic_set_timer_func(i386_intr_func_t func)
+{
+	lapic_timer_func = func;
+}
+
+void
+lapic_set_timer(
+	boolean_t		interrupt,
+	lapic_timer_mode_t	mode,
+	lapic_timer_divide_t	divisor,
+	lapic_timer_count_t	initial_count)
+{
+	boolean_t	state;
+	uint32_t	timer_vector;
+
+	state = ml_set_interrupts_enabled(FALSE);
+	timer_vector = LAPIC_REG(LVT_TIMER);
+	timer_vector &= ~(LAPIC_LVT_MASKED|LAPIC_LVT_PERIODIC);;
+	timer_vector |= interrupt ? 0 : LAPIC_LVT_MASKED;
+	timer_vector |= (mode == periodic) ? LAPIC_LVT_PERIODIC : 0;
+	LAPIC_REG(LVT_TIMER) = timer_vector;
+	LAPIC_REG(TIMER_DIVIDE_CONFIG) = divisor;
+	LAPIC_REG(TIMER_INITIAL_COUNT) = initial_count;
+	ml_set_interrupts_enabled(state);
+}
+
+void
+lapic_get_timer(
+	lapic_timer_mode_t	*mode,
+	lapic_timer_divide_t	*divisor,
+	lapic_timer_count_t	*initial_count,
+	lapic_timer_count_t	*current_count)
+{
+	boolean_t	state;
+
+	state = ml_set_interrupts_enabled(FALSE);
+	if (mode)
+		*mode = (LAPIC_REG(LVT_TIMER) & LAPIC_LVT_PERIODIC) ?
+				periodic : one_shot;
+	if (divisor)
+		*divisor = LAPIC_REG(TIMER_DIVIDE_CONFIG) & LAPIC_TIMER_DIVIDE_MASK;
+	if (initial_count)
+		*initial_count = LAPIC_REG(TIMER_INITIAL_COUNT);
+	if (current_count)
+		*current_count = LAPIC_REG(TIMER_CURRENT_COUNT);
+	ml_set_interrupts_enabled(state);
+} 
+
+void
+lapic_set_pmi_func(i386_intr_func_t func)
+{
+	lapic_pmi_func = func;
+}
+
+void
+lapic_set_thermal_func(i386_intr_func_t func)
+{
+        lapic_thermal_func = func;
+}
+
+static inline void
+_lapic_end_of_interrupt(void)
+{
+	LAPIC_REG(EOI) = 0;
+}
+
+void
+lapic_end_of_interrupt(void)
+{
+	_lapic_end_of_interrupt();
+}
+
+int
+lapic_interrupt(int interrupt, x86_saved_state_t *state)
+{
+	int	retval = 0;
+
+	/* Did we just field an interruption for the HPET comparator? */
+	if(x86_core()->HpetVec == ((uint32_t)interrupt - 0x40)) {
+		/* Yes, go handle it... */
+		retval = HPETInterrupt();
+		/* Was it really handled? */
+		if(retval) {
+			/* If so, EOI the 'rupt */
+			_lapic_end_of_interrupt();
+			/*
+			 * and then leave,
+			 * indicating that this has been handled
+			 */
+			return 1;
+		}
+	}
+
+	interrupt -= lapic_interrupt_base;
+	if (interrupt < 0) {
+		if (interrupt == (LAPIC_NMI_INTERRUPT - lapic_interrupt_base)) {
+			retval = NMIInterruptHandler(state);
+			_lapic_end_of_interrupt();
+			return retval;
+		}
+		else
+			return 0;
+	}
+
+	switch(interrupt) {
+	case LAPIC_PERFCNT_INTERRUPT:
+		if (lapic_pmi_func != NULL)
+			(*lapic_pmi_func)(NULL);
+		/* Clear interrupt masked */
+		LAPIC_REG(LVT_PERFCNT) = LAPIC_VECTOR(PERFCNT);
+		_lapic_end_of_interrupt();
+		retval = 1;
+		break;
+	case LAPIC_TIMER_INTERRUPT:
+		_lapic_end_of_interrupt();
+		if (lapic_timer_func != NULL)
+			(*lapic_timer_func)(state);
+		retval = 1;
+		break;
+	case LAPIC_THERMAL_INTERRUPT:
+		if (lapic_thermal_func != NULL)
+			(*lapic_thermal_func)(NULL);
+		_lapic_end_of_interrupt();
+		retval = 1;
+		break;
+	case LAPIC_ERROR_INTERRUPT:
+		lapic_dump();
+		panic("Local APIC error\n");
+		_lapic_end_of_interrupt();
+		retval = 1;
+		break;
+	case LAPIC_SPURIOUS_INTERRUPT:
+		kprintf("SPIV\n");
+		/* No EOI required here */
+		retval = 1;
+		break;
+	case LAPIC_INTERPROCESSOR_INTERRUPT:
+		_lapic_end_of_interrupt();
+		cpu_signal_handler(state);
+		retval = 1;
+		break;
+	}
+
+	return retval;
+}
+
+void
+lapic_smm_restore(void)
+{
+	boolean_t state;
+
+	if (lapic_os_enabled == FALSE)
+		return;
+
+	state = ml_set_interrupts_enabled(FALSE);
+
+ 	if (LAPIC_ISR_IS_SET(LAPIC_REDUCED_INTERRUPT_BASE, TIMER)) {
+		/*
+		 * Bogus SMI handler enables interrupts but does not know about
+		 * local APIC interrupt sources. When APIC timer counts down to
+		 * zero while in SMM, local APIC will end up waiting for an EOI
+		 * but no interrupt was delivered to the OS.
+ 		 */
+		_lapic_end_of_interrupt();
+
+		/*
+		 * timer is one-shot, trigger another quick countdown to trigger
+		 * another timer interrupt.
+		 */
+		if (LAPIC_REG(TIMER_CURRENT_COUNT) == 0) {
+			LAPIC_REG(TIMER_INITIAL_COUNT) = 1;
+		}
+
+		kprintf("lapic_smm_restore\n");
+	}
+
+	ml_set_interrupts_enabled(state);
 }
 
 kern_return_t
 intel_startCPU(
 	int	slot_num)
 {
-	int		lapic = cpu_to_lapic[slot_num];
-	boolean_t	istate;
+
+	int	i = 1000;
+	int	lapic = cpu_to_lapic[slot_num];
 
 	assert(lapic != -1);
 
@@ -272,33 +756,39 @@ intel_startCPU(
 	else
 		cpu_desc_init(cpu_datap(slot_num), FALSE);
 
-	/* Serialize use of the slave boot stack, etc. */
+	/* Serialize use of the slave boot stack. */
 	mutex_lock(&mp_cpu_boot_lock);
 
-	istate = ml_set_interrupts_enabled(FALSE);
+	mp_disable_preemption();
 	if (slot_num == get_cpu_number()) {
-		ml_set_interrupts_enabled(istate);
+		mp_enable_preemption();
 		mutex_unlock(&mp_cpu_boot_lock);
 		return KERN_SUCCESS;
 	}
 
-	start_info.starter_cpu = cpu_number();
-	start_info.is_nehalem = (cpuid_info()->cpuid_model
-					== CPUID_MODEL_NEHALEM);
-	start_info.target_cpu = slot_num;
-	start_info.target_lapic = lapic;
+	LAPIC_REG(ICRD) = lapic << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG(ICR) = LAPIC_ICR_DM_INIT;
+	delay(10000);
 
-	/*
-	 * For Nehalem, perform the processor startup with all running
-	 * processors rendezvous'ed. This is required during periods when
-	 * the cache-disable bit is set for MTRR/PAT initialization.
-	 */
-	if (start_info.is_nehalem)
-		mp_rendezvous_no_intrs(start_cpu, (void *) &start_info);
-	else
-		start_cpu((void *) &start_info);
+	LAPIC_REG(ICRD) = lapic << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG(ICR) = LAPIC_ICR_DM_STARTUP|(MP_BOOT>>12);
+	delay(200);
 
-	ml_set_interrupts_enabled(istate);
+	LAPIC_REG(ICRD) = lapic << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG(ICR) = LAPIC_ICR_DM_STARTUP|(MP_BOOT>>12);
+	delay(200);
+
+#ifdef	POSTCODE_DELAY
+	/* Wait much longer if postcodes are displayed for a delay period. */
+	i *= 10000;
+#endif
+	while(i-- > 0) {
+		if (cpu_datap(slot_num)->cpu_running)
+			break;
+		delay(10000);
+	}
+
+	mp_enable_preemption();
 	mutex_unlock(&mp_cpu_boot_lock);
 
 	if (!cpu_datap(slot_num)->cpu_running) {
@@ -311,47 +801,6 @@ intel_startCPU(
 		kprintf("Started cpu %d (lapic id %08x)\n", slot_num, lapic);
 		return KERN_SUCCESS;
 	}
-}
-
-/*
- * Quickly bring a CPU back online which has been halted.
- */
-kern_return_t
-intel_startCPU_fast(int slot_num)
-{
-    	kern_return_t	rc;
-
-	/*
-	 * Try to perform a fast restart
-	 */
-	rc = pmCPUExitHalt(slot_num);
-	if (rc != KERN_SUCCESS)
-		/*
-		 * The CPU was not eligible for a fast restart.
-		 */
-		return(rc);
-
-	/*
-	 * Wait until the CPU is back online.
-	 */
-	mp_disable_preemption();
-    
-	/*
-	 * We use short pauses (1us) for low latency.  30,000 iterations is
-	 * longer than a full restart would require so it should be more
-	 * than long enough.
-	 */
-	mp_wait_for_cpu_up(slot_num, 30000, 1);
-	mp_enable_preemption();
-
-	/*
-	 * Check to make sure that the CPU is really running.  If not,
-	 * go through the slow path.
-	 */
-	if (cpu_datap(slot_num)->cpu_running)
-		return(KERN_SUCCESS);
-    	else
-		return(KERN_FAILURE);
 }
 
 extern char	slave_boot_base[];
@@ -405,7 +854,7 @@ MP_EVENT_NAME_DECL();
 
 #endif	/* MP_DEBUG */
 
-int
+void
 cpu_signal_handler(x86_saved_state_t *regs)
 {
 	int		my_cpu;
@@ -470,48 +919,27 @@ cpu_signal_handler(x86_saved_state_t *regs)
 			DBGLOG(cpu_handle,my_cpu,MP_CALL);
 			i_bit_clear(MP_CALL, my_word);
 			mp_cpus_call_action();
-		} else if (i_bit(MP_CALL_PM, my_word)) {
-			DBGLOG(cpu_handle,my_cpu,MP_CALL_PM);
-			i_bit_clear(MP_CALL_PM, my_word);
-			mp_call_PM();
 		}
 	} while (*my_word);
 
 	mp_enable_preemption();
 
-	return 0;
 }
 
-static int
+/* We want this to show up in backtraces, hence marked noinline.
+ */
+static int __attribute__((noinline))
 NMIInterruptHandler(x86_saved_state_t *regs)
 {
-	void 	*stackptr;
-	
+	boolean_t state = ml_set_interrupts_enabled(FALSE);
 	sync_iss_to_iks_unconditionally(regs);
-	__asm__ volatile("movl %%ebp, %0" : "=m" (stackptr));
-
-	if (cpu_number() == debugger_cpu)
-			goto NMExit;
-
-	if (pmap_tlb_flush_timeout == TRUE && current_cpu_datap()->cpu_tlb_invalid) {
-		char pstr[128];
-		snprintf(&pstr[0], sizeof(pstr), "Panic(CPU %d): Unresponsive processor\n", cpu_number());
-		panic_i386_backtrace(stackptr, 10, &pstr[0], TRUE, regs);
-		panic_io_port_read();
-		mca_check_save();
-		if (pmsafe_debug)
-			pmSafeMode(&current_cpu_datap()->lcpu, PM_SAFE_FL_SAFE);
-		for(;;) {
-			cpu_pause();
-		}
-	}
 	mp_kdp_wait(FALSE);
-NMExit:	
+	(void) ml_set_interrupts_enabled(state);
 	return 1;
 }
 
 #ifdef	MP_DEBUG
-int		max_lock_loops = 1000000;
+extern int	max_lock_loops;
 int		trappedalready = 0;	/* (BRINGUP */
 #endif	/* MP_DEBUG */
 
@@ -541,18 +969,20 @@ i386_cpu_IPI(int cpu)
 	/* Wait for previous interrupt to be delivered... */
 #ifdef	MP_DEBUG
 	int     pending_busy_count = 0;
-	while (LAPIC_READ(ICR) & LAPIC_ICR_DS_PENDING) {
+	while (LAPIC_REG(ICR) & LAPIC_ICR_DS_PENDING) {
 		if (++pending_busy_count > max_lock_loops)
 			panic("i386_cpu_IPI() deadlock\n");
 #else
-	while (LAPIC_READ(ICR) & LAPIC_ICR_DS_PENDING) {
+	while (LAPIC_REG(ICR) & LAPIC_ICR_DS_PENDING) {
 #endif	/* MP_DEBUG */
 		cpu_pause();
 	}
 
 	state = ml_set_interrupts_enabled(FALSE);
-	LAPIC_WRITE(ICRD, cpu_to_lapic[cpu] << LAPIC_ICRD_DEST_SHIFT);
-	LAPIC_WRITE(ICR, LAPIC_VECTOR(INTERPROCESSOR) | LAPIC_ICR_DM_FIXED);
+	LAPIC_REG(ICRD) =
+		cpu_to_lapic[cpu] << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG(ICR)  =
+		LAPIC_VECTOR(INTERPROCESSOR) | LAPIC_ICR_DM_FIXED;
 	(void) ml_set_interrupts_enabled(state);
 }
 
@@ -573,7 +1003,7 @@ cpu_interrupt(int cpu)
 /*
  * Send a true NMI via the local APIC to the specified CPU.
  */
-void
+static void
 cpu_NMI_interrupt(int cpu)
 {
 	boolean_t	state;
@@ -581,43 +1011,15 @@ cpu_NMI_interrupt(int cpu)
 	if (smp_initialized) {
 		state = ml_set_interrupts_enabled(FALSE);
 /* Program the interrupt command register */
-		LAPIC_WRITE(ICRD, cpu_to_lapic[cpu] << LAPIC_ICRD_DEST_SHIFT);
+		LAPIC_REG(ICRD) =
+			cpu_to_lapic[cpu] << LAPIC_ICRD_DEST_SHIFT;
 /* The vector is ignored in this case--the target CPU will enter on the
  * NMI vector.
  */
-		LAPIC_WRITE(ICR, LAPIC_VECTOR(INTERPROCESSOR)|LAPIC_ICR_DM_NMI);
+		LAPIC_REG(ICR)  =
+			LAPIC_VECTOR(INTERPROCESSOR) | LAPIC_ICR_DM_NMI;
 		(void) ml_set_interrupts_enabled(state);
 	}
-}
-
-static volatile void	(*mp_PM_func)(void) = NULL;
-
-static void
-mp_call_PM(void)
-{
-	assert(!ml_get_interrupts_enabled());
-
-	if (mp_PM_func != NULL)
-		mp_PM_func();
-}
-
-void
-cpu_PM_interrupt(int cpu)
-{
-	assert(!ml_get_interrupts_enabled());
-
-	if (mp_PM_func != NULL) {
-		if (cpu == cpu_number())
-			mp_PM_func();
-		else
-			i386_signal_cpu(cpu, MP_CALL_PM, ASYNC);
-	}
-}
-
-void
-PM_interrupt_register(void (*fn)(void))
-{
-	mp_PM_func = fn;
 }
 
 void
@@ -1049,8 +1451,6 @@ i386_activate_cpu(void)
 	simple_unlock(&x86_topo_lock);
 }
 
-extern void etimer_timer_expire(void	*arg);
-
 void
 i386_deactivate_cpu(void)
 {
@@ -1061,10 +1461,6 @@ i386_deactivate_cpu(void)
 	simple_lock(&x86_topo_lock);
 	cdp->cpu_running = FALSE;
 	simple_unlock(&x86_topo_lock);
-
-	timer_queue_shutdown(&cdp->rtclock_timer.queue);
-	cdp->rtclock_timer.deadline = EndOfAllTime;
-	mp_cpus_call(cpu_to_cpumask(master_cpu), ASYNC, etimer_timer_expire, NULL);
 
 	/*
 	 * In case a rendezvous/braodcast/call was initiated to this cpu
@@ -1083,7 +1479,7 @@ int	pmsafe_debug	= 1;
 
 #if	MACH_KDP
 volatile boolean_t	mp_kdp_trap = FALSE;
-volatile unsigned long	mp_kdp_ncpus;
+volatile unsigned long		mp_kdp_ncpus;
 boolean_t		mp_kdp_state;
 
 
@@ -1092,7 +1488,7 @@ mp_kdp_enter(void)
 {
 	unsigned int	cpu;
 	unsigned int	ncpus;
-	unsigned int	my_cpu;
+	unsigned int	my_cpu = cpu_number();
 	uint64_t	tsc_timeout;
 
 	DBG("mp_kdp_enter()\n");
@@ -1114,8 +1510,6 @@ mp_kdp_enter(void)
 		mp_kdp_wait(TRUE);
 		simple_lock(&mp_kdp_lock);
 	}
-	my_cpu = cpu_number();
-	debugger_cpu = my_cpu;
 	mp_kdp_ncpus = 1;	/* self */
 	mp_kdp_trap = TRUE;
 	simple_unlock(&mp_kdp_lock);
@@ -1228,7 +1622,6 @@ void
 mp_kdp_exit(void)
 {
 	DBG("mp_kdp_exit()\n");
-	debugger_cpu = -1;
 	atomic_decl((volatile long *)&mp_kdp_ncpus, 1);
 	mp_kdp_trap = FALSE;
 	__asm__ volatile("mfence");
@@ -1266,7 +1659,7 @@ void
 cause_ast_check(
 	processor_t	processor)
 {
-	int	cpu = processor->cpu_num;
+	int	cpu = PROCESSOR_DATA(processor, slot_num);
 
 	if (cpu != cpu_number()) {
 		i386_signal_cpu(cpu, MP_AST, ASYNC);
@@ -1371,51 +1764,6 @@ mp_kdb_exit(void)
 
 #endif /* MACH_KDB */
 
-static void
-do_init_slave(boolean_t fast_restart)
-{
-	void	*init_param	= FULL_SLAVE_INIT;
-
-	postcode(I386_INIT_SLAVE);
-
-	if (!fast_restart) {
-		/* Ensure that caching and write-through are enabled */
-		set_cr0(get_cr0() & ~(CR0_NW|CR0_CD));
-
-		DBG("i386_init_slave() CPU%d: phys (%d) active.\n",
-		    get_cpu_number(), get_cpu_phys_number());
-
-		assert(!ml_get_interrupts_enabled());
-
-		cpu_mode_init(current_cpu_datap());
-
-		mca_cpu_init();
-
-		lapic_configure();
-		LAPIC_DUMP();
-		LAPIC_CPU_MAP_DUMP();
-
-		init_fpu();
-
-		mtrr_update_cpu();
-	} else
-	    	init_param = FAST_SLAVE_INIT;
-
-	/* resume VT operation */
-	vmx_resume();
-
-	if (!fast_restart)
-		pat_init();
-
-	cpu_thread_init();	/* not strictly necessary */
-
-	cpu_init();	/* Sets cpu_running which starter cpu waits for */ 
-
-	slave_main(init_param);
-
-	panic("do_init_slave() returned from slave_main()");
-}
-
 /*
  * i386_init_slave() is called from pstart.
  * We're in the cpu's interrupt stack with interrupts disabled.
@@ -1425,37 +1773,53 @@ do_init_slave(boolean_t fast_restart)
 void
 i386_init_slave(void)
 {
-    	do_init_slave(FALSE);
+	postcode(I386_INIT_SLAVE);
+
+	/* Ensure that caching and write-through are enabled */
+	set_cr0(get_cr0() & ~(CR0_NW|CR0_CD));
+
+	DBG("i386_init_slave() CPU%d: phys (%d) active.\n",
+		get_cpu_number(), get_cpu_phys_number());
+
+	assert(!ml_get_interrupts_enabled());
+
+	cpu_mode_init(current_cpu_datap());
+
+	mca_cpu_init();
+
+	lapic_init();
+	LAPIC_DUMP();
+	LAPIC_CPU_MAP_DUMP();
+
+	init_fpu();
+
+	mtrr_update_cpu();
+
+	/* resume VT operation */
+	vmx_resume();
+
+	pat_init();
+
+	cpu_thread_init();	/* not strictly necessary */
+
+	cpu_init();	/* Sets cpu_running which starter cpu waits for */ 
+
+	slave_main();
+
+	panic("i386_init_slave() returned from slave_main()");
 }
 
-/*
- * i386_init_slave_fast() is called from pmCPUHalt.
- * We're running on the idle thread and need to fix up
- * some accounting and get it so that the scheduler sees this
- * CPU again.
- */
 void
-i386_init_slave_fast(void)
-{
-    	do_init_slave(TRUE);
-}
-
-void
-slave_machine_init(void *param)
+slave_machine_init(void)
 {
 	/*
  	 * Here in process context, but with interrupts disabled.
 	 */
 	DBG("slave_machine_init() CPU%d\n", get_cpu_number());
 
-	if (param == FULL_SLAVE_INIT) {
-		/*
-		 * Cold start
-		 */
-		clock_init();
+	clock_init();
 
-		cpu_machine_init();	/* Interrupts enabled hereafter */
-	}
+	cpu_machine_init();		/* Interrupts enabled hereafter */
 }
 
 #undef cpu_number()

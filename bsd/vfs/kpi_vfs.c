@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -1596,22 +1596,6 @@ vnode_isnamedstream(
 	return ((vp->v_flag & VISNAMEDSTREAM) ? 1 : 0);
 #else
 	return (0);
-#endif
-}
-
-int     
-vnode_isshadow(
-#if NAMEDSTREAMS
-		                vnode_t vp
-#else
-				                __unused vnode_t vp
-#endif
-						                )    
-{
-#if NAMEDSTREAMS
-	        return ((vp->v_flag & VISSHADOW) ? 1 : 0);
-#else
-		        return (0); 
 #endif
 }
 
@@ -4373,21 +4357,6 @@ VNOP_INACTIVE(struct vnode *vp, vfs_context_t ctx)
 	if (!thread_safe) {
 		unlock_fsnode(vp, &funnel_state);
 	}
-
-#if NAMEDSTREAMS
-	/* For file systems that do not support namedstreams natively, mark
-	 * the shadow stream file vnode to be recycled as soon as the last
-	 * reference goes away. To avoid re-entering reclaim code, do not
-	 * call recycle on terminating named stream vnodes.
-	 */
-	if (vnode_isnamedstream(vp) &&
-			(vp->v_parent != NULLVP) &&
-			(vnode_isshadow(vp)) &&
-			((vp->v_lflag & VL_TERMINATE) == 0)) {
-		vnode_recycle(vp);
-	}
-#endif
-
 	return (_err);
 }
 

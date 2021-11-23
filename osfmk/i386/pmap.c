@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -1215,7 +1215,7 @@ pmap_bootstrap(
 
 	virtual_avail = va;
 
-	if (PE_parse_boot_argn("npvhash", &npvhash, sizeof (npvhash))) {
+	if (PE_parse_boot_arg("npvhash", &npvhash)) {
 	  if (0 != ((npvhash+1) & npvhash)) {
 	    kprintf("invalid hash %d, must be ((2^N)-1), using default %d\n",npvhash,NPVHASH);
 	    npvhash = NPVHASH;
@@ -1226,7 +1226,7 @@ pmap_bootstrap(
 	printf("npvhash=%d\n",npvhash);
 
 	wpkernel = 1;
-	if (PE_parse_boot_argn("wpkernel", &boot_arg, sizeof (boot_arg))) {
+	if (PE_parse_boot_arg("wpkernel", &boot_arg)) {
 		if (boot_arg == 0)
 			wpkernel = 0;
 	}
@@ -1331,12 +1331,12 @@ pmap_bootstrap(
 	 * By default for 64-bit users loaded at 4GB, share kernel mapping.
 	 * But this may be overridden by the -no_shared_cr3 boot-arg.
 	 */
-	if (PE_parse_boot_argn("-no_shared_cr3", &no_shared_cr3, sizeof (no_shared_cr3))) {
+	if (PE_parse_boot_arg("-no_shared_cr3", &no_shared_cr3)) {
 		kprintf("Shared kernel address space disabled\n");
 	}	
 
 #ifdef	PMAP_TRACES
-	if (PE_parse_boot_argn("-pmap_trace", &pmap_trace, sizeof (pmap_trace))) {
+	if (PE_parse_boot_arg("-pmap_trace", &pmap_trace)) {
 		kprintf("Kernel traces for pmap operations enabled\n");
 	}	
 #endif	/* PMAP_TRACES */
@@ -3581,6 +3581,12 @@ phys_attribute_clear(
 		    vm_map_offset_t va;
 
 		    va = pv_e->va;
+		    /*
+		     * first make sure any processor actively
+		     * using this pmap, flushes its TLB state
+		     */
+
+		    PMAP_UPDATE_TLBS(pmap, va, va + PAGE_SIZE);
 
 		    /*
 		     * Clear modify and/or reference bits.
@@ -3588,13 +3594,7 @@ phys_attribute_clear(
 
 		    pte = pmap_pte(pmap, va);
 		    pmap_update_pte(pte, *pte, (*pte & ~bits));
-		    /* Ensure all processors using this translation
-		     * invalidate this TLB entry. The invalidation *must* follow
-		     * the PTE update, to ensure that the TLB shadow of the
-		     * 'D' bit (in particular) is synchronized with the
-		     * updated PTE.
-		     */
-		    PMAP_UPDATE_TLBS(pmap, va, va + PAGE_SIZE);
+
 		}
 
 		pv_e = (pv_hashed_entry_t)queue_next(&pv_e->qlink);
@@ -4493,20 +4493,6 @@ vm_offset_t pmap_high_map(pt_entry_t pte, enum high_cpu_types e)
   return  vaddr;
 }
 
-static inline void
-pmap_cpuset_NMIPI(cpu_set cpu_mask) {
-	unsigned int cpu, cpu_bit;
-	uint64_t deadline;
-
-	for (cpu = 0, cpu_bit = 1; cpu < real_ncpus; cpu++, cpu_bit <<= 1) {
-		if (cpu_mask & cpu_bit)
-			cpu_NMI_interrupt(cpu);
-	}
-	deadline = mach_absolute_time() + (LockTimeOut >> 2);
-	while (mach_absolute_time() < deadline)
-		cpu_pause();
-}
-
 
 /*
  * Called with pmap locked, we:
@@ -4565,35 +4551,28 @@ pmap_flush_tlbs(pmap_t	pmap)
 		   (int) pmap, cpus_to_signal, flush_self, 0, 0);
 
 	if (cpus_to_signal) {
-		cpu_set	cpus_to_respond = cpus_to_signal;
-
 		deadline = mach_absolute_time() + LockTimeOut;
 		/*
 		 * Wait for those other cpus to acknowledge
 		 */
-		while (cpus_to_respond != 0) {
-			if (mach_absolute_time() > deadline) {
-				if (!panic_active()) {
-					pmap_tlb_flush_timeout = TRUE;
-					pmap_cpuset_NMIPI(cpus_to_respond);
-				}
-				panic("pmap_flush_tlbs() timeout: "
-				    "cpu(s) failing to respond to interrupts, pmap=%p cpus_to_respond=0x%lx",
-				    pmap, cpus_to_respond);
-			}
-
-			for (cpu = 0, cpu_bit = 1; cpu < real_ncpus; cpu++, cpu_bit <<= 1) {
-				if ((cpus_to_respond & cpu_bit) != 0) {
-					if (!cpu_datap(cpu)->cpu_running ||
-					    cpu_datap(cpu)->cpu_tlb_invalid == FALSE ||
-					    !CPU_CR3_IS_ACTIVE(cpu)) {
-						cpus_to_respond &= ~cpu_bit;
-					}
-					cpu_pause();
-				}
-				if (cpus_to_respond == 0)
+		for (cpu = 0, cpu_bit = 1; cpu < real_ncpus; cpu++, cpu_bit <<= 1) {
+			while ((cpus_to_signal & cpu_bit) != 0) {
+			        if (!cpu_datap(cpu)->cpu_running ||
+				    cpu_datap(cpu)->cpu_tlb_invalid == FALSE ||
+				    !CPU_CR3_IS_ACTIVE(cpu)) {
+				        cpus_to_signal &= ~cpu_bit;
 					break;
+				}
+				if (mach_absolute_time() > deadline) {
+					force_immediate_debugger_NMI = TRUE;
+				        panic("pmap_flush_tlbs() timeout: "
+								"cpu %d failing to respond to interrupts, pmap=%p cpus_to_signal=%lx",
+								cpu, pmap, cpus_to_signal);
+				}
+				cpu_pause();
 			}
+		        if (cpus_to_signal == 0)
+			        break;
 		}
 	}
 
@@ -4605,6 +4584,7 @@ pmap_flush_tlbs(pmap_t	pmap)
 	 */
 	if (flush_self)
 		flush_tlb();
+
 
 	PMAP_TRACE(PMAP_CODE(PMAP__FLUSH_TLBS) | DBG_FUNC_END,
 		   (int) pmap, cpus_to_signal, flush_self, 0, 0);

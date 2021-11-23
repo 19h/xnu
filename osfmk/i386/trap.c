@@ -112,9 +112,6 @@
 #include <i386/machine_check.h>
 #include <mach/i386/syscall_sw.h>
 
-
-extern void throttle_lowpri_io(boolean_t);
-
 /*
  * Forward declarations
  */
@@ -166,9 +163,7 @@ thread_syscall_return(
 		}
 		regs->eax = ret;
 	}
-	throttle_lowpri_io(TRUE);
-
-	thread_exception_return();
+        thread_exception_return();
         /*NOTREACHED*/
 }
 
@@ -740,7 +735,7 @@ panic_double_fault(
 	/*
 	 * Print backtrace leading to first fault:
 	 */
-	panic_i386_backtrace((void *) my_ktss->ebp, 10, NULL, FALSE, NULL);
+	panic_i386_backtrace((void *) my_ktss->ebp, 10);
 #endif
 
 	panic("Double fault at 0x%08x, thread:%p, code:0x%x, "

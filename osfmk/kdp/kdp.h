@@ -45,5 +45,3 @@ kdp_raise_exception(
 void
 kdp_reset(void);
 
-void
-kdp_init(void);

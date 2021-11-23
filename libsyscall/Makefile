@@ -22,16 +22,12 @@ CC = gcc
 .ifdef ALTFRAMEWORKSPATH
 PRIVINC = -F${ALTFRAMEWORKSPATH} -I${ALTFRAMEWORKSPATH}/System.framework/PrivateHeaders
 .else
-PRIVINC = -I${SDKROOT}/System/Library/Frameworks/System.framework/PrivateHeaders
+PRIVINC = -I${NEXT_ROOT}/System/Library/Frameworks/System.framework/PrivateHeaders
 .endif
 CFLAGS += ${PRIVINC}
-.if empty $(MACHINE_ARCH:Marm*)
-CFLAGS += -force_cpusubtype_ALL
-AINC= -force_cpusubtype_ALL
-.endif
-CFLAGS += -no-cpp-precomp
+CFLAGS += -no-cpp-precomp -force_cpusubtype_ALL
 CFLAGS += -fno-common -pipe -Wmost -g
-AINC+= -no-cpp-precomp
+AINC= -no-cpp-precomp -force_cpusubtype_ALL
 AINC+= -arch ${MACHINE_ARCH} -g
 CLEANFILES+=tags
 INSTALL_PIC_ARCHIVE=	yes
@@ -47,7 +43,7 @@ MAKEOBJDIR ?= ${OBJROOT}
 # add version string
 SRCS += libsyscall_version.c
 libsyscall_version.c:
-	${SDKROOT}/Developer/Makefiles/bin/version.pl Libsyscall > $@
+	${NEXT_ROOT}/Developer/Makefiles/bin/version.pl Libsyscall > $@
 
 CFLAGS += -I${SYMROOT}
 .include "${.CURDIR}/Makefile.inc"

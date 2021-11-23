@@ -531,9 +531,6 @@ extern void		vm_page_gobble(
 				        vm_page_t      page);
 
 extern void		vm_page_validate_cs(vm_page_t	page);
-extern void		vm_page_validate_cs_mapped(
-	vm_page_t	page,
-	const void	*kaddr);
 
 /*
  *	Functions implemented as macros. m->wanted and m->busy are
@@ -623,7 +620,7 @@ extern void		vm_page_validate_cs_mapped(
 		mem->inactive = FALSE;				\
 		if (!mem->fictitious) {				\
 			vm_page_inactive_count--;		\
-			vm_purgeable_q_advance_all();		\
+			vm_purgeable_q_advance_all(1);		\
 		} else {					\
 			assert(mem->phys_page ==		\
 			       vm_page_fictitious_addr);	\

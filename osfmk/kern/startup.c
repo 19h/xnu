@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -103,10 +103,6 @@
 #include <machine/pmap.h>
 #include <machine/commpage.h>
 #include <libkern/version.h>
-
-#if MACH_KDP
-#include <kdp/kdp.h>
-#endif
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
@@ -269,11 +265,6 @@ kernel_bootstrap_thread(void)
 
 	kth_started = 1;
 
-#if MACH_KDP
-	kernel_bootstrap_kprintf("calling kdp_init\n");
-	kdp_init();
-#endif
-		
 #ifdef i386
 	/*
 	 * Create and initialize the physical copy window for processor 0
@@ -338,7 +329,7 @@ kernel_bootstrap_thread(void)
  *	Load the first thread to start a processor.
  */
 void
-slave_main(void *machine_param)
+slave_main(void)
 {
 	processor_t		processor = current_processor();
 	thread_t		thread;
@@ -350,7 +341,7 @@ slave_main(void *machine_param)
 	if (processor->next_thread == THREAD_NULL) {
 		thread = processor->idle_thread;
 		thread->continuation = (thread_continue_t)processor_start_thread;
-		thread->parameter = machine_param;
+		thread->parameter = NULL;
 	}
 	else {
 		thread = processor->next_thread;
@@ -369,12 +360,12 @@ slave_main(void *machine_param)
  *	Called at splsched.
  */
 void
-processor_start_thread(void *machine_param)
+processor_start_thread(void)
 {
 	processor_t		processor = current_processor();
 	thread_t		self = current_thread();
 
-	slave_machine_init(machine_param);
+	slave_machine_init();
 
 	/*
 	 *	If running the idle processor thread,
@@ -407,7 +398,7 @@ load_context(
 	load_context_kprintf("calling processor_up\n");
 	processor_up(processor);
 
-	PMAP_ACTIVATE_KERNEL(processor->cpu_num);
+	PMAP_ACTIVATE_KERNEL(PROCESSOR_DATA(processor, slot_num));
 
 	/*
 	 * Acquire a stack if none attached.  The panic
@@ -415,7 +406,7 @@ load_context(
 	 * to have reserved stack.
 	 */
 	load_context_kprintf("stack %x, stackptr %x\n", 
-			     thread->kernel_stack, thread->machine.kstackptr);
+			      thread->kernel_stack, thread->machine.kstackptr);
 	if (!thread->kernel_stack) {
 		load_context_kprintf("calling stack_alloc_try\n");
 		if (!stack_alloc_try(thread))
@@ -441,7 +432,7 @@ load_context(
 	timer_start(&PROCESSOR_DATA(processor, system_state), processor->last_dispatch);
 	PROCESSOR_DATA(processor, current_state) = &PROCESSOR_DATA(processor, system_state);
 
-	PMAP_ACTIVATE_USER(thread, processor->cpu_num);
+	PMAP_ACTIVATE_USER(thread, PROCESSOR_DATA(processor, slot_num));
 
 	load_context_kprintf("calling machine_load_context\n");
 	machine_load_context(thread);

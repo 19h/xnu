@@ -367,8 +367,7 @@ const struct memory_object_pager_ops default_pager_ops = {
 	dp_memory_object_data_initialize,
 	dp_memory_object_data_unlock,
 	dp_memory_object_synchronize,
-	dp_memory_object_map,
-	dp_memory_object_last_unmap,
+	dp_memory_object_unmap,
 	"default pager"
 };
 
@@ -415,19 +414,11 @@ dp_memory_object_synchronize(
 }
 
 kern_return_t
-dp_memory_object_map(
-	__unused memory_object_t	mem_obj,
-	__unused vm_prot_t		prot)
+dp_memory_object_unmap(
+	__unused memory_object_t		mem_obj)
 {
-	panic("dp_memory_object_map");
-	return KERN_FAILURE;
-}
+	panic("dp_memory_object_unmap");
 
-kern_return_t
-dp_memory_object_last_unmap(
-	__unused memory_object_t	mem_obj)
-{
-	panic("dp_memory_object_last_unmap");
 	return KERN_FAILURE;
 }
 

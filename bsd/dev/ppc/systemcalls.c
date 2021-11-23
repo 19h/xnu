@@ -69,6 +69,7 @@ find_user_regs(
 	thread_t act);
 
 extern lck_spin_t * tz_slock;
+extern void throttle_lowpri_io(int *lowpri_window, mount_t v_mount);
 
 /*
  * Function:	unix_syscall
@@ -260,7 +261,7 @@ unsafe:
 	/* panic if funnel is held */
 	syscall_exit_funnelcheck();
 
-	if (uthread->uu_lowpri_window) {
+	if (uthread->uu_lowpri_window && uthread->v_mount) {
 	        /*
 		 * task is marked as a low priority I/O type
 		 * and the I/O we issued while in this system call
@@ -268,7 +269,7 @@ unsafe:
 		 * delay in order to mitigate the impact of this
 		 * task on the normal operation of the system
 		 */
-		throttle_lowpri_io(TRUE);
+		throttle_lowpri_io(&uthread->uu_lowpri_window,uthread->v_mount);
 	}
 	if (kdebug_enable && (code != 180)) {
 
@@ -372,7 +373,7 @@ unix_syscall_return(int error)
 	/* panic if funnel is held */
 	syscall_exit_funnelcheck();
 
-	if (uthread->uu_lowpri_window) {
+	if (uthread->uu_lowpri_window && uthread->v_mount) {
 	        /*
 		 * task is marked as a low priority I/O type
 		 * and the I/O we issued while in this system call
@@ -380,7 +381,7 @@ unix_syscall_return(int error)
 		 * delay in order to mitigate the impact of this
 		 * task on the normal operation of the system
 		 */
-		throttle_lowpri_io(TRUE);
+		throttle_lowpri_io(&uthread->uu_lowpri_window,uthread->v_mount);
 	}
 	if (kdebug_enable && (code != 180)) {
 	        if (callp->sy_return_type == _SYSCALL_RET_SSIZE_T)

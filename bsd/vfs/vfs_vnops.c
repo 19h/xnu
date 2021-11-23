@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -408,7 +408,7 @@ badcreate:
 		goto bad;
 	}
 	if ( (error = vnode_ref_ext(vp, fmode)) ) {
-		goto bad2;
+		goto bad;
 	}
 
 	/* call out to allow 3rd party notification of open. 
@@ -419,26 +419,16 @@ badcreate:
 
 	*fmodep = fmode;
 	return (0);
-bad2:
-	VNOP_CLOSE(vp, fmode, ctx);
 bad:
 	ndp->ni_vp = NULL;
 	if (vp) {
-#if NAMEDRSRCFORK
-		if ((vnode_isnamedstream(vp)) && (vp->v_parent != NULLVP) &&
-					(vnode_isshadow (vp))) {
-			vnode_recycle(vp);
-		}
-#endif
-		vnode_put(vp);
+	        vnode_put(vp);
 		/*
 		 * Check for a race against unlink.  We had a vnode
 		 * but according to vnode_authorize or VNOP_OPEN it
 		 * no longer exists.
-		 *
-		 * EREDRIVEOPEN: means that we were hit by the tty allocation race.
 		 */
-		if (((error == ENOENT) && (*fmodep & O_CREAT)) || (error == EREDRIVEOPEN)) {
+		if ((error == ENOENT) && (*fmodep & O_CREAT)) {
 			goto again;
 		}
 	}
@@ -492,25 +482,20 @@ vn_close(struct vnode *vp, int flags, vfs_context_t ctx)
 #endif
 
 #if NAMEDRSRCFORK
-	/* Sync data from resource fork shadow file if needed. */
+	/* Clean up resource fork shadow file if needed. */
 	if ((vp->v_flag & VISNAMEDSTREAM) && 
 	    (vp->v_parent != NULLVP) &&
-	    (vnode_isshadow(vp))) {
+	    !(vp->v_parent->v_mount->mnt_kern_flag & MNTK_NAMED_STREAMS)) {
 		if (flags & FWASWRITTEN) {
 			(void) vnode_flushnamedstream(vp->v_parent, vp, ctx);
 		}
+		/* XXX failure ignored */
+		vnode_relenamedstream(vp->v_parent, vp, ctx);
 	}
 #endif
-	
-	/* work around for foxhound */
-	if (vp->v_type == VBLK)
-		(void)vnode_rele_ext(vp, flags, 0);
-
 	error = VNOP_CLOSE(vp, flags, ctx);
+	(void)vnode_rele_ext(vp, flags, 0);
 
-	if (vp->v_type != VBLK)
-		(void)vnode_rele_ext(vp, flags, 0);
-	
 	return (error);
 }
 

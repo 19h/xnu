@@ -196,7 +196,6 @@ cat_convertattr(
 	} else {
 		/* Convert the data fork. */
 		datafp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
-		datafp->cf_new_size = 0;
 		datafp->cf_blocks = recp->hfsPlusFile.dataFork.totalBlocks;
 		if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 		    (attrp->ca_atime >= hfsmp->hfc_timebase)) {
@@ -212,7 +211,6 @@ cat_convertattr(
 
 		/* Convert the resource fork. */
 		rsrcfp->cf_size = recp->hfsPlusFile.resourceFork.logicalSize;
-		rsrcfp->cf_new_size = 0;
 		rsrcfp->cf_blocks = recp->hfsPlusFile.resourceFork.totalBlocks;
 		if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 		    (attrp->ca_atime >= hfsmp->hfc_timebase)) {
@@ -288,11 +286,11 @@ cat_releasedesc(struct cat_desc *descp)
 
 /*
  * These Catalog functions allow access to the HFS Catalog (database).
- * The catalog b-tree lock must be acquired before calling any of these routines.
+ * The catalog b-tree lock must be aquired before calling any of these routines.
  */
 
 /*
- * cat_lookup - lookup a catalog node using a cnode descriptor
+ * cat_lookup - lookup a catalog node using a cnode decriptor
  *
  * Note: The caller is responsible for releasing the output
  * catalog descriptor (when supplied outdescp is non-null).
@@ -688,7 +686,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int allow_system_files
 		} else if (wantrsrc) {
 			/* Convert the resource fork. */
 			forkp->cf_size = recp->hfsPlusFile.resourceFork.logicalSize;
-			forkp->cf_new_size = 0;
 			forkp->cf_blocks = recp->hfsPlusFile.resourceFork.totalBlocks;
 			if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 			    (to_bsd_time(recp->hfsPlusFile.accessDate) >= hfsmp->hfc_timebase)) {
@@ -707,7 +704,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int allow_system_files
 
 			/* Convert the data fork. */
 			forkp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
-			forkp->cf_new_size = 0;
 			forkp->cf_blocks = recp->hfsPlusFile.dataFork.totalBlocks;
 			if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 			    (to_bsd_time(recp->hfsPlusFile.accessDate) >= hfsmp->hfc_timebase)) {
@@ -2181,7 +2177,7 @@ cat_makealias(struct hfsmount *hfsmp, u_int32_t inode_num, struct HFSPlusCatalog
 
 	blksize = hfsmp->blockSize;
 	blkcount = howmany(kHFSAliasSize, blksize);
-	sectorsize = hfsmp->hfs_logical_block_size;
+	sectorsize = hfsmp->hfs_phys_block_size;
 	bzero(rsrcforkp, sizeof(HFSPlusForkData));
 
 	/* Allocate some disk space for the alias content. */
@@ -2197,7 +2193,7 @@ cat_makealias(struct hfsmount *hfsmp, u_int32_t inode_num, struct HFSPlusCatalog
 	blkno = ((u_int64_t)rsrcforkp->extents[0].startBlock * (u_int64_t)blksize) / sectorsize;
 	blkno += hfsmp->hfsPlusIOPosOffset / sectorsize;
 
-	bp = buf_getblk(hfsmp->hfs_devvp, blkno, roundup(kHFSAliasSize, hfsmp->hfs_logical_block_size), 0, 0, BLK_META);
+	bp = buf_getblk(hfsmp->hfs_devvp, blkno, roundup(kHFSAliasSize, hfsmp->hfs_phys_block_size), 0, 0, BLK_META);
 	if (hfsmp->jnl) {
 		journal_modify_block_start(hfsmp->jnl, bp);
 	}
@@ -2631,7 +2627,7 @@ getdirentries_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 	u_int8_t type = DT_UNKNOWN;
 	u_int8_t is_mangled = 0;
 	u_int8_t *nameptr;
-	user_addr_t uiobase = USER_ADDR_NULL;
+	user_addr_t uiobase = (user_addr_t)NULL;
 	size_t namelen = 0;
 	size_t maxnamelen;
 	size_t uiosize = 0;

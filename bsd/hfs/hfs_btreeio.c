@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -76,16 +76,6 @@ OSStatus GetBTreeBlock(FileReference vp, u_int32_t blockNum, GetBlockOptions opt
 {
     OSStatus	 retval = E_NONE;
     struct buf   *bp = NULL;
-	u_int8_t     allow_empty_node;	  
-
-	/* If the btree block is being read using hint, it is 
-	 * fine for the swap code to find zeroed out nodes. 
-	 */
-	if (options & kGetBlockHint) {
-			allow_empty_node = true;
-	} else {
-			allow_empty_node = false;
-	}
 
     if (options & kGetEmptyBlock) {
         daddr64_t blkno;
@@ -125,21 +115,21 @@ OSStatus GetBTreeBlock(FileReference vp, u_int32_t blockNum, GetBlockOptions opt
                  * size once the B-tree control block is set up with the node size
                  * from the header record.
                  */
-                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeHeaderRecordOnly, allow_empty_node);
+                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeHeaderRecordOnly);
 
 			} else if (block->blockReadFromDisk) {
             	/*
             	 * The node was just read from disk, so always swap/check it.
             	 * This is necessary on big endian since the test below won't trigger.
             	 */
-                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeBigToHost, allow_empty_node);
+                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeBigToHost);
             } else if (*((u_int16_t *)((char *)block->buffer + (block->blockSize - sizeof (u_int16_t)))) == 0x0e00) {
 				/*
 				 * The node was left in the cache in non-native order, so swap it.
 				 * This only happens on little endian, after the node is written
 				 * back to disk.
 				 */
-                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeBigToHost, allow_empty_node);
+                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeBigToHost);
             }
             
     		/*
@@ -201,11 +191,8 @@ btree_swap_node(struct buf *bp, __unused void *arg)
     block.blockReadFromDisk = (buf_fromcache(bp) == 0);
     block.blockSize = buf_count(bp);
 
-    /* Swap the data now that this node is ready to go to disk.
-     * We allow swapping of zeroed out nodes here because we might
-     * be writing node whose last record just got deleted.
-     */
-    retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig, true);
+    // swap the data now that this node is ready to go to disk
+    retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig);
     if (retval)
     	panic("btree_swap_node: about to write corrupt node!\n");
 }

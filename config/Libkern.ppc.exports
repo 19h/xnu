@@ -18,6 +18,4 @@ __ZN8OSObject19_RESERVEDOSObject30Ev
 __ZN8OSObject19_RESERVEDOSObject31Ev
 _bcopy_nc
 _bzero_nc
-_strcpy
-_strcat
-_sprintf
+

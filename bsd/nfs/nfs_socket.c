@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -2035,23 +2035,17 @@ nfs_request_async_finish(
 	u_int64_t *xidp,
 	int *status)
 {
-	int error = 0, asyncio = req->r_callback.rcb_func ? 1 : 0;
+	int error, asyncio = req->r_callback.rcb_func ? 1 : 0;
 
 	lck_mtx_lock(&req->r_mtx);
 	if (!asyncio)
 		req->r_flags |= R_ASYNCWAIT;
-	while (req->r_flags & R_RESENDQ) {  /* wait until the request is off the resend queue */
-		struct timespec ts = { 2, 0 };
-		if ((error = nfs_sigintr(req->r_nmp, req, req->r_thread, 0)))
-			break;
-		msleep(req, &req->r_mtx, PZERO-1, "nfsresendqwait", &ts);
-	}
+	while (req->r_flags & R_RESENDQ) /* wait until the request is off the resend queue */
+		msleep(req, &req->r_mtx, PZERO-1, "nfsresendqwait", NULL);
 	lck_mtx_unlock(&req->r_mtx);
 
-	if (!error) {
-		nfs_request_wait(req);
-		error = nfs_request_finish(req, nmrepp, status);
-	}
+	nfs_request_wait(req);
+	error = nfs_request_finish(req, nmrepp, status);
 
 	while (!error && (req->r_flags & R_RESTART)) {
 		if (asyncio && req->r_resendtime) {  /* send later */
@@ -3220,7 +3214,7 @@ nfs_msg(thread_t thd,
 void
 nfs_down(struct nfsmount *nmp, thread_t thd, int error, int flags, const char *msg)
 {
-	int ostate, do_vfs_signal;
+	int ostate;
 
 	if (nmp == NULL)
 		return;
@@ -3235,12 +3229,7 @@ nfs_down(struct nfsmount *nmp, thread_t thd, int error, int flags, const char *m
 		nmp->nm_state |= NFSSTA_JUKEBOXTIMEO;
 	lck_mtx_unlock(&nmp->nm_lock);
 
-	/* XXX don't allow users to know about/disconnect unresponsive, soft, nobrowse mounts */
-	if ((nmp->nm_flag & NFSMNT_SOFT) && (vfs_flags(nmp->nm_mountp) & MNT_DONTBROWSE))
-		do_vfs_signal = 0;
-	else
-		do_vfs_signal = !(ostate & (NFSSTA_TIMEO|NFSSTA_LOCKTIMEO|NFSSTA_JUKEBOXTIMEO));
-	if (do_vfs_signal)
+	if (!(ostate & (NFSSTA_TIMEO|NFSSTA_LOCKTIMEO|NFSSTA_JUKEBOXTIMEO)))
 		vfs_event_signal(&vfs_statfs(nmp->nm_mountp)->f_fsid, VQ_NOTRESP, 0);
 
 	nfs_msg(thd, vfs_statfs(nmp->nm_mountp)->f_mntfromname, msg, error);
@@ -3249,7 +3238,7 @@ nfs_down(struct nfsmount *nmp, thread_t thd, int error, int flags, const char *m
 void
 nfs_up(struct nfsmount *nmp, thread_t thd, int flags, const char *msg)
 {
-	int ostate, state, do_vfs_signal;
+	int ostate, state;
 
 	if (nmp == NULL)
 		return;
@@ -3268,13 +3257,8 @@ nfs_up(struct nfsmount *nmp, thread_t thd, int flags, const char *msg)
 	state = nmp->nm_state;
 	lck_mtx_unlock(&nmp->nm_lock);
 
-	/* XXX don't allow users to know about/disconnect unresponsive, soft, nobrowse mounts */
-	if ((nmp->nm_flag & NFSMNT_SOFT) && (vfs_flags(nmp->nm_mountp) & MNT_DONTBROWSE))
-		do_vfs_signal = 0;
-	else
-		do_vfs_signal = (ostate & (NFSSTA_TIMEO|NFSSTA_LOCKTIMEO|NFSSTA_JUKEBOXTIMEO)) &&
-			 !(state & (NFSSTA_TIMEO|NFSSTA_LOCKTIMEO|NFSSTA_JUKEBOXTIMEO));
-	if (do_vfs_signal)
+	if ((ostate & (NFSSTA_TIMEO|NFSSTA_LOCKTIMEO|NFSSTA_JUKEBOXTIMEO)) &&
+	    !(state & (NFSSTA_TIMEO|NFSSTA_LOCKTIMEO|NFSSTA_JUKEBOXTIMEO)))
 		vfs_event_signal(&vfs_statfs(nmp->nm_mountp)->f_fsid, VQ_NOTRESP, 1);
 }
 

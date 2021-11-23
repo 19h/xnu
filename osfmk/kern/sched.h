@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -185,6 +185,15 @@ MACRO_BEGIN													\
 			(thread)->realtime.computation: std_quantum;	\
 MACRO_END
 
+/* Invoked at splsched by a thread on itself */
+#define csw_needed(thread, processor) (										\
+	((thread)->state & TH_SUSP)										||		\
+	(first_timeslice(processor)?											\
+	 ((processor)->runq.highq > (thread)->sched_pri				||			\
+	  rt_runq.highq > (thread)->sched_pri) :								\
+	 ((processor)->runq.highq >= (thread)->sched_pri			||			\
+	  rt_runq.highq >= (thread)->sched_pri))								)
+
 extern struct run_queue		rt_runq;
 
 /*
@@ -200,8 +209,10 @@ extern void		thread_quantum_expire(
 					timer_call_param_t	processor,
 					timer_call_param_t	thread);
 
-/* Context switch check for current processor */
-extern ast_t	csw_check(processor_t		processor);
+/* Called at splsched by a thread on itself */
+extern ast_t	csw_check(
+					thread_t		thread,
+					processor_t		processor);
 
 extern uint32_t	std_quantum, min_std_quantum;
 extern uint32_t	std_quantum_us;
@@ -247,24 +258,16 @@ extern uint64_t		max_unsafe_computation;
 extern uint64_t		max_poll_computation;
 
 #define sched_run_incr()			\
-MACRO_BEGIN													\
-	machine_run_count(hw_atomic_add(&sched_run_count, 1));	\
-MACRO_END
+	(void)hw_atomic_add(&sched_run_count, 1)
 
 #define sched_run_decr()			\
-MACRO_BEGIN													\
-	machine_run_count(hw_atomic_sub(&sched_run_count, 1));	\
-MACRO_END
+	(void)hw_atomic_sub(&sched_run_count, 1)
 
 #define sched_share_incr()			\
-MACRO_BEGIN											\
-	(void)hw_atomic_add(&sched_share_count, 1);		\
-MACRO_END
+	(void)hw_atomic_add(&sched_share_count, 1)
 
 #define sched_share_decr()			\
-MACRO_BEGIN											\
-	(void)hw_atomic_sub(&sched_share_count, 1);		\
-MACRO_END
+	(void)hw_atomic_sub(&sched_share_count, 1)
 
 /*
  *	thread_timer_delta macro takes care of both thread timers.

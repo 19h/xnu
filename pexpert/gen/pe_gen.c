@@ -39,11 +39,11 @@ int32_t gPESerialBaud = -1;
 
 void pe_init_debug(void)
 {
-  if (!PE_parse_boot_argn("debug", &DEBUGFlag, sizeof (DEBUGFlag)))
+  if (!PE_parse_boot_arg("debug", &DEBUGFlag))
     DEBUGFlag = 0;
 }
 
-void PE_enter_debugger(const char *cause)
+void PE_enter_debugger(char *cause)
 {
   if (DEBUGFlag & DB_NMI)
     Debugger(cause);

@@ -233,7 +233,6 @@ _sbappendrecord
 _sbflush
 _sbspace
 _securelevel
-_sha1_hardware_hook
 _sleep
 _soabort
 _sobind

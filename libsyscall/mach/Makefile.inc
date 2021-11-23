@@ -1,5 +1,9 @@
 # machine-dependent mach sources
-ARCHDIR = ${MACHINE_ARCH:C/^armv.*$/arm/}
+.if ${MACHINE_ARCH} == armv6
+ARCHDIR = arm
+.else
+ARCHDIR = ${MACHINE_ARCH}
+.endif
 .if exists(${.CURDIR}/mach/${ARCHDIR}/Makefile.inc)
 .include "${.CURDIR}/mach/${ARCHDIR}/Makefile.inc"
 .endif

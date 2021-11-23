@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -164,9 +164,14 @@ ast_taken(
 			/* 
 			 * Check for preemption.
 			 */
-			if (reasons & AST_PREEMPT)
-				reasons = csw_check(current_processor());
+			if (reasons & AST_PREEMPT) {
+				processor_t		myprocessor = current_processor();
 
+				if (csw_needed(thread, myprocessor))
+					reasons = AST_PREEMPT;
+				else
+					reasons = AST_NONE;
+			}
 			if (	(reasons & AST_PREEMPT)				&&
 					wait_queue_assert_possible(thread)		) {		
 				counter(c_ast_taken_block++);
@@ -185,12 +190,10 @@ void
 ast_check(
 	processor_t		processor)
 {
-	thread_t			thread = processor->active_thread;
-
-	processor->current_pri = thread->sched_pri;
 	if (	processor->state == PROCESSOR_RUNNING		||
 			processor->state == PROCESSOR_SHUTDOWN		) {
-		ast_t			preempt;
+		thread_t			thread = processor->active_thread;
+		ast_t				preempt;
 
 		/*
 		 *	Propagate thread ast to processor.
@@ -200,7 +203,7 @@ ast_check(
 		/*
 		 *	Context switch check.
 		 */
-		if ((preempt = csw_check(processor)) != AST_NONE)
+		if ((preempt = csw_check(thread, processor)) != AST_NONE)
 			ast_on(preempt);
 	}
 }

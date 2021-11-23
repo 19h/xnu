@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -61,11 +61,24 @@ struct mca_state;
  * Data structures embedded in per-cpu data:
  */
 typedef struct rtclock_timer {
-	queue_head_t	queue;
-	uint64_t		deadline;
-	boolean_t		is_set;
-	boolean_t		has_expired;
+	uint64_t	deadline;
+	boolean_t	is_set;
+	boolean_t	has_expired;
 } rtclock_timer_t;
+
+typedef struct rtc_nanotime {
+	uint64_t	tsc_base;		/* timestamp */
+	uint64_t	ns_base;		/* nanoseconds */
+	uint32_t	scale;			/* tsc -> nanosec multiplier */
+	uint32_t	shift;			/* tsc -> nanosec shift/div */
+						/* shift is overloaded with
+						 * lower 32bits of tsc_freq
+						 * on slower machines (SLOW_TSC_THRESHOLD) */
+	uint32_t	generation;		/* 0 == being updated */
+	uint32_t	spare1;
+} rtc_nanotime_t;
+
+#define	SLOW_TSC_THRESHOLD	1000067800	/* TSC is too slow for regular nanotime() algorithm */
 
 
 typedef struct {
@@ -131,6 +144,7 @@ typedef struct cpu_data
 	int			cpu_subtype;
 	int			cpu_threadtype;
 	int			cpu_running;
+	uint64_t		rtclock_intr_deadline;
 	rtclock_timer_t		rtclock_timer;
 	boolean_t		cpu_is64bit;
 	task_map_t		cpu_task_map;
@@ -167,7 +181,7 @@ typedef struct cpu_data
 	uint64_t		*cpu_physwindow_ptep;
 	void 			*cpu_hi_iss;
 	boolean_t		cpu_tlb_invalid;
-	uint32_t		cpu_hwIntCnt[256];	/* Interrupt counts */
+	uint32_t		cpu_hwIntCnt[256];		/* Interrupt counts */
 	uint64_t		cpu_dr7; /* debug control register */
 	uint64_t		cpu_int_event_time;	/* intr entry/exit time */
 	vmx_cpu_t		cpu_vmx;		/* wonderful world of virtualization */
@@ -181,7 +195,7 @@ typedef struct cpu_data
 							   * arg store
 							   * validity flag.
 							   */
-	rtc_nanotime_t		*cpu_nanotime;		/* Nanotime info */
+
 							  
 } cpu_data_t;
 

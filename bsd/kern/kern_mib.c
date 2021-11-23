@@ -592,7 +592,7 @@ sysctl_mib_init(void)
 	if (cpusubtype == CPU_SUBTYPE_POWERPC_970 && 
 	    cpu_info.l2_cache_size == 1 * 1024 * 1024)
 		/* The signature of the dual-core G5 */
-		packages = roundup(hinfo.max_cpus, 2) / 2;
+		packages = hinfo.max_cpus / 2;
 	else
 		packages = hinfo.max_cpus;
 
@@ -647,11 +647,13 @@ sysctl_mib_init(void)
 	cachesize[4] = 0;
 
 	/* hw.packages */
-	packages = roundup(ml_cpu_cache_sharing(0), cpuid_info()->thread_count)
-			/ cpuid_info()->thread_count;
-
+	packages = ml_cpu_cache_sharing(0) /
+			cpuid_info()->cpuid_cores_per_package;
+	
 #else /* end __arm__ */
 # warning we do not support this platform yet
 #endif /* __ppc__ */
 
+
 }
+

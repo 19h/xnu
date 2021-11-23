@@ -51,7 +51,7 @@ static int panic_dialog_verify( const struct panicimage * data, unsigned int siz
 static int pixels_needed_to_blit_digit( int digit );
 static void blit_digit( int digit );
 static const char * strnstr(const char * s, const char * find, size_t slen);
-void dim_screen(void);
+static void dim_screen(void);
 static void panic_blit_rect(unsigned int x, unsigned int y, unsigned int width,
 			    unsigned int height, int transparent,
 			    const unsigned char * dataPtr);
@@ -104,7 +104,7 @@ panic_ui_initialize(const unsigned char * system_clut)
 
 	/* Convert xnu-####.###.obj~### into ####.###~### */
 
-	if (version[0]) {
+	if (version) {
 		const char *versionpos = strnstr(version, "xnu-", VERSIONBUF_LEN);
 
 		if (versionpos) {
@@ -779,7 +779,7 @@ decode_rle(const unsigned char *dataPtr, unsigned int *quantity,
 }
 
 
-void 
+static void 
 dim_screen(void)
 {
 	unsigned long *p, *endp, *row;

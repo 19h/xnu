@@ -51,14 +51,11 @@ typedef void *cpu_id_t;
 
 
 void PE_enter_debugger(
-	const char *cause);
+	char *cause);
 
 void PE_init_platform(
 	boolean_t vm_initialized, 
 	void *args);
-
-
-
 
 
 void PE_init_kprintf(
