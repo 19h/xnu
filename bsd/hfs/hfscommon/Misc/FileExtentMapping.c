@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -495,6 +498,12 @@ static OSErr CreateExtentRecord(
 	
 	err = noErr;
 	*hint = 0;
+
+	// XXXdbg - preflight that there's enough space
+	err = BTCheckFreeSpace(GetFileControlBlock(vcb->extentsRefNum));
+	if (err)
+		return err;
+
 	MALLOC(btIterator, BTreeIterator *, sizeof(*btIterator), M_TEMP, M_WAITOK);
 	bzero(btIterator, sizeof(*btIterator));
 	
@@ -530,6 +539,8 @@ static OSErr CreateExtentRecord(
 	if (err == noErr)
 		*hint = btIterator->hint.nodeNum;
 
+	(void) BTFlushPath(GetFileControlBlock(vcb->extentsRefNum));
+	
 	FREE(btIterator, M_TEMP);	
 	return err;
 }
@@ -545,6 +556,12 @@ OSErr DeleteExtentRecord(
 	OSErr				err;
 	
 	err = noErr;
+
+	// XXXdbg - preflight that there's enough space
+	err = BTCheckFreeSpace(GetFileControlBlock(vcb->extentsRefNum));
+	if (err)
+		return err;
+
 	MALLOC(btIterator, BTreeIterator *, sizeof(*btIterator), M_TEMP, M_WAITOK);
 	bzero(btIterator, sizeof(*btIterator));
 	
@@ -569,7 +586,8 @@ OSErr DeleteExtentRecord(
 	}
 
 	err = BTDeleteRecord(GetFileControlBlock(vcb->extentsRefNum), btIterator);
-
+	(void) BTFlushPath(GetFileControlBlock(vcb->extentsRefNum));
+	
 	FREE(btIterator, M_TEMP);	
 	return err;
 }
@@ -1730,6 +1748,12 @@ static OSErr UpdateExtentRecord (
 		//	Need to find and change a record in Extents BTree
 		//
 		btFCB = GetFileControlBlock(vcb->extentsRefNum);
+
+		// XXXdbg - preflight that there's enough space
+		err = BTCheckFreeSpace(btFCB);
+		if (err)
+			return err;
+
 		MALLOC(btIterator, BTreeIterator *, sizeof(*btIterator), M_TEMP, M_WAITOK);
 		bzero(btIterator, sizeof(*btIterator));
 
@@ -1757,6 +1781,7 @@ static OSErr UpdateExtentRecord (
 
 			if (err == noErr)
 				err = BTReplaceRecord(btFCB, btIterator, &btRecord, btRecordSize);
+			(void) BTFlushPath(btFCB);
 		}
 		else {		//	HFS Plus volume
 			HFSPlusExtentRecord	foundData;		// The extent data actually found
@@ -1776,6 +1801,7 @@ static OSErr UpdateExtentRecord (
 				BlockMoveData(extentData, &foundData, sizeof(HFSPlusExtentRecord));
 				err = BTReplaceRecord(btFCB, btIterator, &btRecord, btRecordSize);
 			}
+			(void) BTFlushPath(btFCB);
 		}
 		FREE(btIterator, M_TEMP);	
 	}
@@ -1887,3 +1913,58 @@ static Boolean ExtentsAreIntegral(
 	
 	return true;
 }
+
+
+//_________________________________________________________________________________
+//
+// Routine:		NodesAreContiguous
+//
+// Purpose:		Ensure that all b-tree nodes are contiguous on disk
+//				Called by BTOpenPath during volume mount
+//_________________________________________________________________________________
+
+Boolean NodesAreContiguous(
+	ExtendedVCB	*vcb,
+	FCB			*fcb,
+	UInt32		nodeSize)
+{
+	UInt32				mask;
+	UInt32				startBlock;
+	UInt32				blocksChecked;
+	UInt32				hint;
+	HFSPlusExtentKey	key;
+	HFSPlusExtentRecord	extents;
+	OSErr				result;
+	Boolean				lastExtentReached;
+	
+
+	if (vcb->blockSize >= nodeSize)
+		return TRUE;
+
+	mask = (nodeSize / vcb->blockSize) - 1;
+
+	// check the local extents
+	(void) GetFCBExtentRecord(fcb, extents);
+	if ( !ExtentsAreIntegral(extents, mask, &blocksChecked, &lastExtentReached) )
+		return FALSE;
+
+	if (lastExtentReached || (SInt64)((SInt64)blocksChecked * (SInt64)vcb->blockSize) >= fcb->ff_size)
+		return TRUE;
+
+	startBlock = blocksChecked;
+
+	// check the overflow extents (if any)
+	while ( !lastExtentReached )
+	{
+		result = FindExtentRecord(vcb, kDataForkType, fcb->ff_cp->c_fileid, startBlock, FALSE, &key, extents, &hint);
+		if (result) break;
+
+		if ( !ExtentsAreIntegral(extents, mask, &blocksChecked, &lastExtentReached) )
+			return FALSE;
+
+		startBlock += blocksChecked;
+	}
+
+	return TRUE;
+}
+

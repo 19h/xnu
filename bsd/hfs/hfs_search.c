@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  *
@@ -193,6 +196,8 @@ hfs_search( ap )
 	CatalogRecord * myCurrentDataPtr;
 	CatPosition * myCatPositionPtr;
 	BTScanState myBTScanState;
+	void *user_start = NULL;
+	int   user_len;
 
 	/* XXX Parameter check a_searchattrs? */
 
@@ -222,6 +227,20 @@ hfs_search( ap )
 
 	MALLOC( attributesBuffer, void *, eachReturnBufferSize, M_TEMP, M_WAITOK );
 	variableBuffer = (void*)((char*) attributesBuffer + fixedBlockSize);
+
+	// XXXdbg - have to lock the user's buffer so we don't fault
+	// while holding the shared catalog file lock.  see the comment
+	// in hfs_readdir() for more details.
+	//
+	if (VTOHFS(ap->a_vp)->jnl && ap->a_uio->uio_segflg == UIO_USERSPACE) {
+		user_start = ap->a_uio->uio_iov->iov_base;
+		user_len   = ap->a_uio->uio_iov->iov_len;
+
+		if ((err = vslock(user_start, user_len)) != 0) {
+			user_start = NULL;
+			goto ExitThisRoutine;
+		}
+	}
 
 	/* Lock catalog b-tree */
 	err = hfs_metafilelocking(VTOHFS(ap->a_vp), kHFSCatalogFileID, LK_SHARED, p);
@@ -382,6 +401,10 @@ QuickExit:
 
 ExitThisRoutine:
         FREE( attributesBuffer, M_TEMP );
+
+	if (VTOHFS(ap->a_vp)->jnl && user_start) {
+		vsunlock(user_start, user_len, TRUE);
+	}
 
 	return (MacToVFSError(err));
 }
@@ -854,6 +877,14 @@ InsertMatch( struct vnode *root_vp, struct uio *a_uio, CatalogRecord *rec,
 
 	/* hide our private meta data directory */
 	if ((privateDir != 0) && (c_attr.ca_fileid == privateDir)) {
+		err = 0;
+		goto exit;
+	}
+
+	/* Hide the private journal files */
+	if (VTOHFS(root_vp)->jnl &&
+	    ((c_attr.ca_fileid == VTOHFS(root_vp)->hfs_jnlfileid) ||
+	     (c_attr.ca_fileid == VTOHFS(root_vp)->hfs_jnlinfoblkid))) {
 		err = 0;
 		goto exit;
 	}

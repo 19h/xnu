@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -267,6 +270,8 @@ hfs_write(ap)
     int 				retval;
 	off_t filebytes;
 	u_long fileblocks;
+	struct hfsmount *hfsmp;
+	int started_tr = 0, grabbed_lock = 0;
 
 	ioflag = ap->a_ioflag;
 
@@ -287,6 +292,16 @@ hfs_write(ap)
 		uio->uio_offset = fp->ff_size;
 	if ((cp->c_flags & APPEND) && uio->uio_offset != fp->ff_size)
 		return (EPERM);
+
+	// XXXdbg - don't allow modification of the journal or journal_info_block
+	if (VTOHFS(vp)->jnl && cp->c_datafork) {
+		struct HFSPlusExtentDescriptor *extd;
+
+		extd = &cp->c_datafork->ff_data.cf_extents[0];
+		if (extd->startBlock == VTOVCB(vp)->vcbJinfoBlock || extd->startBlock == VTOHFS(vp)->jnl_start) {
+			return EPERM;
+		}
+	}
 
 	writelimit = uio->uio_offset + uio->uio_resid;
 
@@ -333,12 +348,25 @@ hfs_write(ap)
 	if(writelimit > filebytes) {
 		bytesToAdd = writelimit - filebytes;
 
-		retval = hfs_chkdq(cp, (int64_t)(roundup(bytesToAdd, fp->ff_clumpsize)), 
+		retval = hfs_chkdq(cp, (int64_t)(roundup(bytesToAdd, vcb->blockSize)), 
 				   ap->a_cred, 0);
 		if (retval)
 			return (retval);
 	}
 #endif /* QUOTA */
+
+	hfsmp = VTOHFS(vp);
+	if (writelimit > filebytes) {
+		hfs_global_shared_lock_acquire(hfsmp);
+		grabbed_lock = 1;
+	}
+	if (hfsmp->jnl && (writelimit > filebytes)) {
+		if (journal_start_transaction(hfsmp->jnl) != 0) {
+			hfs_global_shared_lock_release(hfsmp);
+			return EINVAL;
+		}
+		started_tr = 1;
+	}
 
 	while (writelimit > filebytes) {
 	
@@ -362,6 +390,17 @@ hfs_write(ap)
 		filebytes = (off_t)fp->ff_blocks * (off_t)vcb->blockSize;
 		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 0)) | DBG_FUNC_NONE,
 			(int)uio->uio_offset, uio->uio_resid, (int)fp->ff_size,  (int)filebytes, 0);
+	}
+
+	// XXXdbg
+	if (started_tr) {
+		hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+		journal_end_transaction(hfsmp->jnl);
+		started_tr = 0;
+	}
+	if (grabbed_lock) {
+		hfs_global_shared_lock_release(hfsmp);
+		grabbed_lock = 0;
 	}
 
 	if (UBCISVALID(vp) && retval == E_NONE) {
@@ -952,6 +991,7 @@ hfs_cmap(ap)
     struct proc		*p = NULL;
     struct rl_entry *invalid_range;
     enum rl_overlaptype overlaptype;
+    int started_tr = 0, grabbed_lock = 0;
 
 	/*
 	 * Check for underlying vnode requests and ensure that logical
@@ -960,12 +1000,38 @@ hfs_cmap(ap)
 	if (ap->a_bpn == NULL)
 		return (0);
 
-	if (overflow_extents(fp) || fp->ff_unallocblocks) {
+	p = current_proc();
+  retry:
+	if (fp->ff_unallocblocks) {
 		lockExtBtree = 1;
-		p = current_proc();
+
+		// XXXdbg
+		hfs_global_shared_lock_acquire(hfsmp);
+		grabbed_lock = 1;
+
+		if (hfsmp->jnl) {
+			if (journal_start_transaction(hfsmp->jnl) != 0) {
+				hfs_global_shared_lock_release(hfsmp);
+				return EINVAL;
+			} else {
+				started_tr = 1;
+			}
+		} 
+
 		if (retval = hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_EXCLUSIVE | LK_CANRECURSE, p)) {
+			if (started_tr) {
+				journal_end_transaction(hfsmp->jnl);
+			}
+			if (grabbed_lock) {
+				hfs_global_shared_lock_release(hfsmp);
+			}
 			return (retval);
-        	}
+		}
+	} else if (overflow_extents(fp)) {
+		lockExtBtree = 1;
+		if (retval = hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_EXCLUSIVE | LK_CANRECURSE, p)) {
+			return retval;
+		}
 	}
 
 	/*
@@ -973,6 +1039,22 @@ hfs_cmap(ap)
 	 */
 	if (fp->ff_unallocblocks) {
 		SInt64 reqbytes, actbytes;
+
+		//
+		// Make sure we have a transaction.  It's possible
+		// that we came in and fp->ff_unallocblocks was zero
+		// but during the time we blocked acquiring the extents
+		// btree, ff_unallocblocks became non-zero and so we
+		// will need to start a transaction.
+		//
+		if (hfsmp->jnl && started_tr == 0) {
+		    if (lockExtBtree) {
+			(void) hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_RELEASE, p);
+			lockExtBtree = 0;
+		    }
+    
+		    goto retry;
+		}
 
 		reqbytes = (SInt64)fp->ff_unallocblocks *
 		             (SInt64)HFSTOVCB(hfsmp)->blockSize;
@@ -1007,9 +1089,16 @@ hfs_cmap(ap)
 		}
 
 		if (retval) {
-    			(void) hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_RELEASE, p);
-     			return (retval);
-    		}
+			(void) hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_RELEASE, p);
+			if (started_tr) {
+				hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+				journal_end_transaction(hfsmp->jnl);
+			}
+			if (grabbed_lock) {
+				hfs_global_shared_lock_release(hfsmp);
+			}
+			return (retval);
+		}
 		VTOC(ap->a_vp)->c_flag |= C_MODIFIED;
 	}
 
@@ -1024,6 +1113,17 @@ hfs_cmap(ap)
 	if (lockExtBtree)
     		(void) hfs_metafilelocking(hfsmp, kHFSExtentsFileID, LK_RELEASE, p);
 
+	// XXXdbg
+	if (started_tr) {
+		hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+		journal_end_transaction(hfsmp->jnl);
+		started_tr = 0;
+	}
+	if (grabbed_lock) {
+		hfs_global_shared_lock_release(hfsmp);
+		grabbed_lock = 0;
+	}
+			
     if (retval == E_NONE) {
         /* Adjust the mapping information for invalid file ranges: */
         overlaptype = rl_scan(&fp->ff_invalidranges,
@@ -1153,6 +1253,11 @@ hfs_strategy_fragmented(struct buf *bp)
 	}
 	
 	frag->b_vp = NULL;
+	//
+	// XXXdbg - in the case that this is a meta-data block, it won't affect
+	//          the journal because this bp is for a physical disk block,
+	//          not a logical block that is part of the catalog or extents
+	//          files.
 	SET(frag->b_flags, B_INVAL);
 	brelse(frag);
 	
@@ -1291,6 +1396,7 @@ int hfs_truncate(ap)
 	off_t filebytes;
 	u_long fileblocks;
 	int blksize;
+	struct hfsmount *hfsmp;
 
 	if (vp->v_type != VREG && vp->v_type != VLNK)
 		return (EISDIR);	/* cannot truncate an HFS directory! */
@@ -1309,6 +1415,7 @@ int hfs_truncate(ap)
 	if ((!ISHFSPLUS(VTOVCB(vp))) && (length > (off_t)MAXHFSFILESIZE))
 		return (EFBIG);
 
+	hfsmp = VTOHFS(vp);
 
 	tv = time;
 	retval = E_NONE;
@@ -1329,7 +1436,7 @@ int hfs_truncate(ap)
 	 */
 	if (length > fp->ff_size) {
 #if QUOTA
-		retval = hfs_chkdq(cp, (int64_t)(roundup(length - filebytes, fp->ff_clumpsize)),
+		retval = hfs_chkdq(cp, (int64_t)(roundup(length - filebytes, blksize)),
 				ap->a_cred, 0);
 		if (retval)
 			goto Err_Exit;
@@ -1347,10 +1454,25 @@ int hfs_truncate(ap)
 			if (suser(ap->a_cred, NULL) != 0)
 				eflags |= kEFReserveMask;  /* keep a reserve */
 
+			// XXXdbg
+			hfs_global_shared_lock_acquire(hfsmp);
+			if (hfsmp->jnl) {
+				if (journal_start_transaction(hfsmp->jnl) != 0) {
+					retval = EINVAL;
+					goto Err_Exit;
+				}
+			}
+
 			/* lock extents b-tree (also protects volume bitmap) */
 			retval = hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_EXCLUSIVE, ap->a_p);
-			if (retval)
+			if (retval) {
+				if (hfsmp->jnl) {
+					journal_end_transaction(hfsmp->jnl);
+				} 
+				hfs_global_shared_lock_release(hfsmp);
+
 				goto Err_Exit;
+			}
 
 			while ((length > filebytes) && (retval == E_NONE)) {
 				bytesToAdd = length - filebytes;
@@ -1368,7 +1490,16 @@ int hfs_truncate(ap)
 					break;
 				}
 			} /* endwhile */
+
 			(void) hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_RELEASE, ap->a_p);
+
+			// XXXdbg
+			if (hfsmp->jnl) {
+				hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+				journal_end_transaction(hfsmp->jnl);
+			} 
+			hfs_global_shared_lock_release(hfsmp);
+
 			if (retval)
 				goto Err_Exit;
 
@@ -1484,16 +1615,38 @@ int hfs_truncate(ap)
 #if QUOTA
 		  off_t savedbytes = ((off_t)fp->ff_blocks * (off_t)blksize);
 #endif /* QUOTA */
+		  // XXXdbg
+		  hfs_global_shared_lock_acquire(hfsmp);
+			if (hfsmp->jnl) {
+				if (journal_start_transaction(hfsmp->jnl) != 0) {
+					retval = EINVAL;
+					goto Err_Exit;
+				}
+			}
+
 			/* lock extents b-tree (also protects volume bitmap) */
 			retval = hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_EXCLUSIVE, ap->a_p);
-			if (retval)
+			if (retval) {
+				if (hfsmp->jnl) {
+					journal_end_transaction(hfsmp->jnl);
+				}
+				hfs_global_shared_lock_release(hfsmp);
 				goto Err_Exit;
+			}
 			
 			if (fp->ff_unallocblocks == 0)
 				retval = MacToVFSError(TruncateFileC(VTOVCB(vp),
 						(FCB*)fp, length, false));
 
 			(void) hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_RELEASE, ap->a_p);
+
+			// XXXdbg
+			if (hfsmp->jnl) {
+				hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+				journal_end_transaction(hfsmp->jnl);
+			}
+			hfs_global_shared_lock_release(hfsmp);
+
 			filebytes = (off_t)fp->ff_blocks * (off_t)blksize;
 			if (retval)
 				goto Err_Exit;
@@ -1564,6 +1717,9 @@ int hfs_allocate(ap)
 	int retval, retval2;
 	UInt32 blockHint;
 	UInt32 extendFlags =0;   /* For call to ExtendFileC */
+	struct hfsmount *hfsmp;
+
+	hfsmp = VTOHFS(vp);
 
 	*(ap->a_bytesallocated) = 0;
 	fileblocks = fp->ff_blocks;
@@ -1610,15 +1766,31 @@ int hfs_allocate(ap)
 		moreBytesRequested = length - filebytes;
 		
 #if QUOTA
-		retval = hfs_chkdq(cp, (int64_t)(roundup(moreBytesRequested, fp->ff_clumpsize)), 
+		retval = hfs_chkdq(cp,
+				(int64_t)(roundup(moreBytesRequested, VTOVCB(vp)->blockSize)), 
 				ap->a_cred, 0);
 		if (retval)
 			return (retval);
 
 #endif /* QUOTA */
+		// XXXdbg
+		hfs_global_shared_lock_acquire(hfsmp);
+		if (hfsmp->jnl) {
+			if (journal_start_transaction(hfsmp->jnl) != 0) {
+				retval = EINVAL;
+				goto Err_Exit;
+			}
+		}
+
 		/* lock extents b-tree (also protects volume bitmap) */
 		retval = hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_EXCLUSIVE, ap->a_p);
-		if (retval) goto Err_Exit;
+		if (retval) {
+			if (hfsmp->jnl) {
+				journal_end_transaction(hfsmp->jnl);
+			}
+			hfs_global_shared_lock_release(hfsmp);
+			goto Err_Exit;
+		}
 
 		retval = MacToVFSError(ExtendFileC(VTOVCB(vp),
 						(FCB*)fp,
@@ -1629,7 +1801,15 @@ int hfs_allocate(ap)
 
 		*(ap->a_bytesallocated) = actualBytesAdded;
 		filebytes = (off_t)fp->ff_blocks * (off_t)VTOVCB(vp)->blockSize;
+
 		(void) hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_RELEASE, ap->a_p);
+
+		// XXXdbg
+		if (hfsmp->jnl) {
+			hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+			journal_end_transaction(hfsmp->jnl);
+		}
+		hfs_global_shared_lock_release(hfsmp);
 
 		/*
 		 * if we get an error and no changes were made then exit
@@ -1661,9 +1841,25 @@ int hfs_allocate(ap)
 			(void) vinvalbuf(vp, vflags, ap->a_cred, ap->a_p, 0, 0);
 		}
 
+		// XXXdbg
+		hfs_global_shared_lock_acquire(hfsmp);
+		if (hfsmp->jnl) {
+			if (journal_start_transaction(hfsmp->jnl) != 0) {
+				retval = EINVAL;
+				goto Err_Exit;
+			}
+		}
+
 		/* lock extents b-tree (also protects volume bitmap) */
 		retval = hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_EXCLUSIVE, ap->a_p);
-		if (retval) goto Err_Exit;
+		if (retval) {
+			if (hfsmp->jnl) {
+				journal_end_transaction(hfsmp->jnl);
+			}
+			hfs_global_shared_lock_release(hfsmp);
+
+			goto Err_Exit;
+		}			
 
 		retval = MacToVFSError(
                             TruncateFileC(
@@ -1673,6 +1869,14 @@ int hfs_allocate(ap)
                                             false));
 		(void) hfs_metafilelocking(VTOHFS(vp), kHFSExtentsFileID, LK_RELEASE, ap->a_p);
 		filebytes = (off_t)fp->ff_blocks * (off_t)VTOVCB(vp)->blockSize;
+
+		if (hfsmp->jnl) {
+			hfs_flushvolumeheader(hfsmp, MNT_NOWAIT, 0);
+			journal_end_transaction(hfsmp->jnl);
+		}
+		hfs_global_shared_lock_release(hfsmp);
+		
+
 		/*
 		 * if we get an error and no changes were made then exit
 		 * otherwise we must do the VOP_UPDATE to reflect the changes
@@ -1794,9 +1998,9 @@ hfs_bwrite(ap)
 	} */ *ap;
 {
 	int retval = 0;
-#if BYTE_ORDER == LITTLE_ENDIAN
 	register struct buf *bp = ap->a_bp;
 	register struct vnode *vp = bp->b_vp;
+#if BYTE_ORDER == LITTLE_ENDIAN
 	BlockDescriptor block;
 
 	/* Trap B-Tree writes */
@@ -1820,8 +2024,12 @@ hfs_bwrite(ap)
 	}
 #endif
 	/* This buffer shouldn't be locked anymore but if it is clear it */
-	if (ISSET(ap->a_bp->b_flags, B_LOCKED)) {
-		CLR(ap->a_bp->b_flags, B_LOCKED);
+	if (ISSET(bp->b_flags, B_LOCKED)) {
+	    // XXXdbg
+	    if (VTOHFS(vp)->jnl) {
+			panic("hfs: CLEARING the lock bit on bp 0x%x\n", bp);
+	    }
+		CLR(bp->b_flags, B_LOCKED);
 		printf("hfs_bwrite: called with lock bit set\n");
 	}
 	retval = vn_bwrite (ap);

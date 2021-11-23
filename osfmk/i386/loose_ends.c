@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -62,6 +65,49 @@
 	/*
 	 * Should be rewritten in asm anyway.
 	 */
+
+
+/*
+ * copy 'size' bytes from physical to physical address
+ * the caller must validate the physical ranges 
+ *
+ * if flush_action == 0, no cache flush necessary
+ * if flush_action == 1, flush the source
+ * if flush_action == 2, flush the dest
+ * if flush_action == 3, flush both source and dest
+ */
+
+kern_return_t copyp2p(vm_offset_t source, vm_offset_t dest, unsigned int size, unsigned int flush_action) {
+
+        switch(flush_action) {
+	case 1:
+	        flush_dcache(source, size, 1);
+		break;
+	case 2:
+	        flush_dcache(dest, size, 1);
+		break;
+	case 3:
+	        flush_dcache(source, size, 1);
+	        flush_dcache(dest, size, 1);
+		break;
+
+	}
+        bcopy_phys((char *)source, (char *)dest, size);	/* Do a physical copy */
+
+        switch(flush_action) {
+	case 1:
+	        flush_dcache(source, size, 1);
+		break;
+	case 2:
+	        flush_dcache(dest, size, 1);
+		break;
+	case 3:
+	        flush_dcache(source, size, 1);
+	        flush_dcache(dest, size, 1);
+		break;
+
+	}
+}
 
 
 
@@ -260,3 +306,40 @@ void machine_callstack(
 }
 
 #endif	/* MACH_ASSERT */
+
+
+
+
+/* FIXMEx86 */
+/* These all need to be implemented somewhere */
+
+void fillPage(ppnum_t pa, unsigned int fill)
+{
+}
+
+uint64_t max_mem;
+uint64_t sane_size;
+
+#include <vm/pmap.h>
+
+ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va)
+{
+  return 0;
+}
+
+kern_return_t copypv(addr64_t source, addr64_t sink, unsigned int size, int which)
+{
+  return KERN_SUCCESS;
+}
+
+void mapping_set_mod(ppnum_t pa)
+{
+}
+
+void flush_dcache64(addr64_t addr, unsigned count, int phys)
+{
+}
+
+void invalidate_icache64(addr64_t addr, unsigned cnt, int phys)
+{
+}

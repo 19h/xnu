@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -677,12 +680,22 @@ vinvalbuf(vp, flags, cred, p, slpflag, slptimeo)
 		if (error = VOP_FSYNC(vp, cred, MNT_WAIT, p)) {
 			return (error);
 		}
-		if (vp->v_dirtyblkhd.lh_first)
-			panic("vinvalbuf: dirty bufs");
+
+		// XXXdbg - if there are dirty bufs, wait for 'em if they're busy
+		for (bp=vp->v_dirtyblkhd.lh_first; bp; bp=nbp) {
+		    nbp = bp->b_vnbufs.le_next;
+		    if (ISSET(bp->b_flags, B_BUSY)) {
+			SET(bp->b_flags, B_WANTED);
+			tsleep((caddr_t)bp, slpflag | (PRIBIO + 1), "vinvalbuf", 0);
+			nbp = vp->v_dirtyblkhd.lh_first;
+		    } else {
+			panic("vinvalbuf: dirty buf (vp 0x%x, bp 0x%x)", vp, bp);
+		    }
+		}
 	}
 
 	for (;;) {
-		if ((blist = vp->v_cleanblkhd.lh_first) && flags & V_SAVEMETA)
+		if ((blist = vp->v_cleanblkhd.lh_first) && (flags & V_SAVEMETA))
 			while (blist && blist->b_lblkno < 0)
 				blist = blist->b_vnbufs.le_next;
 		if (!blist && (blist = vp->v_dirtyblkhd.lh_first) &&
@@ -694,7 +707,7 @@ vinvalbuf(vp, flags, cred, p, slpflag, slptimeo)
 
 		for (bp = blist; bp; bp = nbp) {
 			nbp = bp->b_vnbufs.le_next;
-			if (flags & V_SAVEMETA && bp->b_lblkno < 0)
+			if ((flags & V_SAVEMETA) && bp->b_lblkno < 0)
 				continue;
 			s = splbio();
 			if (ISSET(bp->b_flags, B_BUSY)) {
@@ -720,7 +733,13 @@ vinvalbuf(vp, flags, cred, p, slpflag, slptimeo)
 				(void) VOP_BWRITE(bp);
 				break;
 			}
-			SET(bp->b_flags, B_INVAL);
+
+			if (bp->b_flags & B_LOCKED) {
+				panic("vinvalbuf: bp @ 0x%x is locked!\n", bp);
+				break;
+			} else {
+				SET(bp->b_flags, B_INVAL);
+			}
 			brelse(bp);
 		}
 	}

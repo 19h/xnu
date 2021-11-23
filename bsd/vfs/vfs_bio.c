@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -180,6 +183,7 @@ simple_lock_data_t bufhashlist_slock;		/* lock on buffer hash list */
 /* number of per vnode, "in flight" buffer writes */
 #define	BUFWRITE_THROTTLE	9
 
+
 /*
  * Time in seconds before a buffer on a list is 
  * considered as a stale buffer 
@@ -211,9 +215,9 @@ binshash(struct buf *bp, struct bufhashhdr *dp)
 
 	simple_lock(&bufhashlist_slock);
 
-#if 0	
-	if(incore(bp->b_vp, bp->b_lblkno))
-		panic("binshash: already incore");
+#if 0
+	if((bad = incore(bp->b_vp, bp->b_lblkno)))
+		panic("binshash: already incore bp 0x%x, bad 0x%x\n", bp, bad);
 #endif /* 0 */
 
 	BHASHENTCHECK(bp);
@@ -459,6 +463,7 @@ bio_doread(vp, blkno, size, cred, async, queuetype)
 			 */
 			bp->b_rcred = crdup(cred);
 		}
+
 		VOP_STRATEGY(bp);
 
 		trace(TR_BREADMISS, pack(vp, size), blkno);
@@ -627,7 +632,12 @@ bwrite(bp)
 			p->p_stats->p_ru.ru_oublock++;		/* XXX */
 
 		/* Release the buffer. */
-		brelse(bp);
+		// XXXdbg - only if the unused bit is set
+		if (!ISSET(bp->b_flags, B_NORELSE)) {
+		    brelse(bp);
+		} else {
+		    CLR(bp->b_flags, B_NORELSE);
+		}
 
 		return (rv);
 	} else {
@@ -707,7 +717,10 @@ bdwrite_internal(bp, return_error)
 	if (nbdwrite < 0)
 		panic("bdwrite: Negative nbdwrite");
 
-	if (nbdwrite > ((nbuf/4)*3)) {
+	// can't do a bawrite() if the LOCKED bit is set because the
+	// buffer is part of a transaction and can't go to disk until
+	// the LOCKED bit is cleared.
+	if (!ISSET(bp->b_flags, B_LOCKED) && nbdwrite > ((nbuf/4)*3)) {
 		if (return_error)
 			return (EAGAIN);
 		else
@@ -807,6 +820,27 @@ brelse(bp)
 
 	trace(TR_BRELSE, pack(bp->b_vp, bp->b_bufsize), bp->b_lblkno);
 
+	// if we're invalidating a buffer that has the B_CALL bit
+	// set then call the b_iodone function so it gets cleaned
+	// up properly.
+	//
+	if (ISSET(bp->b_flags, B_META) && ISSET(bp->b_flags, B_INVAL)) {
+		if (ISSET(bp->b_flags, B_CALL) && !ISSET(bp->b_flags, B_DELWRI)) {
+			panic("brelse: CALL flag set but not DELWRI! bp 0x%x\n", bp);
+		}
+		if (ISSET(bp->b_flags, B_CALL)) {	/* if necessary, call out */
+			void	(*iodone_func)(struct buf *) = bp->b_iodone;
+
+			CLR(bp->b_flags, B_CALL);	/* but note callout done */
+			bp->b_iodone = NULL;
+
+			if (iodone_func == NULL) {
+				panic("brelse: bp @ 0x%x has NULL b_iodone!\n", bp);
+			}
+			(*iodone_func)(bp);
+		}
+	}
+	
 	/* IO is done. Cleanup the UPL state */
 	if (!ISSET(bp->b_flags, B_META)
 		&& UBCINFOEXISTS(bp->b_vp) && bp->b_bufsize) {
@@ -1121,6 +1155,10 @@ start:
 			brelse(bp);
 			goto start;
 		}
+		/*
+		 * NOTE: YOU CAN NOT BLOCK UNTIL binshash() HAS BEEN
+		 *       CALLED!  BE CAREFUL.
+		 */
 
 		/*
 		 * if it is meta, the queue may be set to other 
@@ -1451,7 +1489,7 @@ allocbuf(bp, size)
 	}
 
 	if (ISSET(bp->b_flags, B_META) && (bp->b_data == 0))
-		panic("allocbuf: bp->b_data is NULL");
+		panic("allocbuf: bp->b_data is NULL, buf @ 0x%x", bp);
 
 	bp->b_bufsize = desired_size;
 	bp->b_bcount = size;
@@ -1603,11 +1641,15 @@ start:
 		panic("getnewbuf: null bp");
 
 found:
+	if (ISSET(bp->b_flags, B_LOCKED)) {
+	    panic("getnewbuf: bp @ 0x%x is LOCKED! (flags 0x%x)\n", bp, bp->b_flags);
+	}
+	
 	if (bp->b_hash.le_prev == (struct buf **)0xdeadbeef) 
-		panic("getnewbuf: le_prev is deadbeef");
+		panic("getnewbuf: le_prev is deadbeef, buf @ 0x%x", bp);
 
 	if(ISSET(bp->b_flags, B_BUSY))
-		panic("getnewbuf reusing BUSY buf");
+		panic("getnewbuf reusing BUSY buf @ 0x%x", bp);
 
 	/* Clean it */
 	if (bcleanbuf(bp)) {
@@ -1822,8 +1864,16 @@ biodone(bp)
 	}
 
 	if (ISSET(bp->b_flags, B_CALL)) {	/* if necessary, call out */
+		void	(*iodone_func)(struct buf *) = bp->b_iodone;
+
 		CLR(bp->b_flags, B_CALL);	/* but note callout done */
-		(*bp->b_iodone)(bp);
+		bp->b_iodone = NULL;
+
+		if (iodone_func == NULL) {
+			panic("biodone: bp @ 0x%x has NULL b_iodone!\n", bp);			
+		} else { 
+			(*iodone_func)(bp);
+		}
 	} else if (ISSET(bp->b_flags, B_ASYNC))	/* if async, release it */
 		brelse(bp);
 	else {		                        /* or just wakeup the buffer */	
@@ -1932,6 +1982,7 @@ alloc_io_buf(vp, priv)
 	/* clear out various fields */
 	bp->b_flags = B_BUSY;
 	bp->b_blkno = bp->b_lblkno = 0;
+
 	bp->b_iodone = 0;
 	bp->b_error = 0;
 	bp->b_resid = 0;
@@ -1982,7 +2033,7 @@ free_io_buf(bp)
 
 typedef long long blsize_t;
 
-blsize_t MAXNBUF; /* initialize to (mem_size / PAGE_SIZE) */
+blsize_t MAXNBUF; /* initialize to (sane_size / PAGE_SIZE) */
 /* Global tunable limits */
 blsize_t nbufh;			/* number of buffer headers */
 blsize_t nbuflow;		/* minimum number of buffer headers required */
@@ -2078,11 +2129,11 @@ bufq_balance_thread_init()
 	if (bufqscanwait++ == 0) {
 
 		/* Initalize globals */
-		MAXNBUF = (mem_size / PAGE_SIZE);
+		MAXNBUF = (sane_size / PAGE_SIZE);
 		nbufh = nbuf;
 		nbuflow = min(nbufh, 100);
 		nbufhigh = min(MAXNBUF, max(nbufh, 2048));
-		nbuftarget = (mem_size >> 5) / PAGE_SIZE;
+		nbuftarget = (sane_size >> 5) / PAGE_SIZE;
 		nbuftarget = max(nbuflow, nbuftarget);
 		nbuftarget = min(nbufhigh, nbuftarget);
 
@@ -2343,4 +2394,77 @@ doit:
 	goto doit;
 
 	(void) thread_funnel_set(kernel_flock, funnel_state);
+}
+
+
+static int
+bp_cmp(void *a, void *b)
+{
+    struct buf *bp_a = *(struct buf **)a,
+               *bp_b = *(struct buf **)b;
+    daddr_t res;
+
+    // don't have to worry about negative block
+    // numbers so this is ok to do.
+    //
+    res = (bp_a->b_blkno - bp_b->b_blkno);
+
+    return (int)res;
+}
+
+#define NFLUSH 32
+
+int
+bflushq(int whichq, struct mount *mp)
+{
+	struct buf *bp, *next;
+	int         i, buf_count, s;
+	int         counter=0, total_writes=0;
+	static struct buf *flush_table[NFLUSH];
+
+	if (whichq < 0 || whichq >= BQUEUES) {
+	    return;
+	}
+
+
+  restart:
+	bp = TAILQ_FIRST(&bufqueues[whichq]);
+	for(buf_count=0; bp; bp=next) {
+	    next = bp->b_freelist.tqe_next;
+			
+	    if (bp->b_vp == NULL || bp->b_vp->v_mount != mp) {
+		continue;
+	    }
+
+	    if ((bp->b_flags & B_DELWRI) && (bp->b_flags & B_BUSY) == 0) {
+		if (whichq != BQ_LOCKED && (bp->b_flags & B_LOCKED)) {
+		    panic("bflushq: bp @ 0x%x is locked!\n", bp);
+		}
+		
+		bremfree(bp);
+		bp->b_flags |= B_BUSY;
+		flush_table[buf_count] = bp;
+		buf_count++;
+		total_writes++;
+
+		if (buf_count >= NFLUSH) {
+		    qsort(flush_table, buf_count, sizeof(struct buf *), bp_cmp);
+
+		    for(i=0; i < buf_count; i++) {
+			bawrite(flush_table[i]);
+		    }
+
+		    goto restart;
+		}
+	    }
+	}
+
+	if (buf_count > 0) {
+	    qsort(flush_table, buf_count, sizeof(struct buf *), bp_cmp);
+	    for(i=0; i < buf_count; i++) {
+		bawrite(flush_table[i]);
+	    }
+	}
+
+	return total_writes;
 }
