@@ -124,7 +124,6 @@ extern struct sysctl_oid sysctl__net_inet_ip_sourceroute;
 extern struct sysctl_oid sysctl__net_inet_ip_subnets_are_local;
 extern struct sysctl_oid sysctl__net_inet_ip_keepfaith;
 extern struct sysctl_oid sysctl__net_inet_ip_maxfragpackets;
-extern struct sysctl_oid sysctl__net_inet_ip_maxfragsperpacket;
 extern struct sysctl_oid sysctl__net_inet_ip_check_interface;
 extern struct sysctl_oid sysctl__net_inet_ip_check_route_selfref;
 extern struct sysctl_oid sysctl__net_inet_ip_use_route_genid;
@@ -526,7 +525,6 @@ struct sysctl_oid *newsysctl_list[] =
     ,&sysctl__net_inet_ip_subnets_are_local
     ,&sysctl__net_inet_ip_keepfaith
     ,&sysctl__net_inet_ip_maxfragpackets
-    ,&sysctl__net_inet_ip_maxfragsperpacket
     ,&sysctl__net_inet_ip_check_interface
     ,&sysctl__net_inet_ip_check_route_selfref
     ,&sysctl__net_inet_ip_use_route_genid
