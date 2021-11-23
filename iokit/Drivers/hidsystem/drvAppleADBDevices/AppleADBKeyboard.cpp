@@ -140,9 +140,7 @@ void AppleADBKeyboard::setAlphaLockFeedback ( bool to )
     else
 	turnLEDon |= ADBKS_LED_CAPSLOCK;
 
-    if ( ! isInactive() ) {
-        thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
-    }
+    thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
 }
 
 void AppleADBKeyboard::setNumLockFeedback ( bool to )
@@ -152,9 +150,7 @@ void AppleADBKeyboard::setNumLockFeedback ( bool to )
     else
 	turnLEDon |= ADBKS_LED_NUMLOCK;
 
-    if ( ! isInactive() ) {
-        thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
-    }
+    thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
 }
 
 

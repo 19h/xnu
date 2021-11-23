@@ -65,8 +65,7 @@ struct selinfo {
 	void		*si_thread;	/* thread to be notified */
 	short		si_flags;	/* see below */
 };
-#define	SI_COLL		0x0001		/* collision occurred */
-#define	SI_SBSEL	0x0002		/* select socket buffer wanted  replaces SB_SEL */ 
+#define	SI_COLL	0x0001		/* collision occurred */
 
 #ifdef KERNEL
 struct proc;

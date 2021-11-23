@@ -3154,15 +3154,13 @@ vm_fault_copy(
 			 *	zero-fill the page in dst_object.
 			 */
 			src_page = VM_PAGE_NULL;
-			result_page = VM_PAGE_NULL;
 		} else {
 			vm_object_lock(src_object);
 			src_page = vm_page_lookup(src_object,
 						  trunc_page_64(src_offset));
-			if (src_page == dst_page) {
+			if (src_page == dst_page)
 				src_prot = dst_prot;
-				result_page = VM_PAGE_NULL;
-			} else {
+			else {
 				src_prot = VM_PROT_READ;
 				vm_object_paging_begin(src_object);
 
@@ -3207,17 +3205,18 @@ vm_fault_copy(
 						return(KERN_MEMORY_ERROR);
 				}
 
+				src_page = result_page;
 
 				assert((src_top_page == VM_PAGE_NULL) ==
-				       (result_page->object == src_object));
+				       (src_page->object == src_object));
 			}
 			assert ((src_prot & VM_PROT_READ) != VM_PROT_NONE);
-			vm_object_unlock(result_page->object);
+			vm_object_unlock(src_page->object);
 		}
 
 		if (!vm_map_verify(dst_map, dst_version)) {
-			if (result_page != VM_PAGE_NULL && src_page != dst_page)
-				vm_fault_copy_cleanup(result_page, src_top_page);
+			if (src_page != VM_PAGE_NULL && src_page != dst_page)
+				vm_fault_copy_cleanup(src_page, src_top_page);
 			vm_fault_copy_dst_cleanup(dst_page);
 			break;
 		}
@@ -3227,8 +3226,8 @@ vm_fault_copy(
 		if (dst_page->object->copy != old_copy_object) {
 			vm_object_unlock(dst_page->object);
 			vm_map_verify_done(dst_map, dst_version);
-			if (result_page != VM_PAGE_NULL && src_page != dst_page)
-				vm_fault_copy_cleanup(result_page, src_top_page);
+			if (src_page != VM_PAGE_NULL && src_page != dst_page)
+				vm_fault_copy_cleanup(src_page, src_top_page);
 			vm_fault_copy_dst_cleanup(dst_page);
 			break;
 		}
@@ -3258,11 +3257,11 @@ vm_fault_copy(
 				part_size = amount_left;
 			}
 
-			if (result_page == VM_PAGE_NULL) {
+			if (src_page == VM_PAGE_NULL) {
 				vm_page_part_zero_fill(dst_page,
 							dst_po, part_size);
 			} else {
-				vm_page_part_copy(result_page, src_po,
+				vm_page_part_copy(src_page, src_po,
 					dst_page, dst_po, part_size);
 				if(!dst_page->dirty){
 					vm_object_lock(dst_object);
@@ -3274,10 +3273,10 @@ vm_fault_copy(
 		} else {
 			part_size = PAGE_SIZE;
 
-			if (result_page == VM_PAGE_NULL)
+			if (src_page == VM_PAGE_NULL)
 				vm_page_zero_fill(dst_page);
 			else{
-				vm_page_copy(result_page, dst_page);
+				vm_page_copy(src_page, dst_page);
 				if(!dst_page->dirty){
 					vm_object_lock(dst_object);
 					dst_page->dirty = TRUE;
@@ -3293,8 +3292,8 @@ vm_fault_copy(
 
 		vm_map_verify_done(dst_map, dst_version);
 
-		if (result_page != VM_PAGE_NULL && src_page != dst_page)
-			vm_fault_copy_cleanup(result_page, src_top_page);
+		if (src_page != VM_PAGE_NULL && src_page != dst_page)
+			vm_fault_copy_cleanup(src_page, src_top_page);
 		vm_fault_copy_dst_cleanup(dst_page);
 
 		amount_left -= part_size;
