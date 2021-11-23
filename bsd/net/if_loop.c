@@ -432,8 +432,13 @@ lortrequest(cmd, rt, sa)
 /*
  * Process an ioctl request.
  */
+/* ARGSUSED */
 static int
-lo_if_ioctl(struct ifnet *ifp, u_long cmd, void * data)
+loioctl(dl_tag, ifp, cmd, data)
+	u_long   dl_tag;
+	register struct ifnet *ifp;
+	u_long cmd;
+	void   *data;
 {
 	register struct ifaddr *ifa;
 	register struct ifreq *ifr = (struct ifreq *)data;
@@ -482,17 +487,9 @@ lo_if_ioctl(struct ifnet *ifp, u_long cmd, void * data)
 
 	default:
 		error = EOPNOTSUPP;
-		break;
 	}
 	return (error);
 }
-
-static int
-loioctl(u_long dl_tag, struct ifnet *ifp, u_long cmd, caddr_t data)
-{
-    return (lo_if_ioctl(ifp, cmd, data));
-}
-
 #endif /* NLOOP > 0 */
 
 
@@ -657,7 +654,7 @@ loopattach(dummy)
 		ifp->if_unit = i++;
 		ifp->if_mtu = LOMTU;
 		ifp->if_flags = IFF_LOOPBACK | IFF_MULTICAST;
-		ifp->if_ioctl = lo_if_ioctl;
+		ifp->if_ioctl = loioctl;
 		ifp->if_set_bpf_tap = lo_set_bpf_tap;
 		ifp->if_output = lo_output;
 		ifp->if_type = IFT_LOOP;

@@ -882,8 +882,7 @@ skip_ipsec:
 
 pass:
 	m->m_pkthdr.csum_flags |= CSUM_IP;
-	sw_csum = m->m_pkthdr.csum_flags 
-		& ~IF_HWASSIST_CSUM_FLAGS(ifp->if_hwassist);
+	sw_csum = m->m_pkthdr.csum_flags & ~ifp->if_hwassist;
 
 	if ((ifp->if_hwassist & CSUM_TCP_SUM16) != 0) {
 		/*
@@ -913,7 +912,7 @@ pass:
 		m->m_pkthdr.csum_flags &= ~CSUM_DELAY_DATA;
 	}
 	
-	m->m_pkthdr.csum_flags &= IF_HWASSIST_CSUM_FLAGS(ifp->if_hwassist);
+	m->m_pkthdr.csum_flags &= ifp->if_hwassist;
 
 	/*
 	 * If small enough for interface, or the interface will take
@@ -2166,7 +2165,7 @@ ip_mloopback(ifp, m, dst, hlen)
         * The UDP checksum has not been calculated yet.
         */
         if (copym->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
-            if (IF_HWASSIST_CSUM_FLAGS(ifp->if_hwassist)) {
+            if (ifp->if_hwassist) {
                 copym->m_pkthdr.csum_flags |=
                     CSUM_DATA_VALID | CSUM_PSEUDO_HDR |
                     CSUM_IP_CHECKED | CSUM_IP_VALID;

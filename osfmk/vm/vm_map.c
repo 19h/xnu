@@ -5380,13 +5380,6 @@ vm_map_copyin_common(
 	}
 
 	/*
-	 *	Check that the end address doesn't overflow
-	 */
-	src_end = src_addr + len;
-	if (src_end < src_addr)
-		return KERN_INVALID_ADDRESS;
-
-	/*
 	 * If the copy is sufficiently small, use a kernel buffer instead
 	 * of making a virtual copy.  The theory being that the cost of
 	 * setting up VM (and taking C-O-W faults) dominates the copy costs
@@ -5397,12 +5390,21 @@ vm_map_copyin_common(
 					     src_destroy, copy_result);
 
 	/*
-	 *	Compute (page aligned) start and end of region
+	 *	Compute start and end of region
 	 */
+
 	src_start = trunc_page_32(src_addr);
-	src_end = round_page_32(src_end);
+	src_end = round_page_32(src_addr + len);
 
 	XPR(XPR_VM_MAP, "vm_map_copyin_common map 0x%x addr 0x%x len 0x%x dest %d\n", (natural_t)src_map, src_addr, len, src_destroy, 0);
+
+	/*
+	 *	Check that the end address doesn't overflow
+	 */
+
+	if (src_end <= src_start)
+		if ((src_end < src_start) || (src_start != 0))
+			return(KERN_INVALID_ADDRESS);
 
 	/*
 	 *	Allocate a header element for the list.

@@ -1348,15 +1348,6 @@ static OSErr BlockFindContiguous(
 	UInt32  blockRef;
 	UInt32  wordsPerBlock;
 
-	if (!useMetaZone) {
-		struct hfsmount *hfsmp = VCBTOHFS(vcb);
-
-		
-		if ((hfsmp->hfs_flags & HFS_METADATA_ZONE) &&
-		    (startingBlock <= hfsmp->hfs_metazone_end))
-			startingBlock = hfsmp->hfs_metazone_end + 1;
-	}
-
 	if ((endingBlock - startingBlock) < minBlocks)
 	{
 		//	The set of blocks we're checking is smaller than the minimum number
@@ -1437,9 +1428,8 @@ static OSErr BlockFindContiguous(
 				 */
 				if (!useMetaZone) {
 					currentBlock = NextBitmapBlock(vcb, currentBlock);
-					if (currentBlock >= stopBlock) {
-						goto LoopExit;
-					}
+					if (currentBlock >= stopBlock)
+						break;
 				}
 
 				err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef);
@@ -1526,7 +1516,7 @@ FoundUnused:
 
 					nextBlock = NextBitmapBlock(vcb, currentBlock);
 					if (nextBlock != currentBlock) {
-						goto LoopExit;  /* allocation gap, so stop */
+						break;  /* allocation gap, so stop */
 					}
 				}
 
@@ -1595,7 +1585,7 @@ FoundUsed:
 				++vcb->vcbFreeExtCnt;
 		}
 	} while (currentBlock < stopBlock);
-LoopExit:
+
 
 	//	Return the outputs.
 	if (foundBlocks < minBlocks)

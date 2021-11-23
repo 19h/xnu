@@ -126,8 +126,7 @@ struct	proc {
 
 	int	p_flag;			/* P_* flags. */
 	char	p_stat;			/* S* process status. */
-        char	p_shutdownstate;
-	char	p_pad1[2];
+	char	p_pad1[3];
 
 	pid_t	p_pid;			/* Process identifier. */
 	LIST_ENTRY(proc) p_pglist;	/* List of processes in pgrp. */

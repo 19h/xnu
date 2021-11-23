@@ -57,4 +57,3 @@ public:
  };
  
  #endif /* _IOPMEVENTSOURCE_H_ */
- 

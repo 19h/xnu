@@ -87,12 +87,9 @@
 */
 
 #include <sys/socketvar.h>
-#include <net/if_vlan_var.h>
 
 #include <net/dlil.h>
 
-extern int  vlan_demux(struct ifnet * ifp, struct mbuf *, 
-		       char * frame_header, struct if_proto * * proto);
 
 #if LLC && CCITT
 extern struct ifqueue pkintrq;
@@ -109,6 +106,11 @@ extern struct ifqueue atalkintrq;
 #if BRIDGE
 #include <net/bridge.h>
 #endif
+
+/* #include "vlan.h" */
+#if NVLAN > 0
+#include <net/if_vlan_var.h>
+#endif /* NVLAN > 0 */
 
 static u_long lo_dlt = 0;
 
@@ -146,8 +148,8 @@ int ether_resolvemulti __P((struct ifnet *, struct sockaddr **,
  * Setting the type to 0 releases the entry. Eventually we should compact-out
  * the unused entries.
  */
-__private_extern__ int
-ether_del_proto(struct if_proto *proto, u_long dl_tag)
+static
+int  ether_del_proto(struct if_proto *proto, u_long dl_tag)
 {
     struct en_desc*	ed = ether_desc_blk[proto->ifp->family_cookie].block_ptr;
     u_long	current = 0;
@@ -170,8 +172,7 @@ ether_del_proto(struct if_proto *proto, u_long dl_tag)
 
 
 
-
-__private_extern__ int
+static int
 ether_add_proto(struct ddesc_head_str *desc_head, struct if_proto *proto, u_long dl_tag)
 {
    char *current_ptr;
@@ -219,6 +220,7 @@ ether_add_proto(struct ddesc_head_str *desc_head, struct if_proto *proto, u_long
                 return EINVAL;
         }
     
+    restart:
         ed = ether_desc_blk[proto->ifp->family_cookie].block_ptr;
         
         /* Find a free entry */
@@ -246,7 +248,6 @@ ether_add_proto(struct ddesc_head_str *desc_head, struct if_proto *proto, u_long
             FREE(ether_desc_blk[proto->ifp->family_cookie].block_ptr, M_IFADDR);
             ether_desc_blk[proto->ifp->family_cookie].n_count = new_count;
             ether_desc_blk[proto->ifp->family_cookie].block_ptr = (struct en_desc*)tmp;
-	    ed = ether_desc_blk[proto->ifp->family_cookie].block_ptr;
         }
         
         /* Bump n_max_used if appropriate */
@@ -323,7 +324,6 @@ int ether_demux(ifp, m, frame_header, proto)
 {
     register struct ether_header *eh = (struct ether_header *)frame_header;
     u_short			ether_type = eh->ether_type;
-    u_short			ether_type_host;
     u_int16_t		type;
     u_int8_t		*data;
     u_long			i = 0;
@@ -358,18 +358,15 @@ int ether_demux(ifp, m, frame_header, proto)
             return EJUSTRETURN;
         }
     }
-    ether_type_host = ntohs(ether_type);
-    if ((m->m_pkthdr.csum_flags & CSUM_VLAN_TAG_VALID)
-	|| ether_type_host == ETHERTYPE_VLAN) {
-	return (vlan_demux(ifp, m, frame_header, proto));
-    }
+    
     data = mtod(m, u_int8_t*);
-
+    
     /*
      * Determine the packet's protocol type and stuff the protocol into
      * longs for quick compares.
      */
-    if (ether_type_host <= 1500) {
+    
+    if (ntohs(ether_type) <= 1500) {
         extProto1 = *(u_int32_t*)data;
         
         // SAP or SNAP
@@ -421,7 +418,7 @@ int ether_demux(ifp, m, frame_header, proto)
     }
     
     return ENOENT;
-}
+}			
 
 
 
@@ -441,7 +438,7 @@ ether_frameout(ifp, m, ndest, edst, ether_type)
 	char			*ether_type;
 {
 	register struct ether_header *eh;
-	int hlen;	/* link layer header length */
+	int hlen;	/* link layer header lenght */
 	struct arpcom *ac = IFP2AC(ifp);
 
 
@@ -499,9 +496,8 @@ ether_frameout(ifp, m, ndest, edst, ether_type)
 }
 
 
-
-__private_extern__ int
-ether_add_if(struct ifnet *ifp)
+static
+int  ether_add_if(struct ifnet *ifp)
 {
     u_long  i;
 
@@ -509,7 +505,6 @@ ether_add_if(struct ifnet *ifp)
     ifp->if_demux  = ether_demux;
     ifp->if_event  = 0;
     ifp->if_resolvemulti = ether_resolvemulti;
-    ifp->if_nvlans = 0;
 
     for (i=0; i < MAX_INTERFACES; i++)
         if (ether_desc_blk[i].n_count == 0)
@@ -531,8 +526,8 @@ ether_add_if(struct ifnet *ifp)
     return 0;
 }
 
-__private_extern__ int
-ether_del_if(struct ifnet *ifp)
+static
+int  ether_del_if(struct ifnet *ifp)
 {
     if ((ifp->family_cookie < MAX_INTERFACES) &&
         (ether_desc_blk[ifp->family_cookie].n_count))
@@ -547,8 +542,8 @@ ether_del_if(struct ifnet *ifp)
         return ENOENT;
 }
 
-__private_extern__ int
-ether_init_if(struct ifnet *ifp)
+static
+int  ether_init_if(struct ifnet *ifp)
 {
     register struct ifaddr *ifa;
     register struct sockaddr_dl *sdl;
@@ -556,7 +551,7 @@ ether_init_if(struct ifnet *ifp)
     ifa = ifnet_addrs[ifp->if_index - 1];
     if (ifa == 0) {
             printf("ether_ifattach: no lladdr!\n");
-            return (EINVAL);
+            return;
     }
     sdl = (struct sockaddr_dl *)ifa->ifa_addr;
     sdl->sdl_type = IFT_ETHER;
@@ -624,7 +619,6 @@ int ether_family_init()
     int  i, error=0;
     struct dlil_ifmod_reg_str  ifmod_reg;
     struct dlil_protomod_reg_str enet_protoreg;
-    extern int vlan_family_init(void);
 
     /* ethernet family is built-in, called from bsd_init */
     thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
@@ -640,32 +634,28 @@ int ether_family_init()
 
     if (dlil_reg_if_modules(APPLE_IF_FAM_ETHERNET, &ifmod_reg)) {
         printf("WARNING: ether_family_init -- Can't register if family modules\n");
-        error = EIO;
-	goto done;
+        return EIO;
     }
 
+    for (i=0; i < MAX_INTERFACES; i++)
+        ether_desc_blk[i].n_count = 0;
 
-    /* Register protocol registration functions */
-    
-    bzero(&enet_protoreg, sizeof(enet_protoreg));
-    enet_protoreg.attach_proto = ether_attach_inet;
-    enet_protoreg.detach_proto = ether_detach_inet;
-    
-    if (error = dlil_reg_proto_module(PF_INET, APPLE_IF_FAM_ETHERNET, &enet_protoreg) != 0) {
-	printf("ether_family_init: dlil_reg_proto_module failed for AF_INET error=%d\n", error);
-	goto done;
-    }
-    
-    enet_protoreg.attach_proto = ether_attach_inet6;
-    enet_protoreg.detach_proto = ether_detach_inet6;
-    
-    if (error = dlil_reg_proto_module(PF_INET6, APPLE_IF_FAM_ETHERNET, &enet_protoreg) != 0) {
-	printf("ether_family_init: dlil_reg_proto_module failed for AF_INET6 error=%d\n", error);
-	goto done;
-    }
-    vlan_family_init();
+	/* Register protocol registration functions */
 
- done:
+	bzero(&enet_protoreg, sizeof(enet_protoreg));
+	enet_protoreg.attach_proto = ether_attach_inet;
+	enet_protoreg.detach_proto = ether_detach_inet;
+	
+	if ( error = dlil_reg_proto_module(PF_INET, APPLE_IF_FAM_ETHERNET, &enet_protoreg) != 0)
+		kprintf("dlil_reg_proto_module failed for AF_INET6 error=%d\n", error);
+
+
+	enet_protoreg.attach_proto = ether_attach_inet6;
+	enet_protoreg.detach_proto = ether_detach_inet6;
+	
+	if ( error = dlil_reg_proto_module(PF_INET6, APPLE_IF_FAM_ETHERNET, &enet_protoreg) != 0)
+		kprintf("dlil_reg_proto_module failed for AF_INET6 error=%d\n", error);
+
     thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
 
     return (error);

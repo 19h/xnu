@@ -600,16 +600,9 @@ fcntl(p, uap, retval)
 
 		len = MAXPATHLEN;
 		MALLOC(pathbuf, char *, len, M_TEMP, M_WAITOK);
-
-		error = vn_lock(vp, LK_EXCLUSIVE|LK_RETRY, p);
-		if (error) {
-		    FREE(pathbuf, M_TEMP);
-		    return (error);
-		}
 		error = vn_getpath(vp, pathbuf, &len);
 		if (error == 0)
 			error = copyout((caddr_t)pathbuf, (caddr_t)uap->arg, len);
-		VOP_UNLOCK(vp, 0, p);
 		FREE(pathbuf, M_TEMP);
 		return error;
 	}
@@ -619,13 +612,7 @@ fcntl(p, uap, retval)
 			return (EBADF);
 		vp = (struct vnode *)fp->f_data;
 
-		error = vn_lock(vp, LK_EXCLUSIVE|LK_RETRY, p);
-		if (error) {
-		    return (error);
-		}
-		error = VOP_IOCTL(vp, 6, (caddr_t)NULL, 0, fp->f_cred, p);
-		VOP_UNLOCK(vp, 0, p);
-		return error;
+		return (VOP_IOCTL(vp, 6, (caddr_t)NULL, 0, fp->f_cred, p));
 	}
 	    
 	default:
@@ -1229,12 +1216,6 @@ fdfree(p)
 		FREE(fdp->fd_knhash, M_KQUEUE);
 
 	FREE_ZONE(fdp, sizeof *fdp, M_FILEDESC);
-
-	// XXXdbg
-	{ 
-	    void clean_up_fmod_watch(struct proc *p);
-	    clean_up_fmod_watch(p);
-	}
 }
 
 static int
