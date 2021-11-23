@@ -43,6 +43,7 @@ extern "C" {
 
 extern dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys);
 extern dev_t mdevlookup(int devid);
+extern void mdevremoveall(void);
 
 kern_return_t
 IOKitBSDInit( void )
@@ -122,10 +123,10 @@ OSDictionary * IONetworkMatching(  const char * path,
 
 	len = strlen( kIODeviceTreePlane ":" );
 	maxLen -= len;
-	if( maxLen < 0)
+	if( maxLen <= 0)
 	    continue;
 
-	strcpy( buf, kIODeviceTreePlane ":" );
+	strlcpy( buf, kIODeviceTreePlane ":", len + 1 );
 	comp = buf + len;
 
         // remove parameters following ':' from the path
@@ -135,10 +136,9 @@ OSDictionary * IONetworkMatching(  const char * path,
 
         len = skip - path;
 	maxLen -= len;
-	if( maxLen < 0)
+	if( maxLen <= 0)
 	    continue;
-        strncpy( comp, path, len );
-        comp[ len ] = 0;
+	strlcpy( comp, path, len + 1 );
 
 	matching = IOService::serviceMatching( "IONetworkInterface" );
 	if( !matching)
@@ -279,6 +279,7 @@ OSDictionary * IODiskMatching( const char * path, char * buf, int maxLen )
     long         partition = -1;
     long		 lun = -1;
     char         c;
+    int          len;
 
     // scan the tail of the path for "@unit:partition"
     do {
@@ -316,34 +317,52 @@ OSDictionary * IODiskMatching( const char * path, char * buf, int maxLen )
         if( c || unit == -1 || partition == -1)
             continue;
 		
-        maxLen -= strlen( "{" kIOPathMatchKey "='" kIODeviceTreePlane ":" );
-        maxLen -= ( alias ? strlen( alias ) : 0 ) + (look - path);
-        maxLen -= strlen( "/@hhhhhhhh,hhhhhhhh:dddddddddd';}" );
-
-        if( maxLen > 0) {
-            sprintf( buf, "{" kIOPathMatchKey "='" kIODeviceTreePlane ":" );
-            comp = buf + strlen( buf );
-			
-            if( alias) {
-                strcpy( comp, alias );
-                comp += strlen( alias );
-            }
-			
-            if ( (look - path)) {
-                strncpy( comp, path, look - path);
-                comp += look - path;
-            }
-			
-			if ( lun != -1 )
-			{
-				sprintf ( comp, "/@%lx,%lx:%ld';}", unit, lun, partition );
-			}
-			else
-			{
-            	sprintf( comp, "/@%lx:%ld';}", unit, partition );
-            }
-        } else
+        len = strlen( "{" kIOPathMatchKey "='" kIODeviceTreePlane ":" );
+        maxLen -= len;
+        if( maxLen <= 0)
             continue;
+
+        snprintf( buf, len + 1, "{" kIOPathMatchKey "='" kIODeviceTreePlane ":" );
+        comp = buf + len;
+
+        if( alias) {
+            len = strlen( alias );
+            maxLen -= len;
+            if( maxLen <= 0)
+                continue;
+
+            strlcpy( comp, alias, len + 1 );
+            comp += len;
+        }
+
+        if ( (look - path)) {
+            len = (look - path);
+            maxLen -= len;
+            if( maxLen <= 0)
+                continue;
+
+            strlcpy( comp, path, len + 1 );
+            comp += len;
+        }
+			
+        if ( lun != -1 )
+        {
+            len = strlen( "/@hhhhhhhh,hhhhhhhh:dddddddddd';}" );
+            maxLen -= len;
+            if( maxLen <= 0)
+                continue;
+
+            snprintf( comp, len + 1, "/@%lx,%lx:%ld';}", unit, lun, partition );
+        }
+        else
+        {
+            len = strlen( "/@hhhhhhhh:dddddddddd';}" );
+            maxLen -= len;
+            if( maxLen <= 0)
+                continue;
+
+            snprintf( comp, len + 1, "/@%lx:%ld';}", unit, partition );
+        }
 		
         return( OSDynamicCast(OSDictionary, OSUnserialize( buf, 0 )) );
 
@@ -370,18 +389,17 @@ OSDictionary * IOOFPathMatching( const char * path, char * buf, int maxLen )
 
 	len = strlen( kIODeviceTreePlane ":" );
 	maxLen -= len;
-	if( maxLen < 0)
+	if( maxLen <= 0)
 	    continue;
 
-	strcpy( buf, kIODeviceTreePlane ":" );
+	strlcpy( buf, kIODeviceTreePlane ":", len + 1 );
 	comp = buf + len;
 
 	len = strlen( path );
 	maxLen -= len;
-	if( maxLen < 0)
+	if( maxLen <= 0)
 	    continue;
-        strncpy( comp, path, len );
-        comp[ len ] = 0;
+	strlcpy( comp, path, len + 1 );
 
 	matching = OSDictionary::withCapacity( 1 );
 	if( !matching)
@@ -441,7 +459,7 @@ IOService * IOFindMatchingChild( IOService * service )
 
 static int didRam = 0;
 
-kern_return_t IOFindBSDRoot( char * rootName,
+kern_return_t IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 				dev_t * root, u_int32_t * oflags )
 {
     mach_timespec_t	t;
@@ -725,7 +743,7 @@ kern_return_t IOFindBSDRoot( char * rootName,
 
 	iostr = (OSString *) service->getProperty( kIOBSDNameKey );
 	if( iostr)
-	    strcpy( rootName, iostr->getCStringNoCopy() );
+	    strlcpy( rootName, iostr->getCStringNoCopy(), rootNameSize );
 	off = (OSNumber *) service->getProperty( kIOBSDMajorKey );
 	if( off)
 	    mjr = off->unsigned32BitValue();
@@ -739,7 +757,7 @@ kern_return_t IOFindBSDRoot( char * rootName,
     } else {
 
 	IOLog( "Wait for root failed\n" );
-        strcpy( rootName, "en0");
+        strlcpy( rootName, "en0", rootNameSize );
         flags |= 1;
     }
 
@@ -776,14 +794,19 @@ iofrootx:
 void IOSecureBSDRoot(const char * rootName)
 {
 #if CONFIG_EMBEDDED
+    IOReturn         result;
     IOPlatformExpert *pe;
-    const OSSymbol *functionName = OSSymbol::withCStringNoCopy("SecureRootName");
+    const OSSymbol   *functionName = OSSymbol::withCStringNoCopy("SecureRootName");
     
     while ((pe = IOService::getPlatform()) == 0) IOSleep(1 * 1000);
     
-    pe->callPlatformFunction(functionName, false, (void *)rootName, (void *)0, (void *)0, (void *)0);
+    // Returns kIOReturnNotPrivileged is the root device is not secure.
+    // Returns kIOReturnUnsupported if "SecureRootName" is not implemented.
+    result = pe->callPlatformFunction(functionName, false, (void *)rootName, (void *)0, (void *)0, (void *)0);
     
     functionName->release();
+    
+    if (result == kIOReturnNotPrivileged) mdevremoveall();
 #endif
 }
 
@@ -832,6 +855,43 @@ kern_return_t IOBSDGetPlatformUUID( uuid_t uuid, mach_timespec_t timeout )
     uuid_parse( string->getCStringNoCopy( ), uuid );
 
     return KERN_SUCCESS;
+}
+
+
+int IOBSDIsMediaEjectable( const char *cdev_name )
+{
+    int ret = 0;
+    OSDictionary *dictionary;
+    OSString *dev_name;
+
+    if (strncmp(cdev_name, "/dev/", 5) == 0) {
+	    cdev_name += 5;
+    }
+
+    dictionary = IOService::serviceMatching( "IOMedia" );
+    if( dictionary ) {
+	dev_name = OSString::withCString( cdev_name );
+	if( dev_name ) {
+	    IOService *service;
+	    mach_timespec_t tv = { 5, 0 };    // wait up to "timeout" seconds for the device
+
+	    dictionary->setObject( kIOBSDNameKey, dev_name );
+	    dictionary->retain();
+	    service = IOService::waitForService( dictionary, &tv );
+	    if( service ) {
+		OSBoolean *ejectable = (OSBoolean *) service->getProperty( "Ejectable" );
+
+		if( ejectable ) {
+			ret = (int)ejectable->getValue();
+		}
+
+	    }
+	    dev_name->release();
+	}
+	dictionary->release();
+    }
+
+    return ret;
 }
 
 } /* extern "C" */

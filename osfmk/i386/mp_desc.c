@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -94,7 +94,12 @@ extern uint32_t		low_eintstack[];	/* top */
  * The master cpu (cpu 0) has its data area statically allocated;
  * others are allocated dynamically and this array is updated at runtime.
  */
-cpu_data_t	cpu_data_master;
+cpu_data_t	cpu_data_master = {
+			.cpu_this = &cpu_data_master,
+			.cpu_nanotime = &rtc_nanotime_info,
+			.cpu_is64bit = FALSE,
+			.cpu_int_stack_top = (vm_offset_t) low_eintstack,
+		};
 cpu_data_t	*cpu_data_ptr[MAX_CPUS] = { [0] &cpu_data_master };
 
 decl_simple_lock_data(,cpu_lock);	/* protects real_ncpus */
@@ -457,8 +462,11 @@ fast_syscall_init64(void)
 	 */
 	wrmsr64(MSR_IA32_KERNEL_GS_BASE,
 		UBER64((unsigned long)current_cpu_datap()));
+
+#if ONLY_SAFE_FOR_LINDA_SERIAL
 	kprintf("fast_syscall_init64() KERNEL_GS_BASE=0x%016llx\n",
 		rdmsr64(MSR_IA32_KERNEL_GS_BASE));
+#endif
 }
 
 /*
@@ -480,16 +488,15 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 
 	if (is_boot_cpu) {
 		assert(real_ncpus == 1);
-		simple_lock_init(&cpu_lock, 0);
 		cdp = &cpu_data_master;
 		if (cdp->cpu_processor == NULL) {
+			simple_lock_init(&cpu_lock, 0);
 			cdp->cpu_processor = cpu_processor_alloc(TRUE);
 			cdp->cpu_pmap = pmap_cpu_alloc(TRUE);
-			cdp->cpu_this = cdp;
-			cdp->cpu_is64bit = FALSE;
-			cdp->cpu_int_stack_top = (vm_offset_t) low_eintstack;
 			cpu_desc_init(cdp, TRUE);
 			fast_syscall_init();
+			queue_init(&cdp->rtclock_timer.queue);
+			cdp->rtclock_timer.deadline = EndOfAllTime;
 		}
 		return cdp;
 	}
@@ -562,6 +569,10 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 	cdp->cpu_number = real_ncpus;
 	real_ncpus++;
 	simple_unlock(&cpu_lock);
+
+	cdp->cpu_nanotime = &rtc_nanotime_info;
+	queue_init(&cdp->rtclock_timer.queue);
+	cdp->rtclock_timer.deadline = EndOfAllTime;
 
 	kprintf("cpu_data_alloc(%d) %p desc_table: %p "
 		"ldt: %p "
@@ -666,22 +677,25 @@ cpu_physwindow_init(int cpu)
 {
 	cpu_data_t		*cdp = cpu_data_ptr[cpu];
 	cpu_desc_index_t	*cdi = &cdp->cpu_desc_index;
-        vm_offset_t 		phys_window;
+        vm_offset_t 		phys_window = cdp->cpu_physwindow_base;
 
-	if (vm_allocate(kernel_map, &phys_window,
-			PAGE_SIZE, VM_FLAGS_ANYWHERE)
+	if (phys_window == 0) {
+		if (vm_allocate(kernel_map, &phys_window,
+				PAGE_SIZE, VM_FLAGS_ANYWHERE)
 				!= KERN_SUCCESS)
-	        panic("cpu_physwindow_init: couldn't allocate phys map window");
+		        panic("cpu_physwindow_init: "
+				"couldn't allocate phys map window");
 
-        /*
-         * make sure the page that encompasses the
-         * pte pointer we're interested in actually
-         * exists in the page table
-         */
-	pmap_expand(kernel_pmap, phys_window);
+		/*
+		 * make sure the page that encompasses the
+		 * pte pointer we're interested in actually
+		 * exists in the page table
+		 */
+		pmap_expand(kernel_pmap, phys_window);
 
-	cdp->cpu_physwindow_base = phys_window;
-	cdp->cpu_physwindow_ptep = vtopte(phys_window);
+		cdp->cpu_physwindow_base = phys_window;
+		cdp->cpu_physwindow_ptep = vtopte(phys_window);
+	}
 
 	cdi->cdi_gdt[sel_idx(PHYS_WINDOW_SEL)] = physwindow_desc_pattern;
 	cdi->cdi_gdt[sel_idx(PHYS_WINDOW_SEL)].offset = phys_window;
@@ -725,7 +739,9 @@ cpu_desc_load64(cpu_data_t *cdp)
 	
 	ml_load_desc64();
 
+#if ONLY_SAFE_FOR_LINDA_SERIAL
 	kprintf("64-bit descriptor tables loaded\n");
+#endif
 }
 
 void

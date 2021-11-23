@@ -126,7 +126,8 @@ const struct memory_object_pager_ops vnode_pager_ops = {
 	vnode_pager_data_initialize,
 	vnode_pager_data_unlock,
 	vnode_pager_synchronize,
-	vnode_pager_unmap,
+	vnode_pager_map,
+	vnode_pager_last_unmap,
 	"vnode pager"
 };
 
@@ -321,6 +322,8 @@ trigger_name_to_port(
 extern int	uiomove64(addr64_t, int, void *);
 #define	MAX_RUN	32
 
+unsigned long vm_cs_tainted_forces = 0;
+
 int
 memory_object_control_uiomove(
 	memory_object_control_t	control,
@@ -396,8 +399,18 @@ memory_object_control_uiomove(
 			 */
 			assert(!dst_page->encrypted);
 
-		        if (mark_dirty)
+		        if (mark_dirty) {
 			        dst_page->dirty = TRUE;
+				if (dst_page->cs_validated) {
+					/*
+					 * CODE SIGNING:
+					 * We're modifying a code-signed
+					 * page:  assume that it is now tainted.
+					 */
+					dst_page->cs_tainted = TRUE;
+					vm_cs_tainted_forces++;
+				}
+			}
 			dst_page->busy = TRUE;
 
 			page_run[cur_run++] = dst_page;
@@ -482,9 +495,9 @@ vnode_pager_bootstrap(void)
 	size = (vm_size_t) sizeof(struct vnode_pager);
 	vnode_pager_zone = zinit(size, (vm_size_t) MAX_VNODE*size,
 				PAGE_SIZE, "vnode pager structures");
-#ifdef __i386__
+#if CONFIG_CODE_DECRYPTION
 	apple_protect_pager_bootstrap();
-#endif	/* __i386__ */
+#endif	/* CONFIG_CODE_DECRYPTION */
 	return;
 }
 
@@ -770,12 +783,36 @@ vnode_pager_synchronize(
  *
  */
 kern_return_t
-vnode_pager_unmap(
+vnode_pager_map(
+	memory_object_t		mem_obj,
+	vm_prot_t		prot)
+{
+	vnode_pager_t		vnode_object;
+	int			ret;
+	kern_return_t		kr;
+
+	PAGER_DEBUG(PAGER_ALL, ("vnode_pager_map: %p %x\n", mem_obj, prot));
+
+	vnode_object = vnode_pager_lookup(mem_obj);
+
+	ret = ubc_map(vnode_object->vnode_handle, prot);
+
+	if (ret != 0) {
+		kr = KERN_FAILURE;
+	} else {
+		kr = KERN_SUCCESS;
+	}
+
+	return kr;
+}
+
+kern_return_t
+vnode_pager_last_unmap(
 	memory_object_t		mem_obj)
 {
 	register vnode_pager_t	vnode_object;
 
-	PAGER_DEBUG(PAGER_ALL, ("vnode_pager_unmap: %p\n", mem_obj));
+	PAGER_DEBUG(PAGER_ALL, ("vnode_pager_last_unmap: %p\n", mem_obj));
 
 	vnode_object = vnode_pager_lookup(mem_obj);
 
@@ -1014,7 +1051,7 @@ int
 fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *pinfo, uint32_t  *vnodeaddr, uint32_t  *vid)
 {
 
-	vm_map_t map = task->map;
+	vm_map_t map;
 	vm_map_offset_t	address = (vm_map_offset_t )arg;
 	vm_map_entry_t		tmp_entry;
 	vm_map_entry_t		entry;
@@ -1022,16 +1059,23 @@ fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *
 	vm_region_extended_info_data_t extended;
 	vm_region_top_info_data_t top;
 
-
-	if (map == VM_MAP_NULL) 
-		return(0);
-
+	    task_lock(task);
+	    map = task->map;
+	    if (map == VM_MAP_NULL) 
+	    {
+			task_unlock(task);
+			return(0);
+	    }
+	    vm_map_reference(map); 
+	    task_unlock(task);
+	    
 	    vm_map_lock_read(map);
 
 	    start = address;
 	    if (!vm_map_lookup_entry(map, start, &tmp_entry)) {
 		if ((entry = tmp_entry->vme_next) == vm_map_to_entry(map)) {
 			vm_map_unlock_read(map);
+	    		vm_map_deallocate(map); 
 		   	return(0);
 		}
 	    } else {
@@ -1096,11 +1140,13 @@ fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *
 
 		if (fill_vnodeinfoforaddr(entry, vnodeaddr, vid) ==0) {
 			vm_map_unlock_read(map);
+	    		vm_map_deallocate(map); 
 			return(1);
 		}
 	    }
 
 	    vm_map_unlock_read(map);
+	    vm_map_deallocate(map); 
 	    return(1);
 }
 

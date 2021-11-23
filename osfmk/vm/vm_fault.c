@@ -149,6 +149,20 @@ extern void vm_fault_classify(vm_object_t	object,
 extern void vm_fault_classify_init(void);
 #endif
 
+
+unsigned long vm_cs_validates = 0;
+unsigned long vm_cs_revalidates = 0;
+unsigned long vm_cs_query_modified = 0;
+unsigned long vm_cs_validated_dirtied = 0;
+
+#if CONFIG_ENFORCE_SIGNED_CODE
+#if SECURE_KERNEL
+const int cs_enforcement_disable=0;
+#else
+int cs_enforcement_disable=1;
+#endif
+#endif
+
 /*
  *	Routine:	vm_fault_init
  *	Purpose:
@@ -157,6 +171,12 @@ extern void vm_fault_classify_init(void);
 void
 vm_fault_init(void)
 {
+#if !SECURE_KERNEL
+#if CONFIG_ENFORCE_SIGNED_CODE
+	PE_parse_boot_argn("cs_enforcement_disable", &cs_enforcement_disable, sizeof (cs_enforcement_disable));
+#endif
+	PE_parse_boot_argn("cs_debug", &cs_debug, sizeof (cs_debug));
+#endif
 }
 
 /*
@@ -530,7 +550,8 @@ vm_fault_zero_page(vm_page_t m, boolean_t no_zero_fill)
 
 	if (!IP_VALID(memory_manager_default) &&
 		(m->object->purgable == VM_PURGABLE_DENY ||
-		 m->object->purgable == VM_PURGABLE_NONVOLATILE)) {
+		 m->object->purgable == VM_PURGABLE_NONVOLATILE ||
+		 m->object->purgable == VM_PURGABLE_VOLATILE )) {
 		vm_page_lock_queues();
 
                 queue_enter(&vm_page_queue_throttled, m, vm_page_t, pageq);
@@ -1952,6 +1973,21 @@ backoff:
 
 
 /*
+ * CODE SIGNING:
+ * When soft faulting a page, we have to validate the page if:
+ * 1. the page is being mapped in user space
+ * 2. the page hasn't already been found to be "tainted"
+ * 3. the page belongs to a code-signed object
+ * 4. the page has not been validated yet or has been mapped for write.
+ */
+#define VM_FAULT_NEED_CS_VALIDATION(pmap, page)				\
+	((pmap) != kernel_pmap /*1*/ &&					\
+	 !(page)->cs_tainted /*2*/ &&					\
+	 (page)->object->code_signed /*3*/ &&				\
+	 (!(page)->cs_validated || (page)->wpmapped /*4*/))
+
+
+/*
  * page queue lock must NOT be held
  * m->object must be locked
  *
@@ -1987,22 +2023,6 @@ vm_fault_enter(vm_page_t m,
 	}
 
         cache_attr = ((unsigned int)m->object->wimg_bits) & VM_WIMG_MASK;
-
-	if (m->object->code_signed && !m->cs_validated &&
-	    pmap != kernel_pmap) {
-		/*
-		 * CODE SIGNING:
-		 * This page comes from a VM object backed by a
-		 * signed memory object and it hasn't been validated yet.
-		 * We're about to enter it into a process address space,
-		 * so we need to validate its signature now.
-		 */
-		vm_object_lock_assert_exclusive(m->object);
-
-		/* VM map still locked, so 1 ref will remain on VM object */
-
-		vm_page_validate_cs(m);
-	}
 
 	if (m->pmapped == FALSE) {
 		/*
@@ -2049,7 +2069,26 @@ vm_fault_enter(vm_page_t m,
 		}
 	}
 
-	if (m->cs_tainted) {
+	if (VM_FAULT_NEED_CS_VALIDATION(pmap, m)) {
+		vm_object_lock_assert_exclusive(m->object);
+
+		if (m->cs_validated) {
+			vm_cs_revalidates++;
+		}
+
+		/* VM map is locked, so 1 ref will remain on VM object */
+		vm_page_validate_cs(m);
+	}
+
+	if (m->cs_tainted	/* always invalidate a tainted page */
+#if CONFIG_ENFORCE_SIGNED_CODE
+	    /*
+	     * Code Signing enforcement invalidates an executable page that
+	     * has no code directory, and thus could not be validated.
+	     */
+	    || ((prot & VM_PROT_EXECUTE) && !m->cs_validated )
+#endif
+		) {
 		/*
 		 * CODE SIGNING:
 		 * This page has been tainted and can not be trusted.
@@ -2057,18 +2096,25 @@ vm_fault_enter(vm_page_t m,
 		 * necessary precautions before we enter the tainted page
 		 * into its address space.
 		 */
-		if (cs_invalid_page()) {
-			/* reject the tainted page: abort the page fault */
-			kr = KERN_MEMORY_ERROR;
-			cs_enter_tainted_rejected++;
-		} else {
-			/* proceed with the tainted page */
-			kr = KERN_SUCCESS;
-			cs_enter_tainted_accepted++;
+		kr = KERN_SUCCESS;
+#if CONFIG_ENFORCE_SIGNED_CODE
+		if (!cs_enforcement_disable) {
+#endif
+			if (cs_invalid_page((addr64_t) vaddr)) {
+				/* reject the tainted page: abort the page fault */
+				kr = KERN_MEMORY_ERROR;
+				cs_enter_tainted_rejected++;
+			} else {
+				/* proceed with the tainted page */
+				kr = KERN_SUCCESS;
+				cs_enter_tainted_accepted++;
+			}
+#if CONFIG_ENFORCE_SIGNED_CODE
 		}
+#endif
 		if (cs_debug || kr != KERN_SUCCESS) {
 			printf("CODESIGNING: vm_fault_enter(0x%llx): "
-			       "page %p obj %p off 0x%llx *** TAINTED ***\n",
+			       "page %p obj %p off 0x%llx *** INVALID PAGE ***\n",
 			       (long long)vaddr, m, m->object, m->offset);
 		}
 	} else {
@@ -2083,10 +2129,14 @@ vm_fault_enter(vm_page_t m,
 		 * since this is the ONLY bit updated behind the SHARED
 		 * lock... however, we need to figure out how to do an atomic
 		 * update on a bit field to make this less fragile... right
-		 * now I don'w know how to coerce 'C' to give me the offset info
+		 * now I don't know how to coerce 'C' to give me the offset info
 		 * that's needed for an AtomicCompareAndSwap
 		 */
 		m->pmapped = TRUE;
+		if (prot & VM_PROT_WRITE) {
+			vm_object_lock_assert_exclusive(m->object);
+			m->wpmapped = TRUE;
+		}
 
 		PMAP_ENTER(pmap, vaddr, m, prot, cache_attr, wired);
 	}
@@ -2206,6 +2256,7 @@ vm_fault(
 	boolean_t		need_collapse = FALSE;
 	int			object_lock_type = 0;
 	int			cur_object_lock_type;
+	vm_object_t		top_object = VM_OBJECT_NULL;
 
 
 	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, 2)) | DBG_FUNC_START,
@@ -2273,7 +2324,6 @@ RetryFault:
 	 */
 	if (wired) {
 		fault_type = prot | VM_PROT_WRITE;
-	
 		/*
 		 * since we're treating this fault as a 'write'
 		 * we must hold the top object lock exclusively
@@ -2500,9 +2550,9 @@ RetryFault:
 			}
 			ASSERT_PAGE_DECRYPTED(m);
 
-			if (m->object->code_signed && !m->cs_validated) {
+			if (VM_FAULT_NEED_CS_VALIDATION(map->pmap, m)) {
 				/*
-				 * We will need to validate this page
+				 * We might need to validate this page
 				 * against its code signature, so we
 				 * want to hold the VM object exclusively.
 				 */
@@ -2547,23 +2597,48 @@ RetryFault:
 			 *		--> must disallow write.
 			 */
 
-			if (object == cur_object && object->copy == VM_OBJECT_NULL)
+			if (object == cur_object && object->copy == VM_OBJECT_NULL) {
+				if ((fault_type & VM_PROT_WRITE) == 0) {
+					/*
+					 * This is not a "write" fault, so we
+					 * might not have taken the object lock
+					 * exclusively and we might not be able
+					 * to update the "wpmapped" bit in
+					 * vm_fault_enter().
+					 * Let's just grant read access to
+					 * the page for now and we'll
+					 * soft-fault again if we need write
+					 * access later...
+					 */
+					prot &= ~VM_PROT_WRITE;
+				}
 				goto FastPmapEnter;
+			}
 
 			if ((fault_type & VM_PROT_WRITE) == 0) {
 
 				prot &= ~VM_PROT_WRITE;
 
-				/*
-				 * Set up to map the page...
-				 * mark the page busy, drop
-				 * unneeded object lock
-				 */	
 			  	if (object != cur_object) {
-				        /*	
-					 * don't need the original object anymore
+				        /*
+					 * We still need to hold the top object
+					 * lock here to prevent a race between
+					 * a read fault (taking only "shared"
+					 * locks) and a write fault (taking
+					 * an "exclusive" lock on the top
+					 * object.
+					 * Otherwise, as soon as we release the
+					 * top lock, the write fault could
+					 * proceed and actually complete before
+					 * the read fault, and the copied page's
+					 * translation could then be overwritten
+					 * by the read fault's translation for
+					 * the original page.
+					 *
+					 * Let's just record what the top object
+					 * is and we'll release it later.
 					 */
-					vm_object_unlock(object);
+					top_object = object;
 
 					/*
 					 * switch to the object that has the new page
@@ -2602,6 +2677,20 @@ FastPmapEnter:
 							    change_wiring,
 							    fault_info.no_cache,
 							    &type_of_fault);
+				}
+
+				if (top_object != VM_OBJECT_NULL) {
+					/*
+					 * It's safe to drop the top object
+					 * now that we've done our
+					 * vm_fault_enter().  Any other fault
+					 * in progress for that virtual
+					 * address will either find our page
+					 * and translation or put in a new page
+					 * and translation.
+					 */
+					vm_object_unlock(top_object);
+					top_object = VM_OBJECT_NULL;
 				}
 
 				if (need_collapse == TRUE)
@@ -3403,11 +3492,11 @@ vm_fault_unwire(
 
 	for (va = entry->vme_start; va < end_addr; va += PAGE_SIZE) {
 
-		if (pmap) {
-			pmap_change_wiring(pmap, 
-					   pmap_addr + (va - entry->vme_start), FALSE);
-		}
 		if (object == VM_OBJECT_NULL) {
+			if (pmap) {
+				pmap_change_wiring(pmap, 
+						   pmap_addr + (va - entry->vme_start), FALSE);
+			}
 			(void) vm_fault(map, va, VM_PROT_NONE, 
 					TRUE, THREAD_UNINT, pmap, pmap_addr);
 		} else {
@@ -3455,6 +3544,10 @@ vm_fault_unwire(
 
 			result_object = result_page->object;
 
+			if ((pmap) && (result_page->phys_page != vm_page_guard_addr)) {
+				pmap_change_wiring(pmap, 
+						   pmap_addr + (va - entry->vme_start), FALSE);
+			}
 			if (deallocate) {
 				assert(result_page->phys_page !=
 				       vm_page_fictitious_addr);
@@ -4103,6 +4196,89 @@ vm_fault_classify_init(void)
 extern int cs_validation;
 
 void
+vm_page_validate_cs_mapped(
+	vm_page_t	page,
+	const void 	*kaddr)
+{
+	vm_object_t		object;
+	vm_object_offset_t	offset;
+	kern_return_t		kr;
+	memory_object_t		pager;
+	void			*blobs;
+	boolean_t		validated, tainted;
+
+	assert(page->busy);
+	vm_object_lock_assert_exclusive(page->object);
+
+	if (!cs_validation) {
+		return;
+	}
+
+	if (page->wpmapped && !page->cs_tainted) {
+		/*
+		 * This page was mapped for "write" access sometime in the
+		 * past and could still be modifiable in the future.
+		 * Consider it tainted.
+		 * [ If the page was already found to be "tainted", no
+		 * need to re-validate. ]
+		 */
+		page->cs_validated = TRUE;
+		page->cs_tainted = TRUE;
+		if (cs_debug) {
+			printf("CODESIGNING: vm_page_validate_cs: "
+			       "page %p obj %p off 0x%llx "
+			       "was modified\n",
+			       page, page->object, page->offset);
+		}
+		vm_cs_validated_dirtied++;
+	}
+
+	if (page->cs_validated) {
+		return;
+	}
+
+	vm_cs_validates++;
+
+	object = page->object;
+	assert(object->code_signed);
+	offset = page->offset;
+
+	if (!object->alive || object->terminating || object->pager == NULL) {
+		/*
+		 * The object is terminating and we don't have its pager
+		 * so we can't validate the data...
+		 */
+		return;
+	}
+	/*
+	 * Since we get here to validate a page that was brought in by
+	 * the pager, we know that this pager is all setup and ready
+	 * by now.
+	 */
+	assert(!object->internal);
+	assert(object->pager != NULL);
+	assert(object->pager_ready);
+
+	pager = object->pager;
+
+	kr = vnode_pager_get_object_cs_blobs(pager, &blobs);
+	if (kr != KERN_SUCCESS) {
+		blobs = NULL;
+	}
+
+	/* verify the SHA1 hash for this page */
+	validated = cs_validate_page(blobs,
+				     offset + object->paging_offset,
+				     (const void *)kaddr,
+				     &tainted);
+
+	page->cs_validated = validated;
+	if (validated) {
+		page->cs_tainted = tainted;
+	}
+}
+
+void
 vm_page_validate_cs(
 	vm_page_t	page)
 {
@@ -4112,17 +4288,40 @@ vm_page_validate_cs(
 	vm_map_size_t		ksize;
 	vm_offset_t		kaddr;
 	kern_return_t		kr;
-	memory_object_t		pager;
-	void			*blobs;
-	boolean_t		validated, tainted;
 	boolean_t		busy_page;
 
-	vm_object_lock_assert_exclusive(page->object);
-	assert(!page->cs_validated);
+	vm_object_lock_assert_held(page->object);
 
 	if (!cs_validation) {
 		return;
 	}
+
+	if (page->wpmapped && !page->cs_tainted) {
+		vm_object_lock_assert_exclusive(page->object);
+
+		/*
+		 * This page was mapped for "write" access sometime in the
+		 * past and could still be modifiable in the future.
+		 * Consider it tainted.
+		 * [ If the page was already found to be "tainted", no
+		 * need to re-validate. ]
+		 */
+		page->cs_validated = TRUE;
+		page->cs_tainted = TRUE;
+		if (cs_debug) {
+			printf("CODESIGNING: vm_page_validate_cs: "
+			       "page %p obj %p off 0x%llx "
+			       "was modified\n",
+			       page, page->object, page->offset);
+		}
+		vm_cs_validated_dirtied++;
+	}
+
+	if (page->cs_validated) {
+		return;
+	}
+
+	vm_object_lock_assert_exclusive(page->object);
 
 	object = page->object;
 	assert(object->code_signed);
@@ -4149,53 +4348,20 @@ vm_page_validate_cs(
 				  object,
 				  offset,
 				  &ksize,
+				  VM_PROT_READ,
 				  FALSE); /* can't unlock object ! */
 	if (kr != KERN_SUCCESS) {
 		panic("vm_page_validate_cs: could not map page: 0x%x\n", kr);
 	}
 	kaddr = CAST_DOWN(vm_offset_t, koffset);
 
-	/*
-	 * Since we get here to validate a page that was brought in by
-	 * the pager, we know that this pager is all setup and ready
-	 * by now.
-	 */
-	assert(!object->internal);
-	assert(object->pager != NULL);
-	assert(object->pager_ready);
-
-	if (!object->alive || object->terminating || object->pager == NULL) {
-		/*
-		 * The object is terminating and we don't have its pager
-		 * so we can't validate the data...
-		 */
-		goto out;
-	}
-
-	pager = object->pager;
-	assert(pager != NULL);
-
-	kr = vnode_pager_get_object_cs_blobs(pager, &blobs);
-	if (kr != KERN_SUCCESS) {
-		blobs = NULL;
-	}
-
-	/* verify the SHA1 hash for this page */
-	validated = cs_validate_page(blobs,
-				     offset + object->paging_offset,
-				     (const void *)kaddr,
-				     &tainted);
+	/* validate the mapped page */
+	vm_page_validate_cs_mapped(page, (const void *) kaddr);
 
 	assert(page->busy);
 	assert(object == page->object);
 	vm_object_lock_assert_exclusive(object);
 
-	page->cs_validated = validated;
-	if (validated) {
-		page->cs_tainted = tainted;
-	}
-
-out:
 	if (!busy_page) {
 		PAGE_WAKEUP_DONE(page);
 	}

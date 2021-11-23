@@ -223,7 +223,7 @@ struct	vnode *rootvp;
 int boothowto = RB_DEBUG;
 
 void lightning_bolt(void *);
-extern kern_return_t IOFindBSDRoot(char *, dev_t *, u_int32_t *);
+extern kern_return_t IOFindBSDRoot(char *, unsigned int, dev_t *, u_int32_t *);
 extern void IOSecureBSDRoot(const char * rootName);
 extern kern_return_t IOKitBSDInit(void );
 extern void kminit(void);
@@ -569,6 +569,7 @@ bsd_init(void)
 	/*
 	 * Initialize the calendar.
 	 */
+	bsd_init_kprintf("calling IOKitInitializeTime\n");
 	IOKitInitializeTime();
 
 	if (turn_on_log_leaks && !new_nkdbufs)
@@ -961,7 +962,7 @@ setconf(void)
 	 * which needs to be under network funnel. Right thing to do
 	 * here is to drop the funnel alltogether and regrab it afterwards
 	 */
-	err = IOFindBSDRoot( rootdevice, &rootdev, &flags );
+	err = IOFindBSDRoot(rootdevice, sizeof(rootdevice), &rootdev, &flags);
 	if( err) {
 		printf("setconf: IOFindBSDRoot returned an error (%d);"
 			"setting rootdevice to 'sd0a'.\n", err); /* XXX DEBUG TEMP */
@@ -1014,27 +1015,29 @@ parse_bsd_args(void)
 	char namep[16];
 	int msgbuf;
 
-	if (PE_parse_boot_arg("-s", namep))
+	if (PE_parse_boot_argn("-s", namep, sizeof (namep)))
 		boothowto |= RB_SINGLE;
 
-	if (PE_parse_boot_arg("-b", namep))
+	if (PE_parse_boot_argn("-b", namep, sizeof (namep)))
 		boothowto |= RB_NOBOOTRC;
 
-	if (PE_parse_boot_arg("-x", namep)) /* safe boot */
+	if (PE_parse_boot_argn("-x", namep, sizeof (namep))) /* safe boot */
 		boothowto |= RB_SAFEBOOT;
 
-	if (PE_parse_boot_arg("-l", namep)) /* leaks logging */
+	if (PE_parse_boot_argn("-l", namep, sizeof (namep))) /* leaks logging */
 		turn_on_log_leaks = 1;
 
-	PE_parse_boot_arg("srv", &srv);
-	PE_parse_boot_arg("ncl", &ncl);
-	if (PE_parse_boot_arg("nbuf", &max_nbuf_headers)) {
+	PE_parse_boot_argn("srv", &srv, sizeof (srv));
+	PE_parse_boot_argn("ncl", &ncl, sizeof (ncl));
+	if (PE_parse_boot_argn("nbuf", &max_nbuf_headers, sizeof (max_nbuf_headers))) {
 		customnbuf = 1;
 	}
-	PE_parse_boot_arg("kmem", &setup_kmem);
-	PE_parse_boot_arg("trace", &new_nkdbufs);
+#if !defined(SECURE_KERNEL)
+	PE_parse_boot_argn("kmem", &setup_kmem, sizeof (setup_kmem));
+#endif
+	PE_parse_boot_argn("trace", &new_nkdbufs, sizeof (new_nkdbufs));
 
-	if (PE_parse_boot_arg("msgbuf", &msgbuf)) {
+	if (PE_parse_boot_argn("msgbuf", &msgbuf, sizeof (msgbuf))) {
 		log_setsize(msgbuf);
 	}
 }

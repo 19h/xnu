@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -167,8 +167,10 @@ extern int ipsec_bypass;
 
 extern int slowlink_wsize;	/* window correction for slow links */
 extern u_long  route_generation;
+#if IPFIREWALL
 extern int fw_enable; 		/* firewall check for packet chaining */
 extern int fw_bypass; 		/* firewall check: disable packet chaining if there is rules */
+#endif /* IPFIREWALL */
 
 extern vm_size_t	so_cache_zone_element_size;
 
@@ -677,10 +679,19 @@ after_sack_rexmit:
 		long adv = lmin(recwin, (long)TCP_MAXWIN << tp->rcv_scale) -
 			(tp->rcv_adv - tp->rcv_nxt);
 
-		if (adv >= (long) (2 * tp->t_maxseg))
-			goto send;
-		if (2 * adv >= (long) so->so_rcv.sb_hiwat)
-			goto send;
+		if (adv >= (long) (2 * tp->t_maxseg)) {
+			
+			/* 
+			 * Update only if the resulting scaled value of the window changed, or
+			 * if there is a change in the sequence since the last ack.
+			 * This avoids what appears as dupe ACKS (see rdar://5640997)
+			 */
+
+			if ((tp->last_ack_sent != tp->rcv_nxt) || (((recwin + adv) >> tp->rcv_scale) > recwin)) 
+				goto send;
+		}
+		if (2 * adv >= (long) so->so_rcv.sb_hiwat) 
+				goto send;
 	}
 
 	/*
@@ -706,7 +717,7 @@ after_sack_rexmit:
 	 * after the retransmission timer has been turned off.  Make sure
 	 * that the retransmission timer is set.
 	 */
-	if (tp->sack_enable && SEQ_GT(tp->snd_max, tp->snd_una) &&
+	if (tp->sack_enable && (tp->t_state >= TCPS_ESTABLISHED) && SEQ_GT(tp->snd_max, tp->snd_una) &&
 		tp->t_timer[TCPT_REXMT] == 0 &&
 	    tp->t_timer[TCPT_PERSIST] == 0) {
 			tp->t_timer[TCPT_REXMT] = tp->t_rxtcur;
@@ -1188,6 +1199,9 @@ send:
 #if CONFIG_MACF_NET
 	mac_mbuf_label_associate_inpcb(tp->t_inpcb, m);
 #endif
+#if CONFIG_IP_EDGEHOLE
+	ip_edgehole_mbuf_tag(tp->t_inpcb, m);
+#endif
 #if INET6
 	if (isipv6) {
 		ip6 = mtod(m, struct ip6_hdr *);
@@ -1239,6 +1253,8 @@ send:
 		tp->sackhint.sack_bytes_rexmit += len;
 	}
 	th->th_ack = htonl(tp->rcv_nxt);
+	tp->last_ack_sent = tp->rcv_nxt;
+
 	if (optlen) {
 		bcopy(opt, th + 1, optlen);
 		th->th_off = (sizeof (struct tcphdr) + optlen) >> 2;
@@ -1622,7 +1638,19 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	int error = 0;
 	boolean_t chain;
 	boolean_t unlocked = FALSE;
+	struct inpcb *inp = tp->t_inpcb;
+	struct ip_out_args ipoa;
 
+	/* If socket was bound to an ifindex, tell ip_output about it */
+	ipoa.ipoa_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
+	    inp->inp_boundif : IFSCOPE_NONE;
+	flags |= IP_OUTARGS;
+
+	/* Make sure ACK/DELACK conditions are cleared before
+	 * we unlock the socket.
+	 */
+
+	tp->t_flags &= ~(TF_ACKNOW | TF_DELACK);
 	/*
 	 * If allowed, unlock TCP socket while in IP 
 	 * but only if the connection is established and
@@ -1634,7 +1662,7 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			unlocked = TRUE;
 			socket_unlock(so, 0);
 	}
-
+	
 	/*
 	 * Don't send down a chain of packets when:
 	 * - TCP chaining is disabled
@@ -1642,11 +1670,15 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	 * - there is a non default rule set for the firewall
 	 */
 
-	chain = tcp_packet_chaining > 1 &&
+	chain = tcp_packet_chaining > 1
 #if IPSEC
-		ipsec_bypass &&
+		&& ipsec_bypass
 #endif
-		(fw_enable == 0 || fw_bypass);
+#if IPFIREWALL
+		&& (fw_enable == 0 || fw_bypass)
+#endif
+		; // I'm important, not extraneous
+
 
 	while (pkt != NULL) {
 		struct mbuf *npkt = pkt->m_nextpkt;
@@ -1666,13 +1698,8 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			 */
 			cnt = 0;
 		}
-#if CONFIG_FORCE_OUT_IFP
-		error = ip_output_list(pkt, cnt, opt, &tp->t_inpcb->inp_route,
-		    flags, 0, tp->t_inpcb->pdp_ifp);
-#else
-		error = ip_output_list(pkt, cnt, opt, &tp->t_inpcb->inp_route,
-		    flags, 0, NULL);
-#endif
+		error = ip_output_list(pkt, cnt, opt, &inp->inp_route,
+		    flags, 0, &ipoa);
 		if (chain || error) {
 			/*
 			 * If we sent down a chain then we are done since

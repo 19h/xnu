@@ -484,8 +484,6 @@ sysctl_mib_init(void)
     cpu64bit = (_cpu_capabilities & k64Bit) == k64Bit;
 #elif defined(__i386__)
     cpu64bit = (_get_cpu_capabilities() & k64Bit) == k64Bit;
-#elif defined(__arm__)
-    cpu64bit = 0; // FIXME make this not hard-coded
 #endif
 
 	/*
@@ -594,7 +592,7 @@ sysctl_mib_init(void)
 	if (cpusubtype == CPU_SUBTYPE_POWERPC_970 && 
 	    cpu_info.l2_cache_size == 1 * 1024 * 1024)
 		/* The signature of the dual-core G5 */
-		packages = hinfo.max_cpus / 2;
+		packages = roundup(hinfo.max_cpus, 2) / 2;
 	else
 		packages = hinfo.max_cpus;
 
@@ -649,35 +647,11 @@ sysctl_mib_init(void)
 	cachesize[4] = 0;
 
 	/* hw.packages */
-	packages = ml_cpu_cache_sharing(0) /
-			cpuid_info()->cpuid_cores_per_package;
-	
-#elif defined(__arm__) /* end __i386 */
-	switch (cpuid_info()->arm_info.arm_part) {
-		case CPU_PART_1136JFS:
-		case CPU_PART_1176JZFS:
-			cpufamily = CPUFAMILY_ARM_11;
-			break;
-		case CPU_PART_920T:
-			cpufamily = CPUFAMILY_ARM_9;
-			break;
-		default:
-			cpufamily = CPUFAMILY_UNKNOWN;
-	}
+	packages = roundup(ml_cpu_cache_sharing(0), cpuid_info()->thread_count)
+			/ cpuid_info()->thread_count;
 
-	cacheconfig[0] = cache_info()->c_unified;
-	cacheconfig[1] = cache_info()->c_isize;
-	cacheconfig[2] = cache_info()->c_dsize;
-	cacheconfig[3] = cache_info()->c_type;
-	cacheconfig[4] = cache_info()->c_linesz;
-	cacheconfig[5] = cache_info()->c_assoc;
-	cacheconfig[6] = 0;
-
-	packages = 1;
 #else /* end __arm__ */
 # warning we do not support this platform yet
 #endif /* __ppc__ */
 
-
 }
-

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -196,6 +196,7 @@ cat_convertattr(
 	} else {
 		/* Convert the data fork. */
 		datafp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
+		datafp->cf_new_size = 0;
 		datafp->cf_blocks = recp->hfsPlusFile.dataFork.totalBlocks;
 		if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 		    (attrp->ca_atime >= hfsmp->hfc_timebase)) {
@@ -211,6 +212,7 @@ cat_convertattr(
 
 		/* Convert the resource fork. */
 		rsrcfp->cf_size = recp->hfsPlusFile.resourceFork.logicalSize;
+		rsrcfp->cf_new_size = 0;
 		rsrcfp->cf_blocks = recp->hfsPlusFile.resourceFork.totalBlocks;
 		if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 		    (attrp->ca_atime >= hfsmp->hfc_timebase)) {
@@ -226,6 +228,11 @@ cat_convertattr(
 	}
 }
 
+/*
+ * Convert a raw catalog key and record into an in-core catalog descriptor.
+ *
+ * Note: The caller is responsible for releasing the catalog descriptor.
+ */
 __private_extern__
 int
 cat_convertkey(
@@ -281,11 +288,14 @@ cat_releasedesc(struct cat_desc *descp)
 
 /*
  * These Catalog functions allow access to the HFS Catalog (database).
- * The catalog b-tree lock must be aquired before calling any of these routines.
+ * The catalog b-tree lock must be acquired before calling any of these routines.
  */
 
 /*
- * cat_lookup - lookup a catalog node using a cnode decriptor
+ * cat_lookup - lookup a catalog node using a cnode descriptor
+ *
+ * Note: The caller is responsible for releasing the output
+ * catalog descriptor (when supplied outdescp is non-null).
  */
 __private_extern__
 int
@@ -394,6 +404,10 @@ exit:
  * cat_findname - obtain a descriptor from cnid
  *
  * Only a thread lookup is performed.
+ *
+ * Note: The caller is responsible for releasing the output
+ * catalog descriptor (when supplied outdescp is non-null).
+
  */
 __private_extern__
 int
@@ -464,6 +478,9 @@ exit:
 
 /*
  * cat_idlookup - lookup a catalog node using a cnode id
+ *
+ * Note: The caller is responsible for releasing the output
+ * catalog descriptor (when supplied outdescp is non-null).
  */
 __private_extern__
 int
@@ -671,6 +688,7 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int allow_system_files
 		} else if (wantrsrc) {
 			/* Convert the resource fork. */
 			forkp->cf_size = recp->hfsPlusFile.resourceFork.logicalSize;
+			forkp->cf_new_size = 0;
 			forkp->cf_blocks = recp->hfsPlusFile.resourceFork.totalBlocks;
 			if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 			    (to_bsd_time(recp->hfsPlusFile.accessDate) >= hfsmp->hfc_timebase)) {
@@ -689,6 +707,7 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, int allow_system_files
 
 			/* Convert the data fork. */
 			forkp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
+			forkp->cf_new_size = 0;
 			forkp->cf_blocks = recp->hfsPlusFile.dataFork.totalBlocks;
 			if ((hfsmp->hfc_stage == HFC_RECORDING) &&
 			    (to_bsd_time(recp->hfsPlusFile.accessDate) >= hfsmp->hfc_timebase)) {
@@ -765,6 +784,9 @@ exit:
  *
  * NOTE: both the catalog file and attribute file locks must
  *       be held before calling this function.
+ *
+ * The caller is responsible for releasing the output
+ * catalog descriptor (when supplied outdescp is non-null).
  */
 __private_extern__
 int
@@ -937,6 +959,9 @@ exit:
  *	3. BTDeleteRecord(from_cnode);
  *	4. BTDeleteRecord(from_thread);
  *	5. BTInsertRecord(to_thread);
+ *
+ * Note: The caller is responsible for releasing the output
+ * catalog descriptor (when supplied out_cdp is non-null).
  */
 __private_extern__
 int 
@@ -1690,6 +1715,7 @@ cat_set_childlinkbit(struct hfsmount *hfsmp, cnid_t cnid)
 		if (retval) {
 			hfs_systemfile_unlock(hfsmp, lockflags);
 			hfs_end_transaction(hfsmp);
+			cat_releasedesc(&desc);
 			break;
 		}
 
@@ -1697,6 +1723,7 @@ cat_set_childlinkbit(struct hfsmount *hfsmp, cnid_t cnid)
 		hfs_end_transaction(hfsmp);
 
 		cnid = desc.cd_parentcnid;
+		cat_releasedesc(&desc);
 	}
 
 	return retval;
@@ -2154,7 +2181,7 @@ cat_makealias(struct hfsmount *hfsmp, u_int32_t inode_num, struct HFSPlusCatalog
 
 	blksize = hfsmp->blockSize;
 	blkcount = howmany(kHFSAliasSize, blksize);
-	sectorsize = hfsmp->hfs_phys_block_size;
+	sectorsize = hfsmp->hfs_logical_block_size;
 	bzero(rsrcforkp, sizeof(HFSPlusForkData));
 
 	/* Allocate some disk space for the alias content. */
@@ -2170,7 +2197,7 @@ cat_makealias(struct hfsmount *hfsmp, u_int32_t inode_num, struct HFSPlusCatalog
 	blkno = ((u_int64_t)rsrcforkp->extents[0].startBlock * (u_int64_t)blksize) / sectorsize;
 	blkno += hfsmp->hfsPlusIOPosOffset / sectorsize;
 
-	bp = buf_getblk(hfsmp->hfs_devvp, blkno, roundup(kHFSAliasSize, hfsmp->hfs_phys_block_size), 0, 0, BLK_META);
+	bp = buf_getblk(hfsmp->hfs_devvp, blkno, roundup(kHFSAliasSize, hfsmp->hfs_logical_block_size), 0, 0, BLK_META);
 	if (hfsmp->jnl) {
 		journal_modify_block_start(hfsmp->jnl, bp);
 	}
@@ -2604,7 +2631,7 @@ getdirentries_callback(const CatalogKey *ckp, const CatalogRecord *crp,
 	u_int8_t type = DT_UNKNOWN;
 	u_int8_t is_mangled = 0;
 	u_int8_t *nameptr;
-	user_addr_t uiobase = (user_addr_t)NULL;
+	user_addr_t uiobase = USER_ADDR_NULL;
 	size_t namelen = 0;
 	size_t maxnamelen;
 	size_t uiosize = 0;

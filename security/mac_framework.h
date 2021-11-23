@@ -159,7 +159,7 @@ int	mac_cred_label_externalize_audit(proc_t p, struct mac *mac);
 void	mac_cred_label_free(struct label *label);
 void	mac_cred_label_init(kauth_cred_t cred);
 void	mac_cred_label_update(kauth_cred_t cred, struct label *newlabel);
-void	mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t newcred,
+int	mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t newcred,
 	    struct vnode *vp, struct label *scriptvnodelabel,
 	    struct label *execlabel);
 void	mac_devfs_label_associate_device(dev_t dev, struct devnode *de,
@@ -318,6 +318,7 @@ int	mac_proc_check_getaudit(proc_t proc);
 int	mac_proc_check_getauid(proc_t proc);
 int     mac_proc_check_getlcid(proc_t proc1, proc_t proc2,
 	    pid_t pid);
+int	mac_proc_check_map_prot_copy_allow(proc_t proc);
 int	mac_proc_check_mprotect(proc_t proc,
 	    user_addr_t addr, user_size_t size, int prot);
 int	mac_proc_check_sched(proc_t proc, proc_t proc2);
@@ -439,6 +440,8 @@ int	mac_vnode_check_exchangedata(vfs_context_t ctx, struct vnode *v1,
 	    struct vnode *v2);
 int	mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 	    struct image_params *imgp);
+int	mac_vnode_check_signature(struct vnode *vp, unsigned char *sha1,
+	    void * signature, size_t size);
 int     mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
 	    struct attrlist *alist);
 int	mac_vnode_check_getextattr(vfs_context_t ctx, struct vnode *vp,

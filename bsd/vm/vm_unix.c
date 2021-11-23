@@ -93,10 +93,12 @@
  * Sysctl's related to data/stack execution.  See osfmk/vm/vm_map.c
  */
 
+#ifndef SECURE_KERNEL
 extern int allow_stack_exec, allow_data_exec;
 
 SYSCTL_INT(_vm, OID_AUTO, allow_stack_exec, CTLFLAG_RW, &allow_stack_exec, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, allow_data_exec, CTLFLAG_RW, &allow_data_exec, 0, "");
+#endif /* !SECURE_KERNEL */
 
 #if CONFIG_NO_PRINTF_STRINGS
 void
@@ -525,6 +527,7 @@ task_for_pid(
 	if (p->task != TASK_NULL) {
 		/* If we aren't root and target's task access port is set... */
 		if (!kauth_cred_issuser(kauth_cred_get()) &&
+			p != current_proc() &&
 			(task_get_task_access_port(p->task, &tfpport) == 0) &&
 			(tfpport != IPC_PORT_NULL)) {
 
@@ -819,7 +822,7 @@ shared_region_map_np(
 	memory_object_size_t		file_size;
 	user_addr_t			user_mappings;
 	struct shared_file_mapping_np	*mappings;
-#define SFM_MAX_STACK	4
+#define SFM_MAX_STACK	8
 	struct shared_file_mapping_np	stack_mappings[SFM_MAX_STACK];
 	unsigned int			mappings_count;
 	vm_size_t			mappings_size;
@@ -1033,12 +1036,6 @@ shared_region_map_np(
 		goto done;
 	}
 
-	/*
-	 * The mapping was successful.  Let the buffer cache know
-	 * that we've mapped that file with these protections.  This
-	 * prevents the vnode from getting recycled while it's mapped.
-	 */
-	(void) ubc_map(vp, VM_PROT_READ);
 	error = 0;
 
 	/* update the vnode's access time */

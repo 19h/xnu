@@ -352,17 +352,25 @@ found:
 			 * process removed the object before we had a chance
 			 * to create the vnode, then just treat it as the not
 			 * found case above and return EJUSTRETURN.
+			 * We should do the same for the RENAME operation since we are
+			 * going to write it in regardless.
 			 */
 			if ((retval == ENOENT) &&
-			    (cnp->cn_nameiop == CREATE) &&
+			    ((cnp->cn_nameiop == CREATE) || (cnp->cn_nameiop == RENAME)) &&
 			    (flags & ISLASTCN)) {
 				retval = EJUSTRETURN;
 			}
 			goto exit;
 		}
-
-		/* Save the origin info of a directory link for future ".." requests. */
-		if (S_ISDIR(attr.ca_mode) && (attr.ca_recflags & kHFSHasLinkChainMask)) {
+		
+		/* 
+		 * Save the origin info for file and directory hardlinks.  Directory hardlinks 
+		 * need the origin for '..' lookups, and file hardlinks need it to ensure that 
+		 * competing lookups do not cause us to vend different hardlinks than the ones requested.
+		 * We want to restrict saving the cache entries to LOOKUP namei operations, since
+		 * we're really doing this to protect getattr.
+		 */
+		if ((cnp->cn_nameiop == LOOKUP) && (VTOC(tvp)->c_flag & C_HARDLINK)) {
 			hfs_savelinkorigin(VTOC(tvp), VTOC(dvp)->c_fileid);
 		}
 		*cnode_locked = 1;
@@ -479,6 +487,14 @@ hfs_vnop_lookup(struct vnop_lookup_args *ap)
 				replace_desc(cp, &desc);
 			hfs_systemfile_unlock(VTOHFS(dvp), lockflags);
 		}
+
+		/* Save the lookup result in the origin list for future lookups, but
+		 * only if it was through a LOOKUP nameiop
+		 */
+		if (cnp->cn_nameiop == LOOKUP) {
+			hfs_savelinkorigin(cp, dcp->c_fileid);
+		}	   
+
 		hfs_unlock(cp);
 	}
 #if NAMEDRSRCFORK

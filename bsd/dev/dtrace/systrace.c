@@ -54,8 +54,6 @@
 #define I386_SYSCALL_NUMBER_MASK (0xFFFF)
 
 typedef x86_saved_state_t savearea_t;
-#elif defined(__arm__)
-typedef struct arm_saved_state savearea_t;
 #endif
 
 #include <sys/param.h>
@@ -81,9 +79,6 @@ typedef struct arm_saved_state savearea_t;
 #elif defined(__i386__) || defined (__x86_64__)
 #define	SYSTRACE_ARTIFICIAL_FRAMES	2
 #define MACHTRACE_ARTIFICIAL_FRAMES 3
-#elif defined(__arm__)
-#define	SYSTRACE_ARTIFICIAL_FRAMES	2 /* XXX ARMTODO */
-#define MACHTRACE_ARTIFICIAL_FRAMES 3 /* XXX ARMTODO */
 #else
 #error Unknown Architecture
 #endif
@@ -159,8 +154,6 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 			 */
 		}
 	}
-#elif defined(__arm__)
-	do {} while(0); /* XXX what is the right ABI */
 #else
 #error Unknown Architecture
 #endif
@@ -168,8 +161,12 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 	// Bounds "check" the value of code a la unix_syscall
 	sy = (code >= NUM_SYSENT) ? &systrace_sysent[63] : &systrace_sysent[code];
 
-	if ((id = sy->stsy_entry) != DTRACE_IDNONE)
-		(*systrace_probe)(id, *ip, *(ip+1), *(ip+2), *(ip+3), *(ip+4));
+	if ((id = sy->stsy_entry) != DTRACE_IDNONE) {
+		if (ip)
+			(*systrace_probe)(id, *ip, *(ip+1), *(ip+2), *(ip+3), *(ip+4));
+		else
+			(*systrace_probe)(id, 0, 0, 0, 0, 0);
+	}
 
 #if 0 /* XXX */
 	/*
@@ -863,13 +860,11 @@ dtrace_machtrace_syscall(struct mach_call_args *args)
 		x86_saved_state_t   *tagged_regs = (x86_saved_state_t *)find_user_regs(current_thread());
 
 		if (is_saved_state64(tagged_regs)) {
-			code = -saved_state64(tagged_regs)->rax & SYSCALL_NUMBER_MASK;
+			code = saved_state64(tagged_regs)->rax & SYSCALL_NUMBER_MASK;
 		} else {
 			code = -saved_state32(tagged_regs)->eax;
 		}
 	}
-#elif defined(__arm__)
-	do {} while(0); /* XXX ARMTODO */
 #else
 #error Unknown Architecture
 #endif

@@ -149,14 +149,6 @@ struct ether_desc_blk_str {
 __private_extern__ u_char	etherbroadcastaddr[ETHER_ADDR_LEN] =
 								{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
-#if defined (__arm__)
-static __inline__ int
-_ether_cmp(const void * a, const void * b)
-{
-	return (memcmp(a, b, ETHER_ADDR_LEN));
-}
-
-#else
 static __inline__ int
 _ether_cmp(const void * a, const void * b)
 {
@@ -170,7 +162,6 @@ _ether_cmp(const void * a, const void * b)
 	}
 	return (0);
 }
-#endif
 
 /*
  * Release all descriptor entries owned by this protocol (there may be several).
@@ -415,11 +406,35 @@ ether_demux(
 		}
 	}
 	
-	/* Quick check for VLAN */
-	if ((m->m_pkthdr.csum_flags & CSUM_VLAN_TAG_VALID) != 0 ||
-		ether_type == htons(ETHERTYPE_VLAN)) {
-		*protocol_family = PF_VLAN;
-		return 0;
+	/* check for VLAN */
+	if ((m->m_pkthdr.csum_flags & CSUM_VLAN_TAG_VALID) != 0) {
+		if (EVL_VLANOFTAG(m->m_pkthdr.vlan_tag) != 0) {
+			*protocol_family = PF_VLAN;
+			return (0);
+		}
+		/* the packet is just priority-tagged, clear the bit */
+		m->m_pkthdr.csum_flags &= ~CSUM_VLAN_TAG_VALID;
+	}
+	else if (ether_type == htons(ETHERTYPE_VLAN)) {
+		struct ether_vlan_header *	evl;
+
+		evl = (struct ether_vlan_header *)frame_header;
+		if (m->m_len < ETHER_VLAN_ENCAP_LEN
+		    || ntohs(evl->evl_proto) == ETHERTYPE_VLAN
+		    || EVL_VLANOFTAG(ntohs(evl->evl_tag)) != 0) {
+			*protocol_family = PF_VLAN;
+			return 0;
+		}
+		/* the packet is just priority-tagged */
+
+		/* make the encapsulated ethertype the actual ethertype */
+		ether_type = evl->evl_encap_proto = evl->evl_proto;
+
+		/* remove the encapsulation header */
+		m->m_len -= ETHER_VLAN_ENCAP_LEN;
+		m->m_data += ETHER_VLAN_ENCAP_LEN;
+		m->m_pkthdr.len -= ETHER_VLAN_ENCAP_LEN;
+		m->m_pkthdr.csum_flags = 0; /* can't trust hardware checksum */
 	}
 	
 	data = mtod(m, u_int8_t*);

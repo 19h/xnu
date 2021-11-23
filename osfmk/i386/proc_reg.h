@@ -275,7 +275,7 @@ static inline void invlpg(unsigned long addr)
 	__asm__ volatile("wrmsr" : : "c" (msr), "a" (lo), "d" (hi))
 
 #define rdtsc(lo,hi) \
-	__asm__ volatile("rdtsc" : "=a" (lo), "=d" (hi))
+	__asm__ volatile("lfence; rdtsc; lfence" : "=a" (lo), "=d" (hi))
 
 #define write_tsc(lo,hi) wrmsr(0x10, lo, hi)
 
@@ -297,7 +297,17 @@ static inline void wrmsr64(uint32_t msr, uint64_t val)
 static inline uint64_t rdtsc64(void)
 {
 	uint64_t ret;
-	__asm__ volatile("rdtsc" : "=A" (ret));
+	__asm__ volatile("lfence; rdtsc; lfence" : "=A" (ret));
+	return ret;
+}
+
+static inline uint64_t rdtscp64(uint32_t *aux)
+{
+	uint64_t ret;
+	__asm__ volatile("rdtscp; mov %%ecx, %1"
+				: "=A" (ret), "=m" (*aux)
+				:
+				: "ecx");
 	return ret;
 }
 
@@ -409,5 +419,11 @@ __END_DECLS
 #define MSR_IA32_FS_BASE	0xC0000100
 #define MSR_IA32_GS_BASE	0xC0000101
 #define MSR_IA32_KERNEL_GS_BASE	0xC0000102
+
+#define MSR_IA32_BIOS_SIGN_ID	0x08B
+
+#define MSR_FLEX_RATIO		0x194
+#define MSR_PLATFORM_INFO	0x0ce
+#define MSR_CORE_THREAD_COUNT	0x035
 
 #endif	/* _I386_PROC_REG_H_ */

@@ -303,33 +303,31 @@ again:
 			}
 			/* Ask the file system for its parent id and for its name (optional). */
 			ret = vnode_getattr(vp, &va, ctx);
+
 			if (fixhardlink) {
-				if (vp->v_name || VATTR_IS_SUPPORTED(&va, va_name)) {
-					if (ret == 0) {
-						str = va.va_name;
-					} else if (vp->v_name) {
-						str = vp->v_name;
-						ret = 0;
-					} else {
-						ret = ENOENT;
-						goto bad_news;
-					}
+				if ((ret == 0) && (VATTR_IS_SUPPORTED(&va, va_name))) {
+					str = va.va_name;
+				} else if (vp->v_name) {
+					str = vp->v_name;
+					ret = 0;
+				} else {
+					ret = ENOENT;
+					goto bad_news;
+				}
+				len = strlen(str);
 
-					len = strlen(str);
-
-					/* Check that there's enough space. */
-					if ((end - buff) < (len + 1)) {
-						ret = ENOSPC;
-					} else {
-						/* Copy the name backwards. */
-						str += len;
-				
-						for (; len > 0; len--) {
-						       *--end = *--str;
-						}
-						/* Add a path separator. */
-						*--end = '/';
+				/* Check that there's enough space. */
+				if ((end - buff) < (len + 1)) {
+					ret = ENOSPC;
+				} else {
+					/* Copy the name backwards. */
+					str += len;
+					
+					for (; len > 0; len--) {
+						*--end = *--str;
 					}
+					/* Add a path separator. */
+					*--end = '/';
 				}
 			  bad_news:
 				FREE_ZONE(va.va_name, MAXPATHLEN, M_NAMEI);
@@ -827,10 +825,12 @@ boolean_t vnode_cache_is_stale(vnode_t vp)
 
 /*
  * Returns:	0			Success
- *		ENOENT			No such file or directory
+ *		ERECYCLE		vnode was recycled from underneath us.  Force lookup to be re-driven from namei.
+ * 						This errno value should not be seen by anyone outside of the kernel.
  */
 int 
-cache_lookup_path(struct nameidata *ndp, struct componentname *cnp, vnode_t dp, vfs_context_t ctx, int *trailing_slash, int *dp_authorized)
+cache_lookup_path(struct nameidata *ndp, struct componentname *cnp, vnode_t dp, 
+		vfs_context_t ctx, int *trailing_slash, int *dp_authorized, vnode_t last_dp)
 {
 	char		*cp;		/* pointer into pathname argument */
 	int		vid;
@@ -840,11 +840,9 @@ cache_lookup_path(struct nameidata *ndp, struct componentname *cnp, vnode_t dp, 
 	kauth_cred_t	ucred;
 	boolean_t	ttl_enabled = FALSE;
 	struct timeval	tv;
-        mount_t		mp;
+    mount_t		mp;
 	unsigned int	hash;
-#if CONFIG_MACF
-	int		error;
-#endif
+	int		error = 0;
 
 	ucred = vfs_context_ucred(ctx);
 	*trailing_slash = 0;
@@ -945,7 +943,7 @@ skiprsrcfork:
 			error = mac_vnode_check_lookup(ctx, dp, cnp);
 			if (error) {
 				name_cache_unlock();
-				return (error);
+				goto errorout;
 			}
 		}
 #endif /* MAC */
@@ -1052,35 +1050,41 @@ skiprsrcfork:
 	        dp = NULLVP;
 	} else {
 need_dp:
-	        /*
+		/*
 		 * return the last directory we looked at
-		 * with an io reference held
+		 * with an io reference held. If it was the one passed
+		 * in as a result of the last iteration of VNOP_LOOKUP,
+		 * it should already hold an io ref. No need to increase ref.
 		 */
-	        if (dp == ndp->ni_usedvp) {
-		        /*
-			 * if this vnode matches the one passed in via USEDVP
-			 * than this context already holds an io_count... just
-			 * use vnode_get to get an extra ref for lookup to play
-			 * with... can't use the getwithvid variant here because
-			 * it will block behind a vnode_drain which would result
-			 * in a deadlock (since we already own an io_count that the
-			 * vnode_drain is waiting on)... vnode_get grabs the io_count
-			 * immediately w/o waiting... it always succeeds
-			 */
-		        vnode_get(dp);
-		} else if ( (vnode_getwithvid(dp, vid)) ) {
-		        /*
-			 * failure indicates the vnode
-			 * changed identity or is being
-			 * TERMINATED... in either case
-			 * punt this lookup.
-			 * 
-			 * don't necessarily return ENOENT, though, because
-			 * we really want to go back to disk and make sure it's
-			 * there or not if someone else is changing this
-			 * vnode.
-			 */
-		        return (ERESTART);
+		if (last_dp != dp){
+			
+			if (dp == ndp->ni_usedvp) {
+				/*
+				 * if this vnode matches the one passed in via USEDVP
+				 * than this context already holds an io_count... just
+				 * use vnode_get to get an extra ref for lookup to play
+				 * with... can't use the getwithvid variant here because
+				 * it will block behind a vnode_drain which would result
+				 * in a deadlock (since we already own an io_count that the
+				 * vnode_drain is waiting on)... vnode_get grabs the io_count
+				 * immediately w/o waiting... it always succeeds
+				 */
+				vnode_get(dp);
+			} else if ( (vnode_getwithvid(dp, vid)) ) {
+				/*
+				 * failure indicates the vnode
+				 * changed identity or is being
+				 * TERMINATED... in either case
+				 * punt this lookup.
+				 * 
+				 * don't necessarily return ENOENT, though, because
+				 * we really want to go back to disk and make sure it's
+				 * there or not if someone else is changing this
+				 * vnode.
+				 */
+				error = ERECYCLE;
+				goto errorout;
+			}
 		}
 	}
 	if (vp != NULLVP) {
@@ -1104,7 +1108,22 @@ need_dp:
 	ndp->ni_dvp = dp;
 	ndp->ni_vp  = vp;
 
-	return (0);
+errorout:
+	/* 
+	 * If we came into cache_lookup_path after an iteration of the lookup loop that
+	 * resulted in a call to VNOP_LOOKUP, then VNOP_LOOKUP returned a vnode with a io ref
+	 * on it.  It is now the job of cache_lookup_path to drop the ref on this vnode 
+	 * when it is no longer needed.  If we get to this point, and last_dp is not NULL
+	 * and it is ALSO not the dvp we want to return to caller of this function, it MUST be
+	 * the case that we got to a subsequent path component and this previous vnode is 
+	 * no longer needed.  We can then drop the io ref on it.
+	 */
+	if ((last_dp != NULLVP) && (last_dp != ndp->ni_dvp)){
+		vnode_put(last_dp);
+	}
+	
+	//initialized to 0, should be the same if no error cases occurred.
+	return error;
 }
 
 
@@ -1623,7 +1642,7 @@ cache_purge(vnode_t vp)
         struct namecache *ncp;
 	kauth_cred_t tcred = NULL;
 
-	if ((LIST_FIRST(&vp->v_nclinks) == NULL) && (LIST_FIRST(&vp->v_ncchildren) == NULL))
+	if ((LIST_FIRST(&vp->v_nclinks) == NULL) && (LIST_FIRST(&vp->v_ncchildren) == NULL) && (vp->v_cred == NOCRED))
 	        return;
 
 	NAME_CACHE_LOCK();

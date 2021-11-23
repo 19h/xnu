@@ -524,6 +524,7 @@ int	vnode_ischr(vnode_t);
 
 #ifdef __APPLE_API_UNSTABLE
 int	vnode_isnamedstream(vnode_t);
+int     vnode_isshadow(vnode_t);
 #endif
 
 enum vtype	vnode_iftovt(int);
@@ -662,6 +663,9 @@ int	vnode_iterate(struct mount *, int, int (*)(struct vnode *, void *), void *);
 #define VNODE_ITERATE_ALL 		0x80
 #define VNODE_ITERATE_ACTIVE 	0x100
 #define VNODE_ITERATE_INACTIVE	0x200
+#ifdef BSD_KERNEL_PRIVATE
+#define VNODE_ALWAYS		0x400
+#endif /* BSD_KERNEL_PRIVATE */
 
 /*
  * return values from callback

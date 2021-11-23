@@ -61,6 +61,7 @@ typedef struct filefork filefork_t;
 
 /* Aliases for common fields */
 #define ff_size          ff_data.cf_size
+#define ff_new_size      ff_data.cf_new_size
 #define ff_clumpsize     ff_data.cf_clump
 #define ff_bytesread     ff_data.cf_bytesread
 #define ff_blocks        ff_data.cf_blocks
@@ -91,7 +92,7 @@ struct linkorigin {
 typedef struct linkorigin linkorigin_t;
 
 #define MAX_CACHED_ORIGINS  10
-
+#define MAX_CACHED_FILE_ORIGINS 8
 
 /*
  * The cnode is used to represent each active (or recently active)

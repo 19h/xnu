@@ -112,12 +112,13 @@ typedef struct ipc_mqueue {
 #define imq_held(mq)		wait_queue_held(&(mq)->imq_wait_queue)
 
 #define imq_full(mq)		((mq)->imq_msgcount >= (mq)->imq_qlimit)
+#define imq_full_kernel(mq)	((mq)->imq_msgcount >= MACH_PORT_QLIMIT_KERNEL)
 
 extern int ipc_mqueue_full;
 extern int ipc_mqueue_rcv;
 
-#define IPC_MQUEUE_FULL		(event64_t)&ipc_mqueue_full
-#define IPC_MQUEUE_RECEIVE	(event64_t)&ipc_mqueue_rcv
+#define IPC_MQUEUE_FULL		CAST_EVENT64_T(&ipc_mqueue_full)
+#define IPC_MQUEUE_RECEIVE	CAST_EVENT64_T(&ipc_mqueue_rcv)
 
 /*
  * Exported interfaces

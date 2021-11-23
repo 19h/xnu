@@ -77,7 +77,7 @@ typedef struct lockstat_probe {
 
 lockstat_probe_t lockstat_probes[] =
 {
-#ifndef	__PPC__
+#ifdef __i386__
 	/* Not implemented yet on PPC... */
 	{ LS_LCK_MTX_LOCK,	LSA_ACQUIRE,	LS_LCK_MTX_LOCK_ACQUIRE, DTRACE_IDNONE },
 	{ LS_LCK_MTX_LOCK,	LSA_SPIN,	LS_LCK_MTX_LOCK_SPIN, DTRACE_IDNONE },
@@ -183,6 +183,7 @@ vm_offset_t *assembly_probes[] = {
  */
 void lockstat_hot_patch(boolean_t active)
 {
+#pragma unused(active)
 	int i;
 
 
@@ -224,6 +225,7 @@ static dtrace_provider_id_t lockstat_id;
 static void
 lockstat_enable(void *arg, dtrace_id_t id, void *parg)
 {
+#pragma unused(arg)
 	lockstat_probe_t *probe = parg;
 
 	ASSERT(!lockstat_probemap[probe->lsp_probe]);
@@ -243,6 +245,7 @@ lockstat_enable(void *arg, dtrace_id_t id, void *parg)
 static void
 lockstat_disable(void *arg, dtrace_id_t id, void *parg)
 {
+#pragma unused(arg,id)
 	lockstat_probe_t *probe = parg;
 	int i;
 
@@ -272,6 +275,7 @@ lockstat_disable(void *arg, dtrace_id_t id, void *parg)
 static void
 lockstat_provide(void *arg, const dtrace_probedesc_t *desc)
 {
+#pragma unused(arg,desc)
 	int i = 0;
 
 	for (i = 0; lockstat_probes[i].lsp_func != NULL; i++) {
@@ -293,6 +297,7 @@ lockstat_provide(void *arg, const dtrace_probedesc_t *desc)
 static void
 lockstat_destroy(void *arg, dtrace_id_t id, void *parg)
 {
+#pragma unused(arg,id)
 	lockstat_probe_t *probe = parg;
 
 	ASSERT(!lockstat_probemap[probe->lsp_probe]);

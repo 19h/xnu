@@ -1251,6 +1251,7 @@ IOReturn IOCatalogue::unloadModule( OSString * moduleName ) const
         name = moduleName->getCStringNoCopy();
         k_info = kmod_lookupbyname_locked((char *)name);
         if ( k_info && (k_info->reference_count < 1) ) {
+            record_kext_unload(k_info->id);
             if ( k_info->stop &&
                  !((ret = k_info->stop(k_info, 0)) == kIOReturnSuccess) ) {
 
@@ -1609,7 +1610,7 @@ kern_return_t IOCatalogue::removeKernelLinker(void) {
         goto finish;
     }
 
-    PE_parse_boot_arg("keepsyms", &keepsyms);
+    PE_parse_boot_argn("keepsyms", &keepsyms, sizeof (keepsyms));
  
     IOLog("Jettisoning kernel linker.\n");
 

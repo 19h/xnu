@@ -351,6 +351,8 @@ div_output(struct socket *so, struct mbuf *m, struct sockaddr *addr,
 
 	/* Reinject packet into the system as incoming or outgoing */
 	if (!sin || sin->sin_addr.s_addr == 0) {
+		struct ip_out_args ipoa = { IFSCOPE_NONE };
+
 		/*
 		 * Don't allow both user specified and setsockopt options,
 		 * and don't allow packet length sizes that will crash
@@ -371,11 +373,14 @@ div_output(struct socket *so, struct mbuf *m, struct sockaddr *addr,
 #if CONFIG_MACF_NET
 		mac_mbuf_label_associate_inpcb(inp, m);
 #endif
+#if CONFIG_IP_EDGEHOLE
+		ip_edgehole_mbuf_tag(inp, m);
+#endif
 		error = ip_output(m,
 			    inp->inp_options, &inp->inp_route,
 			(so->so_options & SO_DONTROUTE) |
-			IP_ALLOWBROADCAST | IP_RAWOUTPUT,
-			inp->inp_moptions, NULL);
+			IP_ALLOWBROADCAST | IP_RAWOUTPUT | IP_OUTARGS,
+			inp->inp_moptions, &ipoa);
 		socket_lock(so, 0);
 	} else {
 		struct	ifaddr *ifa;
@@ -397,30 +402,6 @@ div_output(struct socket *so, struct mbuf *m, struct sockaddr *addr,
 			m->m_pkthdr.rcvif = ifa->ifa_ifp;
 			ifafree(ifa);
 		}
-		
-		if ((~IF_HWASSIST_CSUM_FLAGS(m->m_pkthdr.rcvif->if_hwassist) & 
-				m->m_pkthdr.csum_flags) == 0) {
-			if (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
-				m->m_pkthdr.csum_flags &= ~CSUM_DELAY_DATA;
-			}
-			m->m_pkthdr.csum_flags |=
-				CSUM_DATA_VALID | CSUM_PSEUDO_HDR |
-				CSUM_IP_CHECKED | CSUM_IP_VALID;
-			m->m_pkthdr.csum_data = 0xffff;
-		}
-		else if (m->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
-			int	hlen;
-			
-#ifdef _IP_VHL
-			hlen = IP_VHL_HL(ip->ip_vhl) << 2;
-#else
-			hlen = ip->ip_hl << 2;
-#endif
-			in_delayed_cksum(m);
-			m->m_pkthdr.csum_flags &= ~CSUM_DELAY_DATA;
-			ip->ip_sum = in_cksum(m, hlen);
-		}
-
 #if CONFIG_MACF_NET
 		mac_mbuf_label_associate_socket(so, m);
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -155,7 +155,11 @@ SYSCTL_QUAD(_net_inet_tcp, OID_AUTO, out_sw_cksum_bytes, CTLFLAG_RD,
 #define	TCPDEBUG2(req)
 #endif
 
+#if CONFIG_USESOCKTHRESHOLD
 __private_extern__ unsigned int	tcp_sockthreshold = 64;
+#else
+__private_extern__ unsigned int	tcp_sockthreshold = 0;
+#endif
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, sockthreshold, CTLFLAG_RW, 
     &tcp_sockthreshold , 0, "TCP Socket size increased if less than threshold");
 
@@ -706,7 +710,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			if (error)
 				goto out;
 			tp->snd_wnd = TTCP_CLIENT_SND_WND;
-			tcp_mss(tp, -1);
+			tcp_mss(tp, -1, IFSCOPE_NONE);
 		}
 
 		if (flags & PRUS_EOF) {
@@ -755,7 +759,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			if (error)
 				goto out;
 			tp->snd_wnd = TTCP_CLIENT_SND_WND;
-			tcp_mss(tp, -1);
+			tcp_mss(tp, -1, IFSCOPE_NONE);
 		}
 		tp->snd_up = tp->snd_una + so->so_snd.sb_cc;
 		tp->t_force = 1;

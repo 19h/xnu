@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -80,6 +80,8 @@ enum {
 
 /* from bsd/vfs/vfs_cluster.c */
 extern int is_file_clean(vnode_t vp, off_t filesize);
+/* from bsd/hfs/hfs_vfsops.c */
+extern int hfs_vfs_vget(struct mount *mp, ino64_t ino, struct vnode **vpp, vfs_context_t context);
 
 static int  hfs_clonelink(struct vnode *, int, kauth_cred_t, struct proc *);
 static int  hfs_clonefile(struct vnode *, int, int, int);
@@ -477,20 +479,51 @@ sizeok:
 
 		hfs_unlock(cp);
 		cnode_locked = 0;
+		
+		/*
+		 * We need to tell UBC the fork's new size BEFORE calling
+		 * cluster_write, in case any of the new pages need to be
+		 * paged out before cluster_write completes (which does happen
+		 * in embedded systems due to extreme memory pressure).
+		 * Similarly, we need to tell hfs_vnop_pageout what the new EOF
+		 * will be, so that it can pass that on to cluster_pageout, and
+		 * allow those pageouts.
+		 *
+		 * We don't update ff_size yet since we don't want pageins to
+		 * be able to see uninitialized data between the old and new
+		 * EOF, until cluster_write has completed and initialized that
+		 * part of the file.
+		 *
+		 * The vnode pager relies on the file size last given to UBC via
+		 * ubc_setsize.  hfs_vnop_pageout relies on fp->ff_new_size or
+		 * ff_size (whichever is larger).  NOTE: ff_new_size is always
+		 * zero, unless we are extending the file via write.
+		 */
+		if (filesize > fp->ff_size) {
+			fp->ff_new_size = filesize;
+			ubc_setsize(vp, filesize);
+		}
 		retval = cluster_write(vp, uio, fp->ff_size, filesize, zero_off,
 				tail_off, lflag | IO_NOZERODIRTY);
 		if (retval) {
+			fp->ff_new_size = 0;	/* no longer extending; use ff_size */
+			if (filesize > origFileSize) {
+				ubc_setsize(vp, origFileSize);
+			}
 			goto ioerr_exit;
 		}
-		offset = uio_offset(uio);
-		if (offset > fp->ff_size) {
-			fp->ff_size = offset;
-
-			ubc_setsize(vp, fp->ff_size);       /* XXX check errors */
+		
+		if (filesize > origFileSize) {
+			fp->ff_size = filesize;
+			
 			/* Files that are changing size are not hot file candidates. */
-			if (hfsmp->hfc_stage == HFC_RECORDING)
+			if (hfsmp->hfc_stage == HFC_RECORDING) {
 				fp->ff_bytesread = 0;
+			}
 		}
+		fp->ff_new_size = 0;	/* ff_size now has the correct size */
+		
+		/* If we wrote some bytes, then touch the change and mod times */
 		if (resid > uio_resid(uio)) {
 			cp->c_touch_chgtime = TRUE;
 			cp->c_touch_modtime = TRUE;
@@ -1046,7 +1079,7 @@ do_bulk_access_check(struct hfsmount *hfsmp, struct vnode *vp,
 	tmp_user_access.num_files = accessp->num_files;
 	tmp_user_access.map_size  = 0;
 	tmp_user_access.file_ids  = CAST_USER_ADDR_T(accessp->file_ids);
-	tmp_user_access.bitmap    = (user_addr_t)NULL;
+	tmp_user_access.bitmap    = USER_ADDR_NULL;
 	tmp_user_access.access    = CAST_USER_ADDR_T(accessp->access);
 	tmp_user_access.num_parents = 0;
 	user_access_structp = &tmp_user_access;
@@ -1328,7 +1361,11 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		bufptr = (char *)ap->a_data;
 		cnid = strtoul(bufptr, NULL, 10);
 
-		if ((error = hfs_vget(hfsmp, cnid, &file_vp, 1))) {
+		/* We need to call hfs_vfs_vget to leverage the code that will fix the
+		 * origin list for us if needed, as opposed to calling hfs_vget, since
+		 * we will need it for the subsequent build_path call.  
+		 */
+		if ((error = hfs_vfs_vget(HFSTOVFS(hfsmp), cnid, &file_vp, context))) {
 			return (error);
 		}
 		error = build_path(file_vp, bufptr, sizeof(pathname_t), &outlen, 0, context);
@@ -1799,12 +1836,20 @@ fail_change_next_allocation:
 	}
 
 	case HFS_GET_MOUNT_TIME:
-	    return copyout(&hfsmp->hfs_mount_time, CAST_USER_ADDR_T(ap->a_data), sizeof(hfsmp->hfs_mount_time));
-	    break;
+	    if (is64bit) {
+	    	*(user_time_t *)(ap->a_data) = (user_time_t) hfsmp->hfs_mount_time;
+	    } else {
+	    	*(time_t *)(ap->a_data) = (time_t) hfsmp->hfs_mount_time;
+	    }
+		return 0;
 
 	case HFS_GET_LAST_MTIME:
-	    return copyout(&hfsmp->hfs_last_mounted_mtime, CAST_USER_ADDR_T(ap->a_data), sizeof(hfsmp->hfs_last_mounted_mtime));
-	    break;
+	    if (is64bit) {
+	    	*(user_time_t *)(ap->a_data) = (user_time_t) hfsmp->hfs_last_mounted_mtime;
+	    } else {
+	    	*(time_t *)(ap->a_data) = (time_t) hfsmp->hfs_last_mounted_mtime;
+	    }
+		return 0;
 
 	case HFS_SET_BOOT_INFO:
 		if (!vnode_isvroot(vp))
@@ -2941,9 +2986,17 @@ hfs_vnop_pageout(struct vnop_pageout_args *ap)
 	cp = VTOC(vp);
 	fp = VTOF(vp);
 	
-	if (vnode_isswap(vp)) {
-		filesize = fp->ff_size;
-	} else {
+	/*
+	 * Figure out where the file ends, for pageout purposes.  If
+	 * ff_new_size > ff_size, then we're in the middle of extending the
+	 * file via a write, so it is safe (and necessary) that we be able
+	 * to pageout up to that point.
+	 */
+	filesize = fp->ff_size;
+	if (fp->ff_new_size > filesize)
+		filesize = fp->ff_new_size;
+	
+	if (!vnode_isswap(vp)) {
 		off_t end_of_range;
 		int tooklock = 0;
 
@@ -2960,7 +3013,6 @@ hfs_vnop_pageout(struct vnop_pageout_args *ap)
 		    tooklock = 1;
 		}
 	
-		filesize = fp->ff_size;
 		end_of_range = ap->a_f_offset + ap->a_size - 1;
 	
 		if (end_of_range >= filesize) {
@@ -3029,7 +3081,7 @@ hfs_vnop_bwrite(struct vnop_bwrite_args *ap)
 			block.blockSize = buf_count(bp);
     
 			/* Endian un-swap B-Tree node */
-			retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig);
+			retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig, false);
 			if (retval)
 				panic("hfs_vnop_bwrite: about to write corrupt node!\n");
 		}
@@ -3213,7 +3265,7 @@ hfs_relocate(struct  vnode *vp, u_int32_t  blockHint, kauth_cred_t cred,
 			retval = ENOSPC;
 			goto restore;
 		} else if ((eflags & kEFMetadataMask) &&
-		           ((((u_int64_t)sector_b * hfsmp->hfs_phys_block_size) / blksize) >
+		           ((((u_int64_t)sector_b * hfsmp->hfs_logical_block_size) / blksize) >
 		              hfsmp->hfs_metazone_end)) {
 			const char * filestr;
 			char emptystr = '\0';

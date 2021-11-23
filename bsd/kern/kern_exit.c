@@ -246,8 +246,7 @@ exit1(proc_t p, int rv, int *retval)
 		}
 		sig_lock_to_exit(p);
 	}
-#if !CONFIG_EMBEDDED /* BER_XXX */
-	if (p->p_pid == 1) {
+	if (p == initproc) {
 		proc_unlock(p);
 		printf("pid 1 exited (signal %d, exit %d)",
 		    WTERMSIG(rv), WEXITSTATUS(rv));
@@ -257,7 +256,6 @@ exit1(proc_t p, int rv, int *retval)
 								"launchd"),
 							init_task_failure_data);
 	}
-#endif
 
 	p->p_lflag |= P_LEXIT;
 	p->p_xstat = rv;
@@ -419,6 +417,17 @@ proc_exit(proc_t p)
 	 * This may block!
 	 */
 	fdfree(p);
+
+	if (uth->uu_lowpri_window) {
+	        /*
+		 * task is marked as a low priority I/O type
+		 * and the I/O we issued while flushing files on close
+		 * collided with normal I/O operations...
+		 * no need to throttle this thread since its going away
+		 * but we do need to update our bookeeping w/r to throttled threads
+		 */
+		throttle_lowpri_io(FALSE);
+	}
 
 #if SYSV_SHM
 	/* Close ref SYSV Shared memory*/
@@ -778,6 +787,15 @@ proc_exit(proc_t p)
 		 */
 		(void)reap_child_locked(pp, p, 1, 1, 1);
 		/* list lock dropped by reap_child_locked */
+	}
+	if (uth->uu_lowpri_window) {
+	        /*
+		 * task is marked as a low priority I/O type and we've
+		 * somehow picked up another throttle during exit processing...
+		 * no need to throttle this thread since its going away
+		 * but we do need to update our bookeeping w/r to throttled threads
+		 */
+		throttle_lowpri_io(FALSE);
 	}
 
 	proc_rele(pp);

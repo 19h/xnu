@@ -46,6 +46,7 @@
 #include <sys/quota.h>
 #include <sys/dirent.h>
 #include <sys/event.h>
+#include <kern/thread_call.h>
 
 #include <kern/locks.h>
 
@@ -124,9 +125,11 @@ typedef struct hfsmount {
 	u_int32_t     hfs_flags;              /* see below */
 
 	/* Physical Description */
-	u_long        hfs_phys_block_size;    /* Always a multiple of 512 */
-	daddr64_t     hfs_phys_block_count;   /* Num of PHYSICAL blocks of volume */
-	daddr64_t     hfs_alt_id_sector;      /* location of alternate VH/MDB */
+	u_int32_t     hfs_logical_block_size;	/* Logical block size of the disk as reported by ioctl(DKIOCGETBLOCKSIZE), always a multiple of 512 */
+	daddr64_t     hfs_logical_block_count;  /* Number of logical blocks on the disk */
+	daddr64_t     hfs_alt_id_sector;      	/* location of alternate VH/MDB */
+	u_int32_t     hfs_physical_block_size;	/* Physical block size of the disk as reported by ioctl(DKIOCGETPHYSICALBLOCKSIZE) */ 
+	u_int32_t     hfs_log_per_phys;		/* Number of logical blocks per physical block size */
 
 	/* Access to VFS and devices */
 	struct mount		*hfs_mp;				/* filesystem vfs structure */
@@ -264,12 +267,39 @@ typedef struct hfsmount {
 
 	lck_mtx_t      hfs_mutex;      /* protects access to hfsmount data */
 	void          *hfs_freezing_proc;  /* who froze the fs */
+	void          *hfs_downgrading_proc; /* process who's downgrading to rdonly */
 	lck_rw_t       hfs_insync;     /* protects sync/freeze interaction */
 
 	/* Resize variables: */
 	u_int32_t		hfs_resize_filesmoved;
 	u_int32_t		hfs_resize_totalfiles;
+
+	/*
+	 * About the sync counters:
+	 * hfs_sync_scheduled  keeps track whether a timer was scheduled but we
+	 *                     haven't started processing the callback (i.e. we
+	 *                     haven't begun the flush).  This will be non-zero
+	 *                     even if the callback has been invoked, before we
+	 *                    start the flush.
+	 * hfs_sync_incomplete keeps track of the number of callbacks that have
+	 *                     not completed yet (including callbacks not yet
+	 *                     invoked).  We cannot safely unmount until this
+	 *                     drops to zero.
+	 *
+	 * In both cases, we use counters, not flags, so that we can avoid
+	 * taking locks.
+	 */
+	int32_t		hfs_sync_scheduled;
+	int32_t		hfs_sync_incomplete;
+	u_int64_t       hfs_last_sync_request_time;
+	u_int64_t       hfs_last_sync_time;
+	uint32_t        hfs_active_threads;
+	thread_call_t   hfs_syncer;	      // removeable devices get sync'ed by this guy
+
 } hfsmount_t;
+
+#define HFS_META_DELAY     (100)
+#define HFS_MILLISEC_SCALE (1000*1000)
 
 typedef hfsmount_t  ExtendedVCB;
 
@@ -337,6 +367,11 @@ enum privdirtype {FILE_HARDLINKS, DIR_HARDLINKS};
 #define	HFS_FOLDERCOUNT           0x10000
 /* When set, the file system exists on a virtual device, like disk image */
 #define HFS_VIRTUAL_DEVICE        0x20000
+/* When set, we're in hfs_changefs, so hfs_sync should do nothing. */
+#define HFS_IN_CHANGEFS           0x40000
+/* When set, we are in process of downgrading or have downgraded to read-only, 
+ * so hfs_start_transaction should return EROFS. */
+#define HFS_RDONLY_DOWNGRADE      0x80000
 
 
 /* Macro to update next allocation block in the HFS mount structure.  If 
@@ -457,6 +492,10 @@ enum { kHFSPlusMaxFileNameBytes = kHFSPlusMaxFileNameChars * 3 };
 #define HFS_ALT_SECTOR(blksize, blkcnt)  (((blkcnt) - 1) - (512 / (blksize)))
 #define HFS_ALT_OFFSET(blksize)          ((blksize) > 1024 ? (blksize) - 1024 : 0)
 
+/* Convert the logical sector number to be aligned on physical block size boundary.  
+ * We are assuming the partition is a multiple of physical block size.
+ */
+#define HFS_PHYSBLK_ROUNDDOWN(sector_num, log_per_phys)	((sector_num / log_per_phys) * log_per_phys)
 
 /*
  * HFS specific fcntl()'s
@@ -677,6 +716,7 @@ extern int  hfs_virtualmetafile(struct cnode *);
 
 extern int hfs_start_transaction(struct hfsmount *hfsmp);
 extern int hfs_end_transaction(struct hfsmount *hfsmp);
+extern void hfs_sync_ejectable(struct hfsmount *hfsmp);
 
 
 /*****************************************************************************

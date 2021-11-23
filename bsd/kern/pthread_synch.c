@@ -159,7 +159,7 @@ void _pthread_start(pthread_t self, mach_port_t kport, void *(*fun)(void *), voi
 #define PTHREAD_START_SETSCHED	0x02000000
 #define PTHREAD_START_DETACHED	0x04000000
 #define PTHREAD_START_POLICY_BITSHIFT 16
-#define PTHREAD_START_POLICY_MASK 0xffff
+#define PTHREAD_START_POLICY_MASK 0xff
 #define PTHREAD_START_IMPORTANCE_MASK 0xffff
 
 #define SCHED_OTHER      POLICY_TIMESHARE
@@ -819,8 +819,6 @@ bsdthread_create(__unused struct proc *p, struct bsdthread_create_args  *uap, us
 	stackaddr = 0xF0000000;
 #elif defined(__i386__)
 	stackaddr = 0xB0000000;
-#elif defined(__arm__)
-	stackaddr = 0xB0000000; /* XXX ARM */
 #else
 #error Need to define a stack address hint for this architecture
 #endif
@@ -943,24 +941,6 @@ bsdthread_create(__unused struct proc *p, struct bsdthread_create_args  *uap, us
 		thread_set_wq_state64(th, (thread_state_t)ts64);
 	}
 	}
-#elif defined(__arm__)
-	{
-	int flavor=0, count=0;
-	void * state;
-
-	kret = thread_getstatus(th, flavor, (thread_state_t)&state, &count);
-	if (kret != KERN_SUCCESS) {
-		error = EINVAL;
-		goto out1;
-	}
-
-	/* XXX ARM TODO */
-
-	kret = thread_setstatus(th, flavor, (thread_state_t)&state, count);
-	if (kret != KERN_SUCCESS)
-		error = EINVAL;
-		goto out1;
-	}
 #else
 #error bsdthread_create  not defined for this architecture
 #endif
@@ -978,7 +958,8 @@ bsdthread_create(__unused struct proc *p, struct bsdthread_create_args  *uap, us
 			extinfo.timeshare = 0;
 		thread_policy_set(th, THREAD_EXTENDED_POLICY, (thread_policy_t)&extinfo, THREAD_EXTENDED_POLICY_COUNT);
 
-		precedinfo.importance = importance;
+#define BASEPRI_DEFAULT 31
+		precedinfo.importance = (importance - BASEPRI_DEFAULT);
 		thread_policy_set(th, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedinfo, THREAD_PRECEDENCE_POLICY_COUNT);
 	}
 
@@ -1020,12 +1001,6 @@ bsdthread_terminate(__unused struct proc *p, struct bsdthread_terminate_args  *u
 #if 0
 	KERNEL_DEBUG_CONSTANT(0x9000084 |DBG_FUNC_START, (unsigned int)freeaddr, (unsigned int)freesize, (unsigned int)kthport, 0xff, 0);
 #endif
-	if (sem != MACH_PORT_NULL) {
-		 kret = semaphore_signal_internal_trap(sem);
-		if (kret != KERN_SUCCESS) {
-			return(EINVAL);
-		}
-	}
 	if ((freesize != (mach_vm_size_t)0) && (freeaddr != (mach_vm_offset_t)0)) {
 		kret = mach_vm_deallocate(current_map(), freeaddr, freesize);
 		if (kret != KERN_SUCCESS) {
@@ -1034,6 +1009,13 @@ bsdthread_terminate(__unused struct proc *p, struct bsdthread_terminate_args  *u
 	}
 	
 	(void) thread_terminate(current_thread());
+	if (sem != MACH_PORT_NULL) {
+		 kret = semaphore_signal_internal_trap(sem);
+		if (kret != KERN_SUCCESS) {
+			return(EINVAL);
+		}
+	}
+	
 	if (kthport != MACH_PORT_NULL)
 			mach_port_deallocate(get_task_ipcspace(current_task()), kthport);
 	thread_exception_return();
@@ -1385,8 +1367,6 @@ workqueue_addnewthread(struct workqueue *wq)
 	stackaddr = 0xF0000000;
 #elif defined(__i386__)
 	stackaddr = 0xB0000000;
-#elif defined(__arm__)
-	stackaddr = 0xB0000000; /* XXX ARM */
 #else
 #error Need to define a stack address hint for this architecture
 #endif
@@ -1576,6 +1556,9 @@ workq_ops(struct proc *p, struct workq_ops_args  *uap, __unused register_t *retv
 
 		        KERNEL_DEBUG(0xefffd008 | DBG_FUNC_NONE, (int)item, 0, 0, 0, 0);
 
+			if ((prio < 0) || (prio >= 5))
+				return (EINVAL);
+
 			workqueue_lock_spin(p);
 
 			if ((wq = (struct workqueue *)p->p_wqptr) == NULL) {
@@ -1587,6 +1570,9 @@ workq_ops(struct proc *p, struct workq_ops_args  *uap, __unused register_t *retv
 		        }
 			break;
 		case WQOPS_QUEUE_REMOVE: {
+
+			if ((prio < 0) || (prio >= 5))
+				return (EINVAL);
 
 			workqueue_lock_spin(p);
 
@@ -2003,7 +1989,6 @@ wq_runitem(proc_t p, user_addr_t item, thread_t th, struct threadlist *tl,
 int
 setup_wqthread(proc_t p, thread_t th, user_addr_t item, int reuse_thread, struct threadlist *tl)
 {
-
 #if defined(__ppc__)
 	/*
 	 * Set up PowerPC registers...
@@ -2070,15 +2055,6 @@ setup_wqthread(proc_t p, thread_t th, user_addr_t item, int reuse_thread, struct
 
 		thread_set_wq_state64(th, (thread_state_t)ts64);
 	}
-#elif defined(__arm__)
-	arm_thread_state_t state;
-	arm_thread_state_t *ts = &state;
-
-	/* XXX ARM add more */
-	ts->pc = p->p_wqthread;
-	ts->sp = tl->th_stackaddr + PTH_DEFAULT_GUARDSIZE;
-
-	thread_set_wq_state32(th, (thread_state_t)ts);
 #else
 #error setup_wqthread  not defined for this architecture
 #endif

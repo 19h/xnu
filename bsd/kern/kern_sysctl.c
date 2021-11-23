@@ -607,7 +607,9 @@ kern_sysctl(int *name, u_int namelen, user_addr_t oldp, size_t *oldlenp,
 		&& !(name[0] == KERN_PROC
 			|| name[0] == KERN_PROF 
 			|| name[0] == KERN_KDEBUG
+#if !CONFIG_EMBEDDED
 			|| name[0] == KERN_PROCARGS
+#endif
 			|| name[0] == KERN_PROCARGS2
 			|| name[0] == KERN_IPC
 			|| name[0] == KERN_SYSV
@@ -635,9 +637,11 @@ kern_sysctl(int *name, u_int namelen, user_addr_t oldp, size_t *oldlenp,
 #endif
 	case KERN_KDEBUG:
 		return (kdebug_ops(name + 1, namelen - 1, oldp, oldlenp, p));
+#if !CONFIG_EMBEDDED
 	case KERN_PROCARGS:
 		/* new one as it does not use kinfo_proc */
 		return (sysctl_procargs(name + 1, namelen - 1, oldp, oldlenp, p));
+#endif
 	case KERN_PROCARGS2:
 		/* new one as it does not use kinfo_proc */
 		return (sysctl_procargs2(name + 1, namelen - 1, oldp, oldlenp, p));
@@ -731,6 +735,8 @@ debug_sysctl(int *name, u_int namelen, user_addr_t oldp, size_t *oldlenp,
 	/* all sysctl names at this level are name and field */
 	if (namelen != 2)
 		return (ENOTDIR);		/* overloaded */
+	if (name[0] < 0 || name[0] >= CTL_DEBUG_MAXID)
+                return (ENOTSUP);
 	cdp = debugvars[name[0]];
 	if (cdp->debugname == 0)
 		return (ENOTSUP);
@@ -1582,6 +1588,9 @@ kdebug_ops(int *name, u_int namelen, user_addr_t where,
 {
 	int ret=0;
 
+	if (namelen == 0)
+		return(ENOTSUP);
+
     ret = suser(kauth_cred_get(), &p->p_acflag);
 	if (ret)
 		return(ret);
@@ -1631,7 +1640,7 @@ sysctl_procargs2(int *name, u_int namelen, user_addr_t where,
 }
 
 static int
-sysctl_procargsx(int *name, __unused u_int namelen, user_addr_t where, 
+sysctl_procargsx(int *name, u_int namelen, user_addr_t where, 
                  size_t *sizep, proc_t cur_proc, int argc_yes)
 {
 	proc_t p;
@@ -1650,6 +1659,9 @@ sysctl_procargsx(int *name, __unused u_int namelen, user_addr_t where,
 	int pid;
 	kauth_cred_t my_cred;
 	uid_t uid;
+
+	if ( namelen < 1 )
+		return(EINVAL);
 
 	if (argc_yes)
 		buflen -= sizeof(int);		/* reserve first word to return argc */
@@ -2222,6 +2234,9 @@ static int
 sysctl_coredump
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
+#ifdef SECURE_KERNEL
+	return (ENOTSUP);
+#endif
 	int new_value, changed;
 	int error = sysctl_io_number(req, do_coredump, sizeof(int), &new_value, &changed);
 	if (changed) {
@@ -2241,6 +2256,9 @@ static int
 sysctl_suid_coredump
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
+#ifdef SECURE_KERNEL
+	return (ENOTSUP);
+#endif
 	int new_value, changed;
 	int error = sysctl_io_number(req, sugid_coredump, sizeof(int), &new_value, &changed);
 	if (changed) {
@@ -2415,23 +2433,26 @@ static int
 sysctl_nx
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
+#ifdef SECURE_KERNEL
+	return ENOTSUP;
+#endif
 	int new_value, changed;
 	int error;
 
 	error = sysctl_io_number(req, nx_enabled, sizeof(nx_enabled), &new_value, &changed);
-    if (error)
-        return error;
+	if (error)
+		return error;
 
-    if (changed) {
+	if (changed) {
 #ifdef __i386__
 		/*
 		 * Only allow setting if NX is supported on the chip
 		 */
 		if (!(cpuid_extfeatures() & CPUID_EXTFEATURE_XD))
-            return ENOTSUP;
+			return ENOTSUP;
 #endif
-        nx_enabled = new_value;
-    }
+		nx_enabled = new_value;
+	}
 	return(error);
 }
 

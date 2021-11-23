@@ -104,7 +104,7 @@ int nd6_debug = 0;
 static int nd6_inuse, nd6_allocated;
 
 struct llinfo_nd6 llinfo_nd6 = {&llinfo_nd6, &llinfo_nd6, NULL, NULL, 0, 0, 0, 0, 0 };
-size_t nd_ifinfo_indexlim = 8;
+size_t nd_ifinfo_indexlim = 32; /* increased for 5589193 */
 struct nd_ifinfo *nd_ifinfo = NULL;
 struct nd_drhead nd_defrouter;
 struct nd_prhead nd_prefix = { 0 };
@@ -118,6 +118,7 @@ extern lck_mtx_t *ip6_mutex;
 extern lck_mtx_t *nd6_mutex;
 
 static void nd6_slowtimo(void *ignored_arg);
+
 
 void
 nd6_init()
@@ -166,7 +167,13 @@ nd6_ifattach(
 		bzero(q, n);
 		if (nd_ifinfo) {
 			bcopy((caddr_t)nd_ifinfo, q, n/2);
+			/* Radar 5589193:
+			 * SU fix purposely leaks the old nd_ifinfo array
+			 * if we grow the arraw to more than 32 interfaces
+			 * Fix for future release is to use proper locking.
+
 			FREE((caddr_t)nd_ifinfo, M_IP6NDP);
+			*/
 		}
 		nd_ifinfo = (struct nd_ifinfo *)q;
 	}
@@ -409,10 +416,10 @@ nd6_timer(
 	struct in6_ifaddr *ia6, *nia6;
 	struct in6_addrlifetime *lt6;
 	struct timeval timenow;
+	int count = 0;
 
 	getmicrotime(&timenow);
 	
-
 
 	ln = llinfo_nd6.ln_next;
 	while (ln && ln != &llinfo_nd6) {
@@ -433,9 +440,34 @@ nd6_timer(
 		ndi = &nd_ifinfo[ifp->if_index];
 		dst = (struct sockaddr_in6 *)rt_key(rt);
 
+		count++;
+
 		if (ln->ln_expire > timenow.tv_sec) {
-			ln = next;
-			continue;
+
+			/* Radar 6871508 Check if we have too many cache entries.
+			 * In that case purge 20% of the table to make space
+			 * for the new entries. 
+			 * This is a bit crude but keeps the deletion in timer
+			 * thread only. 
+			 */
+
+			if ((ip6_neighborgcthresh >= 0 &&
+		    		nd6_inuse >= ip6_neighborgcthresh) &&
+				((count % 5) == 0))  {
+
+				if (ln->ln_state > ND6_LLINFO_INCOMPLETE) 
+					ln->ln_state = ND6_LLINFO_STALE;
+				else
+					ln->ln_state = ND6_LLINFO_PURGE;
+				ln->ln_expire = timenow.tv_sec;
+
+				/* fallthrough and call nd6_free() */
+			}
+
+			else {
+				ln = next;
+				continue;
+			}
 		}
 
 		/* sanity check */
@@ -493,6 +525,7 @@ nd6_timer(
 			break;
 
 		case ND6_LLINFO_STALE:
+		case ND6_LLINFO_PURGE:
 			/* Garbage Collection(RFC 2461 5.3) */
 			if (ln->ln_expire)
 				next = nd6_free(rt);

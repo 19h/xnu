@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -754,7 +754,7 @@ ml_init_lock_timeout(void)
 	nanoseconds_to_absolutetime(NSEC_PER_SEC>>2, &abstime);
 	LockTimeOut = (unsigned int)abstime;
 
-	if (PE_parse_boot_arg("mtxspin", &mtxspin)) {
+	if (PE_parse_boot_argn("mtxspin", &mtxspin, sizeof (mtxspin))) {
 		if (mtxspin > USEC_PER_SEC>>4)
 			mtxspin =  USEC_PER_SEC>>4;
 		nanoseconds_to_absolutetime(mtxspin*NSEC_PER_USEC, &abstime);
@@ -815,3 +815,18 @@ void ml_mem_backoff(void) {
 	return;
 }
 
+
+
+/*
+ * Stubs for CPU Stepper
+ */
+void
+machine_run_count(__unused uint32_t count)
+{
+}
+
+boolean_t
+machine_cpu_is_inactive(__unused int num)
+{
+    return(FALSE);
+}

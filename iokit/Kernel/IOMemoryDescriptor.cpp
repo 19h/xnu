@@ -813,6 +813,12 @@ IOGeneralMemoryDescriptor::initWithOptions(void *	buffers,
         gIOSystemMapper = mapper = IOMapper::gSystem;
     }
 
+    // Temp binary compatibility for kIOMemoryThreadSafe
+    if (kIOMemoryReserved6156215 & options)
+    {
+	options &= ~kIOMemoryReserved6156215;
+	options |= kIOMemoryThreadSafe;
+    }
     // Remove the dynamic internal use flags from the initial setting
     options 		  &= ~(kIOMemoryPreparedReadOnly);
     _flags		   = options;
@@ -1017,6 +1023,8 @@ void IOGeneralMemoryDescriptor::free()
 	    IODelete(_ranges.v64, IOAddressRange, _rangesCount);
 	else
 	    IODelete(_ranges.v, IOVirtualRange, _rangesCount);
+
+	_ranges.v = NULL;
     }
 
     if (reserved && reserved->devicePager)
@@ -2427,9 +2435,9 @@ IOMemoryDescriptorMapMemEntry(vm_map_t map, ipc_port_t entry, IOOptionBits optio
     IOReturn err;
     IOMemoryDescriptorMapAllocRef ref;
 
-    ref.sharedMem	= entry;
-    ref.sourceOffset   	= offset;
-    ref.options		= options;
+    ref.sharedMem	 = entry;
+    ref.sourceOffset = trunc_page_64(offset);
+    ref.options		 = options;
 
     ref.size = length;
 
@@ -2563,10 +2571,6 @@ IOReturn IOMemoryDescriptor::doMap(
 
     return (err);
 }
-
-enum {
-    kIOMemoryRedirected	= 0x00010000
-};
 
 IOReturn IOMemoryDescriptor::handleFault(
         void *			_pager,

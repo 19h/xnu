@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -331,7 +331,6 @@ thread_depress_abstime(
 
 		self->sched_pri = DEPRESSPRI;
 		myprocessor->current_pri = self->sched_pri;
-		self->sched_mode &= ~TH_MODE_PREEMPT;
 		self->sched_mode |= TH_MODE_DEPRESS;
 
 		if (interval != 0) {
@@ -427,7 +426,6 @@ thread_poll_yield(
 			if (!(self->sched_mode & TH_MODE_ISDEPRESSED)) {
 				self->sched_pri = DEPRESSPRI;
 				myprocessor->current_pri = self->sched_pri;
-				self->sched_mode &= ~TH_MODE_PREEMPT;
 			}
 			self->computation_epoch = abstime;
 			self->computation_metered = 0;
@@ -438,7 +436,7 @@ thread_poll_yield(
 				self->depress_timer_active++;
 			thread_unlock(self);
 
-			if ((preempt = csw_check(self, myprocessor)) != AST_NONE)
+			if ((preempt = csw_check(myprocessor)) != AST_NONE)
 				ast_on(preempt);
 		}
 	}

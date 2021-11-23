@@ -196,6 +196,8 @@ struct vm_page {
 			fictitious:1,	/* Physical page doesn't exist (O) */
 			pmapped:1,     	/* page has been entered at some
 					 * point into a pmap (O) */
+			wpmapped:1,     /* page has been entered at some
+					 * point into a pmap for write (O) */
 			absent:1,	/* Data has been requested, but is
 					 *  not yet available (O) */
 			error:1,	/* Data manager was unable to provide
@@ -230,7 +232,7 @@ struct vm_page {
 					   /* other pages		   */
 	                deactivated:1,
 			zero_fill:1,
-			__unused_object_bits:9;  /* 9 bits available here */
+			__unused_object_bits:8;  /* 8 bits available here */
 
 	ppnum_t		phys_page;	/* Physical address of page, passed
 					 *  to pmap_enter (read-only) */
@@ -484,6 +486,12 @@ extern void		vm_page_insert(
 					vm_object_t		object,
 					vm_object_offset_t	offset);
 
+extern void		vm_page_insert_internal(
+	                                vm_page_t		page,
+					vm_object_t		object,
+					vm_object_offset_t	offset,
+					boolean_t		queues_lock_held);
+
 extern void		vm_page_replace(
 					vm_page_t		mem,
 					vm_object_t		object,
@@ -523,6 +531,9 @@ extern void		vm_page_gobble(
 				        vm_page_t      page);
 
 extern void		vm_page_validate_cs(vm_page_t	page);
+extern void		vm_page_validate_cs_mapped(
+	vm_page_t	page,
+	const void	*kaddr);
 
 /*
  *	Functions implemented as macros. m->wanted and m->busy are
@@ -612,7 +623,7 @@ extern void		vm_page_validate_cs(vm_page_t	page);
 		mem->inactive = FALSE;				\
 		if (!mem->fictitious) {				\
 			vm_page_inactive_count--;		\
-			vm_purgeable_q_advance_all(1);		\
+			vm_purgeable_q_advance_all();		\
 		} else {					\
 			assert(mem->phys_page ==		\
 			       vm_page_fictitious_addr);	\

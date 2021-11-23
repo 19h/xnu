@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -60,7 +60,7 @@
 #include <i386/misc_protos.h>
 #include <i386/proc_reg.h>
 #include <i386/machine_cpu.h>
-#include <i386/mp.h>
+#include <i386/lapic.h>
 #include <i386/cpuid.h>
 #include <i386/cpu_data.h>
 #include <i386/cpu_threads.h>
@@ -71,7 +71,6 @@
 #include <machine/commpage.h>
 #include <sys/kdebug.h>
 #include <i386/tsc.h>
-#include <i386/hpet.h>
 #include <i386/rtclock.h>
 
 #define NSEC_PER_HZ			(NSEC_PER_SEC / 100) /* nsec per tick */
@@ -87,25 +86,34 @@ uint64_t	rtc_decrementer_min;
 void			rtclock_intr(x86_saved_state_t *regs);
 static uint64_t		maxDec;			/* longest interval our hardware timer can handle (nsec) */
 
-/* XXX this should really be in a header somewhere */
-extern clock_timer_func_t	rtclock_timer_expire;
-
 static void	rtc_set_timescale(uint64_t cycles);
 static uint64_t	rtc_export_speed(uint64_t cycles);
 
-extern void		_rtc_nanotime_store(
-					uint64_t		tsc,
-					uint64_t		nsec,
-					uint32_t		scale,
-					uint32_t		shift,
-					rtc_nanotime_t	*dst);
-
-extern uint64_t		_rtc_nanotime_read(
-					rtc_nanotime_t	*rntp,
-					int		slow );
-
 rtc_nanotime_t	rtc_nanotime_info = {0,0,0,0,1,0};
 
+/*
+ * tsc_to_nanoseconds:
+ *
+ * Basic routine to convert a raw 64 bit TSC value to a
+ * 64 bit nanosecond value.  The conversion is implemented
+ * based on the scale factor and an implicit 32 bit shift.
+ */
+static inline uint64_t
+_tsc_to_nanoseconds(uint64_t value)
+{
+    asm volatile("movl	%%edx,%%esi	;"
+		 "mull	%%ecx		;"
+		 "movl	%%edx,%%edi	;"
+		 "movl	%%esi,%%eax	;"
+		 "mull	%%ecx		;"
+		 "addl	%%edi,%%eax	;"	
+		 "adcl	$0,%%edx	 "
+		 : "+A" (value)
+		 : "c" (current_cpu_datap()->cpu_nanotime->scale)
+		 : "esi", "edi");
+
+    return (value);
+}
 
 static uint32_t
 deadline_to_decrementer(
@@ -190,7 +198,7 @@ _rtc_nanotime_init(rtc_nanotime_t *rntp, uint64_t base)
 static void
 rtc_nanotime_init(uint64_t base)
 {
-	rtc_nanotime_t	*rntp = &rtc_nanotime_info;
+	rtc_nanotime_t	*rntp = current_cpu_datap()->cpu_nanotime;
 
 	_rtc_nanotime_init(rntp, base);
 	rtc_nanotime_set_commpage(rntp);
@@ -208,7 +216,7 @@ rtc_nanotime_init_commpage(void)
 {
 	spl_t			s = splclock();
 
-	rtc_nanotime_set_commpage(&rtc_nanotime_info);
+	rtc_nanotime_set_commpage(current_cpu_datap()->cpu_nanotime);
 
 	splx(s);
 }
@@ -225,35 +233,40 @@ rtc_nanotime_read(void)
 	
 #if CONFIG_EMBEDDED
 	if (gPEClockFrequencyInfo.timebase_frequency_hz > SLOW_TSC_THRESHOLD)
-		return	_rtc_nanotime_read( &rtc_nanotime_info, 1 );	/* slow processor */
+		return	_rtc_nanotime_read(current_cpu_datap()->cpu_nanotime, 1);	/* slow processor */
 	else
 #endif
-	return	_rtc_nanotime_read( &rtc_nanotime_info, 0 );	/* assume fast processor */
+	return	_rtc_nanotime_read(current_cpu_datap()->cpu_nanotime, 0);	/* assume fast processor */
 }
 
 /*
  * rtc_clock_napped:
  *
- * Invoked from power manangement when we have awoken from a nap (C3/C4)
- * during which the TSC lost counts.  The nanotime data is updated according
- * to the provided value which indicates the number of nanoseconds that the
- * TSC was not counting.
- *
- * The caller must guarantee non-reentrancy.
+ * Invoked from power management when we exit from a low C-State (>= C4)
+ * and the TSC has stopped counting.  The nanotime data is updated according
+ * to the provided value which represents the new value for nanotime.
  */
 void
-rtc_clock_napped(
-	uint64_t		delta)
+rtc_clock_napped(uint64_t base, uint64_t tsc_base)
 {
-	rtc_nanotime_t	*rntp = &rtc_nanotime_info;
-	uint32_t	generation;
+	rtc_nanotime_t	*rntp = current_cpu_datap()->cpu_nanotime;
+	uint64_t	oldnsecs;
+	uint64_t	newnsecs;
+	uint64_t	tsc;
 
 	assert(!ml_get_interrupts_enabled());
-	generation = rntp->generation;
-	rntp->generation = 0;
-	rntp->ns_base += delta;
-	rntp->generation = ((generation + 1) != 0) ? (generation + 1) : 1;
-	rtc_nanotime_set_commpage(rntp);
+	tsc = rdtsc64();
+	oldnsecs = rntp->ns_base + _tsc_to_nanoseconds(tsc - rntp->tsc_base);
+	newnsecs = base + _tsc_to_nanoseconds(tsc - tsc_base);
+	
+	/*
+	 * Only update the base values if time using the new base values
+	 * is later than the time using the old base values.
+	 */
+	if (oldnsecs < newnsecs) {
+	    _rtc_nanotime_store(tsc_base, base, rntp->scale, rntp->shift, rntp);
+	    rtc_nanotime_set_commpage(rntp);
+	}
 }
 
 void
@@ -345,12 +358,13 @@ rtclock_init(void)
 static void
 rtc_set_timescale(uint64_t cycles)
 {
-	rtc_nanotime_info.scale = ((uint64_t)NSEC_PER_SEC << 32) / cycles;
+	rtc_nanotime_t	*rntp = current_cpu_datap()->cpu_nanotime;
+	rntp->scale = ((uint64_t)NSEC_PER_SEC << 32) / cycles;
 
 	if (cycles <= SLOW_TSC_THRESHOLD)
-		rtc_nanotime_info.shift = cycles;
+		rntp->shift = cycles;
 	else
-		rtc_nanotime_info.shift = 32;
+		rntp->shift = 32;
 
 	rtc_nanotime_init(0);
 }
@@ -443,14 +457,6 @@ clock_timebase_info(
 {
 	info->numer = info->denom =  1;
 }	
-
-void
-clock_set_timer_func(
-	clock_timer_func_t		func)
-{
-	if (rtclock_timer_expire == NULL)
-		rtclock_timer_expire = func;
-}
 
 /*
  * Real-time clock device interrupt.

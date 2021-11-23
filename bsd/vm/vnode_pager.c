@@ -343,8 +343,6 @@ out:
 }
 
 
-extern void throttle_lowpri_io(int *lowpri_window,mount_t v_mount);
-
 pager_return_t
 vnode_pagein(
 	struct vnode 		*vp,
@@ -379,9 +377,9 @@ vnode_pagein(
 		goto out;
 	}
 	if (upl == (upl_t)NULL) {
-	        if (size > (MAX_UPL_TRANSFER * PAGE_SIZE)) {
+	        if (size > (MAX_UPL_SIZE * PAGE_SIZE)) {
 
-		  panic("vnode_pagein: size = %x\n", size);
+		  	panic("vnode_pagein: size = %x\n", size);
 
 		        result = PAGER_ERROR;
 			error  = PAGER_ERROR;
@@ -391,7 +389,7 @@ vnode_pagein(
 
 		if (upl == (upl_t)NULL) {
 
-		  panic("vnode_pagein: ubc_create_upl failed\n");
+		  	panic("vnode_pagein: ubc_create_upl failed\n");
 
 		        result =  PAGER_ABSENT;
 			error = PAGER_ABSENT;
@@ -512,15 +510,15 @@ out:
 
 	ut = get_bsdthread_info(current_thread());
 
-	if (ut->uu_lowpri_window && ut->v_mount) {
+	if (ut->uu_lowpri_window) {
 	        /*
 		 * task is marked as a low priority I/O type
-		 * and the I/O we issued while in this system call
+		 * and the I/O we issued while in this page fault
 		 * collided with normal I/O operations... we'll
 		 * delay in order to mitigate the impact of this
 		 * task on the normal operation of the system
 		 */
-		throttle_lowpri_io(&ut->uu_lowpri_window,ut->v_mount);
+		throttle_lowpri_io(TRUE);
 	}
 	return (error);
 }

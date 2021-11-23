@@ -487,7 +487,7 @@ OSErr MapFileBlockC (
 	off_t				tmpOff;
 
 	allocBlockSize = vcb->blockSize;
-	sectorSize = VCBTOHFS(vcb)->hfs_phys_block_size;
+	sectorSize = VCBTOHFS(vcb)->hfs_logical_block_size;
 
 	err = SearchExtentFile(vcb, fcb, offset, &foundKey, foundData, &foundIndex, &hint, &nextFABN);
 	if (err == noErr) {
@@ -517,7 +517,7 @@ OSErr MapFileBlockC (
 	//      offset in sectors from start of allocation block space
 	//
 	temp = (daddr64_t)((offset - (off_t)((off_t)(firstFABN) * (off_t)(allocBlockSize)))/sectorSize);
-	temp += startBlock * sectorsPerBlock;
+	temp += (daddr64_t)startBlock * (daddr64_t)sectorsPerBlock;
 
 	/* Add in any volume offsets */
 	if (vcb->vcbSigWord == kHFSPlusSigWord)

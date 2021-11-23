@@ -373,7 +373,7 @@ bool validateExtensionDict(OSDictionary * extension, int index) {
             goto finish;
         }
 
-    } else if (PE_parse_boot_arg("-x", namep)) { /* safe boot */
+    } else if (PE_parse_boot_argn("-x", namep, sizeof (namep))) { /* safe boot */
         ineligible_for_safe_boot = true;
         result = false;
         goto finish;
@@ -966,6 +966,9 @@ bool extractExtensionsFromArchive(const MemoryMapFileInfo * mkext_file_info,
     OSData         * moduleInfo = 0;  // must release
     MkextEntryInfo   module_info;
 
+    IORegistryEntry * root;
+    OSData * checksumObj;
+
     if (vaddr) {
 	// addExtensionsFromArchive passes a kernel virtual address
 	mkext_data = (mkext_header *)mkext_file_info->paddr;
@@ -1007,9 +1010,9 @@ bool extractExtensionsFromArchive(const MemoryMapFileInfo * mkext_file_info,
         goto finish;
     }
 
-    IORegistryEntry * root = IORegistryEntry::getRegistryRoot();
+    root = IORegistryEntry::getRegistryRoot();
     assert(root);
-    OSData * checksumObj = OSData::withBytes((void *)&checksum,
+    checksumObj = OSData::withBytes((void *)&checksum,
         sizeof(checksum));
     assert(checksumObj);
     if (checksumObj) {

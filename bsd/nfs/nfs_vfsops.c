@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc.  All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc.  All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -572,14 +572,15 @@ nfs_vfs_getattr(mount_t mp, struct vfs_attr *fsap, vfs_context_t ctx)
 			if (nmp->nm_fsattr.nfsa_flags & NFS_FSFLAG_CASE_PRESERVING)
 				caps |= VOL_CAP_FMT_CASE_PRESERVING;
 		}
+		/* Note: VOL_CAP_FMT_2TB_FILESIZE is actually used to test for "large file support" */
 		if (NFS_BITMAP_ISSET(nmp->nm_fsattr.nfsa_bitmap, NFS_FATTR_MAXFILESIZE)) {
-			/* Is server's max file size at least 2TB? */
-			if (nmp->nm_fsattr.nfsa_maxfilesize >= 0x20000000000ULL)
+			/* Is server's max file size at least 4GB? */
+			if (nmp->nm_fsattr.nfsa_maxfilesize >= 0x100000000ULL)
 				caps |= VOL_CAP_FMT_2TB_FILESIZE;
 		} else if (nfsvers >= NFS_VER3) {
 			/*
 			 * NFSv3 and up supports 64 bits of file size.
-			 * So, we'll just assume maxfilesize >= 2TB
+			 * So, we'll just assume maxfilesize >= 4GB
 			 */
 			caps |= VOL_CAP_FMT_2TB_FILESIZE;
 		}
@@ -780,8 +781,7 @@ nfs3_fsinfo(struct nfsmount *nmp, nfsnode_t np, vfs_context_t ctx)
 	if (maxsize < nmp->nm_readdirsize)
 		nmp->nm_readdirsize = maxsize;
 
-	nfsm_chain_get_64(error, &nmrep, maxsize);
-	nmp->nm_fsattr.nfsa_maxfilesize = maxsize;
+	nfsm_chain_get_64(error, &nmrep, nmp->nm_fsattr.nfsa_maxfilesize);
 
 	nfsm_chain_adv(error, &nmrep, 2 * NFSX_UNSIGNED); // skip time_delta
 
@@ -906,7 +906,7 @@ tryagain:
 		//PWC hack until we have a real "mount" tool to remount root rw
 		int rw_root=0;
 		int flags = MNT_ROOTFS|MNT_RDONLY;
-		PE_parse_boot_arg("-rwroot_hack", &rw_root);
+		PE_parse_boot_argn("-rwroot_hack", &rw_root, sizeof (rw_root));
 		if(rw_root)
 		{
 			flags = MNT_ROOTFS;
@@ -2435,7 +2435,7 @@ static int
 nfs_vfs_sysctl(int *name, u_int namelen, user_addr_t oldp, size_t *oldlenp,
            user_addr_t newp, size_t newlen, vfs_context_t ctx)
 {
-	int error = 0, val;
+	int error = 0, val, softnobrowse;
 	struct sysctl_req *req = NULL;
 	struct vfsidctl vc;
 	struct user_vfsidctl user_vc;
@@ -2793,9 +2793,11 @@ ustat_skip:
 		break;
 	case VFS_CTL_QUERY:
 		lck_mtx_lock(&nmp->nm_lock);
-		if (nmp->nm_state & (NFSSTA_TIMEO|NFSSTA_JUKEBOXTIMEO))
+		/* XXX don't allow users to know about/disconnect unresponsive, soft, nobrowse mounts */
+		softnobrowse = ((nmp->nm_flag & NFSMNT_SOFT) && (vfs_flags(nmp->nm_mountp) & MNT_DONTBROWSE));
+		if (!softnobrowse && (nmp->nm_state & (NFSSTA_TIMEO|NFSSTA_JUKEBOXTIMEO)))
 			vq.vq_flags |= VQ_NOTRESP;
-		if (!(nmp->nm_flag & (NFSMNT_NOLOCKS|NFSMNT_LOCALLOCKS)) &&
+		if (!softnobrowse && !(nmp->nm_flag & (NFSMNT_NOLOCKS|NFSMNT_LOCALLOCKS)) &&
 		    (nmp->nm_state & NFSSTA_LOCKTIMEO))
 			vq.vq_flags |= VQ_NOTRESP;
 		lck_mtx_unlock(&nmp->nm_lock);

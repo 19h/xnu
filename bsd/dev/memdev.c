@@ -108,9 +108,11 @@ static strategy_fcn_t	mdevstrategy;
 static int				mdevbioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p);
 static int				mdevcioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p);
 static int 				mdevrw(dev_t dev, struct uio *uio, int ioflag);
+#ifdef CONFIG_MEMDEV_INSECURE
 static char *			nonspace(char *pos, char *end);
 static char *			getspace(char *pos, char *end);
 static char *			cvtnum(char *pos, char *end, unsigned int *num);
+#endif /* CONFIG_MEMDEV_INSECURE */
 
 extern void		bcopy_phys(addr64_t from, addr64_t to, vm_size_t bytes);
 extern void		mapping_set_mod(ppnum_t pn);
@@ -172,6 +174,7 @@ int mdevCMajor = -1;
 static int mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p, int is_char);
 dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys);
 dev_t mdevlookup(int devid);
+void mdevremoveall(void);
 
 static	int mdevclose(__unused dev_t dev, __unused int flags, 
 					  __unused int devtype, __unused struct proc *p) {
@@ -427,12 +430,13 @@ static	int mdevsize(dev_t dev) {
 
 void mdevinit(__unused int the_cnt) {
 
+#ifdef CONFIG_MEMDEV_INSECURE
+	
 	int devid, phys;
 	ppnum_t base;
 	unsigned int size;
 	char *ba, *lp;
 	dev_t dev;
-	
 	
 	ba = PE_boot_args();								/* Get the boot arguments */
 	lp = ba + 256;										/* Point to the end */
@@ -470,11 +474,13 @@ void mdevinit(__unused int the_cnt) {
 		
 		dev = mdevadd(devid, base >> 12, size >> 12, phys);	/* Go add the device */ 
 	}
-
+	
+#endif /* CONFIG_MEMDEV_INSECURE */
 	return;
 
 }
 
+#ifdef CONFIG_MEMDEV_INSECURE
 char *nonspace(char *pos, char *end) {					/* Find next non-space in string */
 
 	if(pos >= end) return end;							/* Don't go past end */
@@ -528,6 +534,7 @@ char *cvtnum(char *pos, char *end, unsigned int *num) {		/* Convert to a number 
 		pos++;											/* Step on */
 	}
 }
+#endif /* CONFIG_MEMDEV_INSECURE */
 
 dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys) {
 	
@@ -608,4 +615,25 @@ dev_t mdevlookup(int devid) {
 	if((devid < 0) || (devid > 15)) return -1;			/* Filter any bogus requests */
 	if(!(mdev[devid].mdFlags & mdInited)) return -1;	/* This one hasn't been defined */
 	return mdev[devid].mdBDev;							/* Return the device number */
+}
+
+void mdevremoveall(void) {
+
+	int i;
+
+	for(i = 0; i < 16; i++) {
+		if(!(mdev[i].mdFlags & mdInited)) continue;	/* Ignore unused mdevs */
+
+		devfs_remove(mdev[i].mdbdevb);			/* Remove the block device */
+		devfs_remove(mdev[i].mdcdevb);			/* Remove the character device */
+
+		mdev[i].mdBase = 0;				/* Clear the mdev's storage */
+		mdev[i].mdSize = 0;
+		mdev[i].mdSecsize = 0;
+		mdev[i].mdFlags = 0;
+		mdev[i].mdBDev = 0;
+		mdev[i].mdCDev = 0;
+		mdev[i].mdbdevb = 0;
+		mdev[i].mdcdevb = 0;
+	}
 }

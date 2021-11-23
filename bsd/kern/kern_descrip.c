@@ -104,7 +104,9 @@
 #include <kern/kalloc.h>
 #include <libkern/OSAtomic.h>
 
-#include <sys/ubc.h>
+#include <sys/ubc_internal.h>
+
+#include <hfs/hfs.h>	/* <rdar://7042269 manifest constants */
 
 struct psemnode;
 struct pshmnode;
@@ -141,6 +143,8 @@ extern int soo_stat(struct socket *so, void *ub, int isstat64);
 #endif /* SOCKETS */
 
 extern kauth_scope_t	kauth_scope_fileop;
+
+extern int cs_debug;
 
 #define f_flag f_fglob->fg_flag
 #define f_type f_fglob->fg_type
@@ -591,6 +595,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	int devBlockSize = 0;
 	unsigned int fflag;
 	user_addr_t argp;
+	boolean_t is64bit;
 
 	AUDIT_ARG(fd, uap->fd);
 	AUDIT_ARG(cmd, uap->cmd);
@@ -602,7 +607,9 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	}
 	context.vc_thread = current_thread();
 	context.vc_ucred = fp->f_cred;
-	if (proc_is64bit(p)) {
+
+	is64bit = proc_is64bit(p);
+	if (is64bit) {
 		argp = uap->arg;
 	}
 	else {
@@ -1370,6 +1377,14 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			goto outdrop;
 		}
 
+		if(ubc_cs_blob_get(vp, CPU_TYPE_ANY, fs.fs_file_start))
+		{
+			if(cs_debug)
+				printf("CODE SIGNING: resident blob offered for: %s\n", vp->v_name);
+			vnode_put(vp);
+			goto outdrop;
+		}
+				   
 #define CS_MAX_BLOB_SIZE (1ULL * 1024 * 1024) /* XXX ? */
 		if (fs.fs_blob_size > CS_MAX_BLOB_SIZE) {
 			error = E2BIG;
@@ -1378,9 +1393,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		}
 
 		kernel_blob_size = CAST_DOWN(vm_size_t, fs.fs_blob_size);
-		kr = kmem_alloc(kernel_map,
-				&kernel_blob_addr,
-				kernel_blob_size);
+		kr = ubc_cs_blob_allocate(&kernel_blob_addr, &kernel_blob_size);
 		if (kr != KERN_SUCCESS) {
 			error = ENOMEM;
 			vnode_put(vp);
@@ -1391,9 +1404,8 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			       (void *) kernel_blob_addr,
 			       kernel_blob_size);
 		if (error) {
-			kmem_free(kernel_map,
-				  kernel_blob_addr,
-				  kernel_blob_size);
+			ubc_cs_blob_deallocate(kernel_blob_addr,
+					       kernel_blob_size);
 			vnode_put(vp);
 			goto outdrop;
 		}
@@ -1405,11 +1417,10 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			kernel_blob_addr,
 			kernel_blob_size);
 		if (error) {
-			kmem_free(kernel_map,
-				  kernel_blob_addr,
-				  kernel_blob_size);
+			ubc_cs_blob_deallocate(kernel_blob_addr,
+					       kernel_blob_size);
 		} else {
-			/* ubc_blob_add() was consumed "kernel_blob_addr" */
+			/* ubc_blob_add() has consumed "kernel_blob_addr" */
 		}
 
 		(void) vnode_put(vp);
@@ -1476,13 +1487,17 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	}
 
 	default:
-		if (uap->cmd < FCNTL_FS_SPECIFIC_BASE) {
-			error = EINVAL;
+		/*
+		 * This is an fcntl() that we d not recognize at this level;
+		 * if this is a vnode, we send it down into the VNOP_IOCTL
+		 * for this vnode; this can include special devices, and will
+		 * effectively overload fcntl() to send ioctl()'s.
+		 */
+		if((uap->cmd & IOC_VOID) && (uap->cmd & IOC_INOUT)){
+                	error = EINVAL;
 			goto out;
 		}
-
-		// if it's a fs-specific fcntl() then just pass it through
-
+		
 		if (fp->f_type != DTYPE_VNODE) {
 			error = EBADF;
 			goto out;
@@ -1491,12 +1506,103 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		proc_fdunlock(p);
 
 		if ( (error = vnode_getwithref(vp)) == 0 ) {
-			error = VNOP_IOCTL(vp, uap->cmd, CAST_DOWN(caddr_t, argp), 0, &context);
+#define STK_PARAMS 128
+			char stkbuf[STK_PARAMS];
+			unsigned int size;
+			caddr_t data, memp;
+			int fix_cmd = uap->cmd;
+
+			/*
+			 * For this to work properly, we have to copy in the
+			 * ioctl() cmd argument if there is one; we must also
+			 * check that a command parameter, if present, does
+			 * not exceed the maximum command length dictated by
+			 * the number of bits we have available in the command
+			 * to represent a structure length.  Finally, we have
+			 * to copy the results back out, if it is that type of
+			 * ioctl().
+			 */
+			size = IOCPARM_LEN(uap->cmd);
+			if (size > IOCPARM_MAX) {
+				(void)vnode_put(vp);
+				error = EINVAL;
+				break;
+			}
+
+			/*
+			 * <rdar://7042269> fix up the command we should have
+			 * received via fcntl with one with a valid size and
+			 * copy out argument.
+			 */
+			if (fix_cmd == HFS_GET_MOUNT_TIME ||
+			    fix_cmd == HFS_GET_LAST_MTIME) {
+			    	if (is64bit)
+					size = sizeof(user_time_t);
+				else
+					size = sizeof(time_t);
+				fix_cmd |= IOC_OUT;
+		        }
+
+			memp = NULL;
+			if (size > sizeof (stkbuf)) {
+				if ((memp = (caddr_t)kalloc(size)) == 0) {
+					(void)vnode_put(vp);
+					error = ENOMEM;
+				}
+				data = memp;
+			} else {
+				data = &stkbuf[0];
+			}
+			
+			if (fix_cmd & IOC_IN) {
+				if (size) {
+					/* structure */
+					error = copyin(argp, data, size);
+					if (error) {
+						(void)vnode_put(vp);
+						if (memp)
+							kfree(memp, size);
+						goto outdrop;
+					}
+				} else {
+					/* int */
+					if (is64bit) {
+						*(user_addr_t *)data = argp;
+					} else {
+						*(uint32_t *)data = (uint32_t)argp;
+					}
+				};
+			} else if ((fix_cmd & IOC_OUT) && size) {
+				/*
+				 * Zero the buffer so the user always
+				 * gets back something deterministic.
+				 */
+				bzero(data, size);
+			} else if (fix_cmd & IOC_VOID) {
+				if (is64bit) {
+				    *(user_addr_t *)data = argp;
+				} else {
+				    *(uint32_t *)data = (uint32_t)argp;
+				}
+			}
+
+			/*
+			 * <rdar://7042269> We pass the unmodified uap->cmd
+			 * to the underlying VNOP so that we don't confuse it;
+			 * but we are going to handle its copyout() when it
+			 * gets back.
+			 */
+			error = VNOP_IOCTL(vp, uap->cmd, CAST_DOWN(caddr_t, data), 0, &context);
 
 			(void)vnode_put(vp);
+
+			/* Copy any output data to user */
+			if (error == 0 && (fix_cmd & IOC_OUT) && size) 
+				error = copyout(data, argp, size);
+			if (memp)
+				kfree(memp, size);
 		}
 		break;
-	
 	}
 
 outdrop:
@@ -3865,9 +3971,12 @@ closef_locked(struct fileproc *fp, struct fileglob *fg, proc_t p)
 	fg->fg_lflags |= FG_TERM;
 	lck_mtx_unlock(&fg->fg_lock);
 
-	proc_fdunlock(p);
+	if (p)
+		proc_fdunlock(p);
 	error = closef_finish(fp, fg, p, &context);
-	proc_fdlock(p);
+
+	if (p)
+		proc_fdlock(p);
 
 	return(error);
 }
@@ -3912,13 +4021,12 @@ fileproc_drain(proc_t p, struct fileproc * fp)
 
 	        lck_mtx_convert_spin(&p->p_fdmlock);
 
+		if (fp->f_fglob->fg_ops->fo_drain) {
+			(*fp->f_fglob->fg_ops->fo_drain)(fp, &context);
+		}
 		if (((fp->f_flags & FP_INSELECT)== FP_INSELECT)) {
 			wait_queue_wakeup_all((wait_queue_t)fp->f_waddr, &selwait, THREAD_INTERRUPTED);
-		} else  {
-			if (fp->f_fglob->fg_ops->fo_drain) {
-				(*fp->f_fglob->fg_ops->fo_drain)(fp, &context);
-			}
-		}
+		} 
 		p->p_fpdrainwait = 1;
 
 		msleep(&p->p_fpdrainwait, &p->p_fdmlock, PRIBIO, "fpdrain", NULL);

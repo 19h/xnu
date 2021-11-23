@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2002-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -127,8 +127,10 @@ hfs_vnop_inactive(struct vnop_inactive_args *ap)
 	 */
 	if (v_type == VDIR) {
 		hfs_reldirhints(cp, 0);
-		if (cp->c_flag & C_HARDLINK)
-			hfs_relorigins(cp);
+	}
+	
+	if (cp->c_flag & C_HARDLINK) {
+		hfs_relorigins(cp);
 	}
 
 	if (cp->c_datafork)
@@ -219,9 +221,11 @@ hfs_vnop_inactive(struct vnop_inactive_args *ap)
 
 		lockflags = hfs_systemfile_lock(hfsmp, SFL_CATALOG | SFL_ATTRIBUTE, HFS_EXCLUSIVE_LOCK);
 
-		if (cp->c_blocks > 0)
-			printf("hfs_inactive: attempting to delete a non-empty file!");
-
+		if (cp->c_blocks > 0) {
+			printf("hfs_inactive: deleting non-empty%sfile %d, "
+			       "blks %d\n", VNODE_IS_RSRC(vp) ? " rsrc " : " ",
+			       (int)cp->c_fileid, (int)cp->c_blocks);
+		}
 
 		//
 		// release the name pointer in the descriptor so that
@@ -270,8 +274,17 @@ hfs_vnop_inactive(struct vnop_inactive_args *ap)
 			hfs_volupdate(hfsmp, (v_type == VDIR) ? VOL_RMDIR : VOL_RMFILE, 0);
 	}
 
+	/*
+	 * A file may have had delayed allocations, in which case hfs_update
+	 * would not have updated the catalog record (cat_update).  We need
+	 * to do that now, before we lose our fork data.  We also need to
+	 * force the update, or hfs_update will again skip the cat_update.
+	 */
 	if ((cp->c_flag & C_MODIFIED) ||
 	    cp->c_touch_acctime || cp->c_touch_chgtime || cp->c_touch_modtime) {
+		if ((cp->c_flag & C_MODIFIED) || cp->c_touch_modtime){
+			cp->c_flag |= C_FORCEUPDATE;
+		}
 		hfs_update(vp, 0);
 	}
 out:
@@ -389,6 +402,37 @@ hfs_vnop_reclaim(struct vnop_reclaim_args *ap)
 	cp = VTOC(vp);
 
 	/*
+	 * Check if a deleted resource fork vnode missed a
+	 * VNOP_INACTIVE call and requires truncation.
+	 */
+	if (VNODE_IS_RSRC(vp) &&
+	    (cp->c_flag & C_DELETED) &&
+	    (VTOF(vp)->ff_blocks != 0)) {
+		hfs_unlock(cp);
+		ubc_setsize(vp, 0);
+
+		hfs_lock_truncate(cp, TRUE);
+		(void) hfs_lock(VTOC(vp), HFS_FORCE_LOCK);
+
+		(void) hfs_truncate(vp, (off_t)0, IO_NDELAY, 1, ap->a_context);
+
+		hfs_unlock_truncate(cp, TRUE);
+	}
+	/*
+	 * A file may have had delayed allocations, in which case hfs_update
+	 * would not have updated the catalog record (cat_update).  We need
+	 * to do that now, before we lose our fork data.  We also need to
+	 * force the update, or hfs_update will again skip the cat_update.
+	 */
+	if ((cp->c_flag & C_MODIFIED) ||
+		cp->c_touch_acctime || cp->c_touch_chgtime || cp->c_touch_modtime) {
+		if ((cp->c_flag & C_MODIFIED) || cp->c_touch_modtime){
+			cp->c_flag |= C_FORCEUPDATE;
+		}	
+		hfs_update(vp, 0);
+	}
+
+	/*
 	 * Keep track of an inactive hot file.
 	 */
 	if (!vnode_isdir(vp) &&
@@ -430,6 +474,11 @@ hfs_vnop_reclaim(struct vnop_reclaim_args *ap)
 		if (vnode_isdir(vp)) {
 			hfs_reldirhints(cp, 0);
 		}
+	
+		if (cp->c_flag & C_HARDLINK) {
+			hfs_relorigins(cp);
+		}
+
 	}
 	/* Release the file fork and related data */
 	if (fp) {
@@ -728,11 +777,14 @@ hfs_getnewvnode(
 		 * occurred during the attachment, then cleanup the cnode.
 		 */
 		if ((cp->c_vp == NULL) && (cp->c_rsrc_vp == NULL)) {
-		        hfs_chash_abort(cp);
+			hfs_chash_abort(cp);
 			hfs_reclaim_cnode(cp);
-		} else {
-		        hfs_chashwakeup(cp, H_ALLOC | H_ATTACH);
-			hfs_unlock(cp);
+		} 
+		else {
+			hfs_chashwakeup(cp, H_ALLOC | H_ATTACH);
+			if ((flags & GNV_SKIPLOCK) == 0){
+				hfs_unlock(cp);
+			}
 		}
 		*vpp = NULL;
 		return (retval);
@@ -741,6 +793,16 @@ hfs_getnewvnode(
 	vnode_settag(vp, VT_HFS);
 	if (cp->c_flag & C_HARDLINK) {
 		vnode_setmultipath(vp);
+	}
+	/*
+	 * Tag resource fork vnodes as needing an VNOP_INACTIVE
+	 * so that any deferred removes (open unlinked files)
+	 * have the chance to process the resource fork.
+	 */
+	if (VNODE_IS_RSRC(vp)) {
+		/* Force VL_NEEDINACTIVE on this vnode */
+		vnode_ref(vp);
+		vnode_rele(vp);
 	}
 	hfs_chashwakeup(cp, H_ALLOC | H_ATTACH);
 
