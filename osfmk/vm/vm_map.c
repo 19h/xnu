@@ -121,7 +121,7 @@ static boolean_t	vm_map_range_check(
 	vm_map_entry_t	*entry);
 
 static vm_map_entry_t	_vm_map_entry_create(
-	struct vm_map_header	*map_header);
+	struct vm_map_header	*map_header, boolean_t map_locked);
 
 static void		_vm_map_entry_dispose(
 	struct vm_map_header	*map_header,
@@ -303,8 +303,9 @@ __private_extern__ void  default_freezer_mapping_free(void**, boolean_t all);
  * wire count; it's used for map splitting and zone changing in
  * vm_map_copyout.
  */
-#define vm_map_entry_copy(NEW,OLD) \
-MACRO_BEGIN                                     \
+#define vm_map_entry_copy(NEW,OLD)	\
+MACRO_BEGIN				\
+boolean_t _vmec_reserved = (NEW)->from_reserved_zone;	\
 	*(NEW) = *(OLD);                \
 	(NEW)->is_shared = FALSE;	\
 	(NEW)->needs_wakeup = FALSE;    \
@@ -312,9 +313,15 @@ MACRO_BEGIN                                     \
 	(NEW)->wired_count = 0;         \
 	(NEW)->user_wired_count = 0;    \
 	(NEW)->permanent = FALSE;	\
+	(NEW)->from_reserved_zone = _vmec_reserved;			\
 MACRO_END
 
-#define vm_map_entry_copy_full(NEW,OLD)        (*(NEW) = *(OLD))
+#define vm_map_entry_copy_full(NEW,OLD)			\
+MACRO_BEGIN						\
+boolean_t _vmecf_reserved = (NEW)->from_reserved_zone;	\
+(*(NEW) = *(OLD));					\
+(NEW)->from_reserved_zone = _vmecf_reserved;			\
+MACRO_END
 
 /*
  *	Decide if we want to allow processes to execute from their data or stack areas.
@@ -419,7 +426,8 @@ override_nx(vm_map_t map, uint32_t user_tag) /* map unused on arm */
 
 static zone_t	vm_map_zone;		/* zone for vm_map structures */
 static zone_t	vm_map_entry_zone;	/* zone for vm_map_entry structures */
-static zone_t	vm_map_kentry_zone;	/* zone for kernel entry structures */
+static zone_t	vm_map_entry_reserved_zone;	/* zone with reserve for non-blocking
+					 * allocations */
 static zone_t	vm_map_copy_zone;	/* zone for vm_map_copy structures */
 
 
@@ -435,7 +443,6 @@ static void		*map_data;
 static vm_size_t	map_data_size;
 static void		*kentry_data;
 static vm_size_t	kentry_data_size;
-static int		kentry_count = 2048;		/* to init kentry_data_size */
 
 #if CONFIG_EMBEDDED
 #define		NO_COALESCE_LIMIT  0
@@ -603,7 +610,7 @@ lck_attr_t		vm_map_lck_attr;
  *
  *	vm_map_zone:		used to allocate maps.
  *	vm_map_entry_zone:	used to allocate map entries.
- *	vm_map_kentry_zone:	used to allocate map entries for the kernel.
+ *	vm_map_entry_reserved_zone:	fallback zone for kernel map entries
  *
  *	The kernel allocates map entries from a special zone that is initially
  *	"crammed" with memory.  It would be difficult (perhaps impossible) for
@@ -615,37 +622,46 @@ void
 vm_map_init(
 	void)
 {
+	vm_size_t entry_zone_alloc_size;
 	vm_map_zone = zinit((vm_map_size_t) sizeof(struct _vm_map), 40*1024,
 			    PAGE_SIZE, "maps");
 	zone_change(vm_map_zone, Z_NOENCRYPT, TRUE);
-
+#if	defined(__LP64__)
+	entry_zone_alloc_size = PAGE_SIZE * 5;
+#else
+	entry_zone_alloc_size = PAGE_SIZE * 6;
+#endif
+	
 	vm_map_entry_zone = zinit((vm_map_size_t) sizeof(struct vm_map_entry),
-				  1024*1024, PAGE_SIZE*5,
-				  "non-kernel map entries");
+				  1024*1024, entry_zone_alloc_size,
+				  "VM map entries");
 	zone_change(vm_map_entry_zone, Z_NOENCRYPT, TRUE);
+	zone_change(vm_map_entry_zone, Z_NOCALLOUT, TRUE);
 
-	vm_map_kentry_zone = zinit((vm_map_size_t) sizeof(struct vm_map_entry),
-				   kentry_data_size, kentry_data_size,
-				   "kernel map entries");
-	zone_change(vm_map_kentry_zone, Z_NOENCRYPT, TRUE);
+	vm_map_entry_reserved_zone = zinit((vm_map_size_t) sizeof(struct vm_map_entry),
+				   kentry_data_size * 64, kentry_data_size,
+				   "Reserved VM map entries");
+	zone_change(vm_map_entry_reserved_zone, Z_NOENCRYPT, TRUE);
 
 	vm_map_copy_zone = zinit((vm_map_size_t) sizeof(struct vm_map_copy),
-				 16*1024, PAGE_SIZE, "map copies");
+				 16*1024, PAGE_SIZE, "VM map copies");
 	zone_change(vm_map_copy_zone, Z_NOENCRYPT, TRUE);
 
 	/*
 	 *	Cram the map and kentry zones with initial data.
-	 *	Set kentry_zone non-collectible to aid zone_gc().
+	 *	Set reserved_zone non-collectible to aid zone_gc().
 	 */
 	zone_change(vm_map_zone, Z_COLLECT, FALSE);
-	zone_change(vm_map_kentry_zone, Z_COLLECT, FALSE);
-	zone_change(vm_map_kentry_zone, Z_EXPAND, FALSE);
-	zone_change(vm_map_kentry_zone, Z_FOREIGN, TRUE);
-	zone_change(vm_map_kentry_zone, Z_CALLERACCT, FALSE); /* don't charge caller */
+
+	zone_change(vm_map_entry_reserved_zone, Z_COLLECT, FALSE);
+	zone_change(vm_map_entry_reserved_zone, Z_EXPAND, FALSE);
+	zone_change(vm_map_entry_reserved_zone, Z_FOREIGN, TRUE);
+	zone_change(vm_map_entry_reserved_zone, Z_NOCALLOUT, TRUE);
+	zone_change(vm_map_entry_reserved_zone, Z_CALLERACCT, FALSE); /* don't charge caller */
 	zone_change(vm_map_copy_zone, Z_CALLERACCT, FALSE); /* don't charge caller */
 
-	zcram(vm_map_zone, map_data, map_data_size);
-	zcram(vm_map_kentry_zone, kentry_data, kentry_data_size);
+	zcram(vm_map_zone, (vm_offset_t)map_data, map_data_size);
+	zcram(vm_map_entry_reserved_zone, (vm_offset_t)kentry_data, kentry_data_size);
 	
 	lck_grp_attr_setdefault(&vm_map_lck_grp_attr);
 	lck_grp_init(&vm_map_lck_grp, "vm_map", &vm_map_lck_grp_attr);
@@ -656,24 +672,28 @@ void
 vm_map_steal_memory(
 	void)
 {
+	uint32_t kentry_initial_pages;
+
 	map_data_size = round_page(10 * sizeof(struct _vm_map));
 	map_data = pmap_steal_memory(map_data_size);
 
-#if 0
 	/*
-	 * Limiting worst case: vm_map_kentry_zone needs to map each "available"
-	 * physical page (i.e. that beyond the kernel image and page tables)
-	 * individually; we guess at most one entry per eight pages in the
-	 * real world. This works out to roughly .1 of 1% of physical memory,
-	 * or roughly 1900 entries (64K) for a 64M machine with 4K pages.
+	 * kentry_initial_pages corresponds to the number of kernel map entries
+	 * required during bootstrap until the asynchronous replenishment
+	 * scheme is activated and/or entries are available from the general
+	 * map entry pool.
 	 */
+#if	defined(__LP64__)
+	kentry_initial_pages = 10;
+#else
+	kentry_initial_pages = 6;
 #endif
-	kentry_count = pmap_free_pages() / 8;
-
-
-	kentry_data_size =
-		round_page(kentry_count * sizeof(struct vm_map_entry));
+	kentry_data_size = kentry_initial_pages * PAGE_SIZE;
 	kentry_data = pmap_steal_memory(kentry_data_size);
+}
+
+void vm_kernel_reserved_entry_init(void) {
+	zone_prio_refill_configure(vm_map_entry_reserved_zone, (6*PAGE_SIZE)/sizeof(struct vm_map_entry));
 }
 
 /*
@@ -742,27 +762,41 @@ vm_map_create(
  *	Allocates a VM map entry for insertion in the
  *	given map (or map copy).  No fields are filled.
  */
-#define	vm_map_entry_create(map) \
-	_vm_map_entry_create(&(map)->hdr)
+#define	vm_map_entry_create(map, map_locked)	_vm_map_entry_create(&(map)->hdr, map_locked)
 
-#define	vm_map_copy_entry_create(copy) \
-	_vm_map_entry_create(&(copy)->cpy_hdr)
+#define	vm_map_copy_entry_create(copy, map_locked)					\
+	_vm_map_entry_create(&(copy)->cpy_hdr, map_locked)
+unsigned reserved_zalloc_count, nonreserved_zalloc_count;
 
 static vm_map_entry_t
 _vm_map_entry_create(
-	register struct vm_map_header	*map_header)
+	struct vm_map_header	*map_header, boolean_t __unused map_locked)
 {
-	register zone_t	zone;
-	register vm_map_entry_t	entry;
+	zone_t	zone;
+	vm_map_entry_t	entry;
 
-	if (map_header->entries_pageable)
-		zone = vm_map_entry_zone;
-	else
-		zone = vm_map_kentry_zone;
+	zone = vm_map_entry_zone;
 
-	entry = (vm_map_entry_t) zalloc(zone);
+	assert(map_header->entries_pageable ? !map_locked : TRUE);
+
+	if (map_header->entries_pageable) {
+		entry = (vm_map_entry_t) zalloc(zone);
+	}
+	else {
+		entry = (vm_map_entry_t) zalloc_canblock(zone, FALSE);
+
+		if (entry == VM_MAP_ENTRY_NULL) {
+			zone = vm_map_entry_reserved_zone;
+			entry = (vm_map_entry_t) zalloc(zone);
+			OSAddAtomic(1, &reserved_zalloc_count);
+		} else
+			OSAddAtomic(1, &nonreserved_zalloc_count);
+	}
+
 	if (entry == VM_MAP_ENTRY_NULL)
 		panic("vm_map_entry_create");
+	entry->from_reserved_zone = (zone == vm_map_entry_reserved_zone);
+
 	vm_map_store_update( (vm_map_t) NULL, entry, VM_MAP_ENTRY_CREATE);
 
 	return(entry);
@@ -791,10 +825,17 @@ _vm_map_entry_dispose(
 {
 	register zone_t		zone;
 
-	if (map_header->entries_pageable)
+	if (map_header->entries_pageable || !(entry->from_reserved_zone))
 		zone = vm_map_entry_zone;
 	else
-		zone = vm_map_kentry_zone;
+		zone = vm_map_entry_reserved_zone;
+
+	if (!map_header->entries_pageable) {
+		if (zone == vm_map_entry_zone)
+			OSAddAtomic(-1, &nonreserved_zalloc_count);
+		else
+			OSAddAtomic(-1, &reserved_zalloc_count);
+	}
 
 	zfree(zone, entry);
 }
@@ -1160,7 +1201,7 @@ vm_map_find_space(
 		size += PAGE_SIZE_64;
 	}
 
-	new_entry = vm_map_entry_create(map);
+	new_entry = vm_map_entry_create(map, FALSE);
 
 	/*
 	 *	Look for the first possible address; if there's already
@@ -1253,6 +1294,7 @@ vm_map_find_space(
 	}
 	*address = start;
 
+	assert(start < end);
 	new_entry->vme_start = start;
 	new_entry->vme_end = end;
 	assert(page_aligned(new_entry->vme_start));
@@ -1868,6 +1910,7 @@ StartAgain: ;
 			 *	new range.
 			 */
 			map->size += (end - entry->vme_end);
+			assert(entry->vme_start < end);
 			entry->vme_end = end;
 			vm_map_store_update_first_free(map, map->first_free);
 			RETURN(KERN_SUCCESS);
@@ -2971,7 +3014,7 @@ vm_map_clip_unnest(
  *	the specified address; if necessary,
  *	it splits the entry into two.
  */
-static void
+void
 vm_map_clip_start(
 	vm_map_t	map,
 	vm_map_entry_t	entry,
@@ -3034,11 +3077,13 @@ _vm_map_clip_start(
 	 *	address.
 	 */
 
-	new_entry = _vm_map_entry_create(map_header);
+	new_entry = _vm_map_entry_create(map_header, !map_header->entries_pageable);
 	vm_map_entry_copy_full(new_entry, entry);
 
 	new_entry->vme_end = start;
+	assert(new_entry->vme_start < new_entry->vme_end);
 	entry->offset += (start - entry->vme_start);
+	assert(start < entry->vme_end);
 	entry->vme_start = start;
 
 	_vm_map_store_entry_link(map_header, entry->vme_prev, new_entry);
@@ -3057,7 +3102,7 @@ _vm_map_clip_start(
  *	the specified address; if necessary,
  *	it splits the entry into two.
  */
-static void
+void
 vm_map_clip_end(
 	vm_map_t	map,
 	vm_map_entry_t	entry,
@@ -3125,11 +3170,13 @@ _vm_map_clip_end(
 	 *	AFTER the specified entry
 	 */
 
-	new_entry = _vm_map_entry_create(map_header);
+	new_entry = _vm_map_entry_create(map_header, !map_header->entries_pageable);
 	vm_map_entry_copy_full(new_entry, entry);
 
+	assert(entry->vme_start < end);
 	new_entry->vme_start = entry->vme_end = end;
 	new_entry->offset += (end - entry->vme_start);
+	assert(new_entry->vme_start < new_entry->vme_end);
 
 	_vm_map_store_entry_link(map_header, entry, new_entry);
 
@@ -5876,6 +5923,12 @@ start_overwrite:
 				copy->type = VM_MAP_COPY_ENTRY_LIST;
 				copy->offset = new_offset;
 
+				/*
+				 * XXX FBDP
+				 * this does not seem to deal with
+				 * the VM map store (R&B tree)
+				 */
+
 				total_size -= copy_size;
 				copy_size = 0;
 				/* put back remainder of copy in container */
@@ -6520,6 +6573,10 @@ vm_map_copy_overwrite_unaligned(
  *	to the above pass and make sure that no wiring is involved.
  */
 
+int vm_map_copy_overwrite_aligned_src_not_internal = 0;
+int vm_map_copy_overwrite_aligned_src_not_symmetric = 0;
+int vm_map_copy_overwrite_aligned_src_large = 0;
+
 static kern_return_t
 vm_map_copy_overwrite_aligned(
 	vm_map_t	dst_map,
@@ -6624,6 +6681,26 @@ vm_map_copy_overwrite_aligned(
 				continue;
 			}
 
+#if !CONFIG_EMBEDDED
+#define __TRADEOFF1_OBJ_SIZE (64 * 1024 * 1024)	/* 64 MB */
+#define __TRADEOFF1_COPY_SIZE (128 * 1024)	/* 128 KB */
+			if (copy_entry->object.vm_object != VM_OBJECT_NULL &&
+			    copy_entry->object.vm_object->vo_size >= __TRADEOFF1_OBJ_SIZE &&
+			    copy_size <= __TRADEOFF1_COPY_SIZE) {
+				/*
+				 * Virtual vs. Physical copy tradeoff #1.
+				 *
+				 * Copying only a few pages out of a large
+				 * object:  do a physical copy instead of
+				 * a virtual copy, to avoid possibly keeping
+				 * the entire large object alive because of
+				 * those few copy-on-write pages.
+				 */
+				vm_map_copy_overwrite_aligned_src_large++;
+				goto slow_copy;
+			}
+#endif /* !CONFIG_EMBEDDED */
+
 			if (entry->alias >= VM_MEMORY_MALLOC &&
 			    entry->alias <= VM_MEMORY_MALLOC_LARGE_REUSED) {
 				vm_object_t new_object, new_shadow;
@@ -6637,6 +6714,10 @@ vm_map_copy_overwrite_aligned(
 					vm_object_lock_shared(new_object);
 				}
 				while (new_object != VM_OBJECT_NULL &&
+#if !CONFIG_EMBEDDED
+				       !new_object->true_share &&
+				       new_object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC &&
+#endif /* !CONFIG_EMBEDDED */
 				       new_object->internal) {
 					new_shadow = new_object->shadow;
 					if (new_shadow == VM_OBJECT_NULL) {
@@ -6657,9 +6738,24 @@ vm_map_copy_overwrite_aligned(
 						 * let's go off the optimized
 						 * path...
 						 */
+						vm_map_copy_overwrite_aligned_src_not_internal++;
 						vm_object_unlock(new_object);
 						goto slow_copy;
 					}
+#if !CONFIG_EMBEDDED
+					if (new_object->true_share ||
+					    new_object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC) {
+						/*
+						 * Same if there's a "true_share"
+						 * object in the shadow chain, or
+						 * an object with a non-default
+						 * (SYMMETRIC) copy strategy.
+						 */
+						vm_map_copy_overwrite_aligned_src_not_symmetric++;
+						vm_object_unlock(new_object);
+						goto slow_copy;
+					}
+#endif /* !CONFIG_EMBEDDED */
 					vm_object_unlock(new_object);
 				}
 				/*
@@ -6752,6 +6848,14 @@ vm_map_copy_overwrite_aligned(
 			kern_return_t		r;
 
 		slow_copy:
+			if (entry->needs_copy) {
+				vm_object_shadow(&entry->object.vm_object,
+						 &entry->offset,
+						 (entry->vme_end -
+						  entry->vme_start));
+				entry->needs_copy = FALSE;
+			}
+
 			dst_object = entry->object.vm_object;
 			dst_offset = entry->offset;
 
@@ -6838,7 +6942,8 @@ vm_map_copy_overwrite_aligned(
 
 			start += copy_size;
 			vm_map_lock(dst_map);
-			if (version.main_timestamp == dst_map->timestamp) {
+			if (version.main_timestamp == dst_map->timestamp &&
+			    copy_size != 0) {
 				/* We can safely use saved tmp_entry value */
 
 				vm_map_clip_end(dst_map, tmp_entry, start);
@@ -7163,9 +7268,7 @@ StartAgain: ;
 		/*
 		 * Find the zone that the copies were allocated from
 		 */
-		old_zone = (copy->cpy_hdr.entries_pageable)
-			? vm_map_entry_zone
-			: vm_map_kentry_zone;
+
 		entry = vm_map_copy_first_entry(copy);
 
 		/*
@@ -7179,13 +7282,14 @@ StartAgain: ;
 		 * Copy each entry.
 		 */
 		while (entry != vm_map_copy_to_entry(copy)) {
-			new = vm_map_copy_entry_create(copy);
+			new = vm_map_copy_entry_create(copy, !copy->cpy_hdr.entries_pageable);
 			vm_map_entry_copy_full(new, entry);
 			new->use_pmap = FALSE;	/* clr address space specifics */
 			vm_map_copy_entry_link(copy,
 					       vm_map_copy_last_entry(copy),
 					       new);
 			next = entry->vme_next;
+			old_zone = entry->from_reserved_zone ? vm_map_entry_reserved_zone : vm_map_entry_zone;
 			zfree(old_zone, entry);
 			entry = next;
 		}
@@ -7447,7 +7551,7 @@ vm_map_copyin_common(
 	copy->offset = src_addr;
 	copy->size = len;
 	
-	new_entry = vm_map_copy_entry_create(copy);
+	new_entry = vm_map_copy_entry_create(copy, !copy->cpy_hdr.entries_pageable);
 
 #define	RETURN(x)						\
 	MACRO_BEGIN						\
@@ -7569,7 +7673,7 @@ vm_map_copyin_common(
 			version.main_timestamp = src_map->timestamp;
 			vm_map_unlock(src_map);
 
-			new_entry = vm_map_copy_entry_create(copy);
+			new_entry = vm_map_copy_entry_create(copy, !copy->cpy_hdr.entries_pageable);
 
 			vm_map_lock(src_map);
 			if ((version.main_timestamp + 1) != src_map->timestamp) {
@@ -7910,6 +8014,7 @@ vm_map_copyin_common(
 		tmp_entry->vme_end = copy_addr + 
 			(tmp_entry->vme_end - tmp_entry->vme_start);
 		tmp_entry->vme_start = copy_addr;
+		assert(tmp_entry->vme_start < tmp_entry->vme_end);
 		copy_addr += tmp_entry->vme_end - tmp_entry->vme_start;
 		tmp_entry = (struct vm_map_entry *)tmp_entry->vme_next;
 	}
@@ -8156,7 +8261,8 @@ vm_map_fork_share(
 	 *	Mark both entries as shared.
 	 */
 	
-	new_entry = vm_map_entry_create(new_map);
+	new_entry = vm_map_entry_create(new_map, FALSE); /* Never the kernel
+							  * map or descendants */
 	vm_map_entry_copy(new_entry, old_entry);
 	old_entry->is_shared = TRUE;
 	new_entry->is_shared = TRUE;
@@ -8329,7 +8435,7 @@ vm_map_fork(
 				goto slow_vm_map_fork_copy;
 			}
 
-			new_entry = vm_map_entry_create(new_map);
+			new_entry = vm_map_entry_create(new_map, FALSE); /* never the kernel map or descendants */
 			vm_map_entry_copy(new_entry, old_entry);
 			/* clear address space specifics */
 			new_entry->use_pmap = FALSE;
@@ -10000,6 +10106,7 @@ vm_map_simplify_entry(
 	    (this_entry->is_shared == FALSE)
 		) {
 		_vm_map_store_entry_unlink(&map->hdr, prev_entry);
+		assert(prev_entry->vme_start < this_entry->vme_end);
 		this_entry->vme_start = prev_entry->vme_start;
 		this_entry->offset = prev_entry->offset;
 		if (prev_entry->is_sub_map) {
@@ -11080,12 +11187,13 @@ vm_map_entry_insert(
 
 	assert(insp_entry != (vm_map_entry_t)0);
 
-	new_entry = vm_map_entry_create(map);
+	new_entry = vm_map_entry_create(map, !map->hdr.entries_pageable);
 
 	new_entry->vme_start = start;
 	new_entry->vme_end = end;
 	assert(page_aligned(new_entry->vme_start));
 	assert(page_aligned(new_entry->vme_end));
+	assert(new_entry->vme_start < new_entry->vme_end);
 
 	new_entry->object.vm_object = object;
 	new_entry->offset = offset;
@@ -11282,12 +11390,13 @@ vm_map_remap_extract(
 
 		offset = src_entry->offset + (src_start - src_entry->vme_start);
 
-		new_entry = _vm_map_entry_create(map_header);
+		new_entry = _vm_map_entry_create(map_header, !map_header->entries_pageable);
 		vm_map_entry_copy(new_entry, src_entry);
 		new_entry->use_pmap = FALSE; /* clr address space specifics */
 
 		new_entry->vme_start = map_address;
 		new_entry->vme_end = map_address + tmp_size;
+		assert(new_entry->vme_start < new_entry->vme_end);
 		new_entry->inheritance = inheritance;
 		new_entry->offset = offset;
 
@@ -13203,3 +13312,85 @@ out:
 	vm_map_unlock(map);
 }
 #endif
+
+#if !CONFIG_EMBEDDED
+/*
+ * vm_map_entry_should_cow_for_true_share:
+ *
+ * Determines if the map entry should be clipped and setup for copy-on-write
+ * to avoid applying "true_share" to a large VM object when only a subset is
+ * targeted.
+ *
+ * For now, we target only the map entries created for the Objective C
+ * Garbage Collector, which initially have the following properties:
+ *	- alias == VM_MEMORY_MALLOC
+ * 	- wired_count == 0
+ * 	- !needs_copy
+ * and a VM object with:
+ * 	- internal
+ * 	- copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC
+ * 	- !true_share
+ * 	- vo_size == ANON_CHUNK_SIZE
+ */
+boolean_t
+vm_map_entry_should_cow_for_true_share(
+	vm_map_entry_t	entry)
+{
+	vm_object_t	object;
+
+	if (entry->is_sub_map) {
+		/* entry does not point at a VM object */
+		return FALSE;
+	}
+
+	if (entry->needs_copy) {
+		/* already set for copy_on_write: done! */
+		return FALSE;
+	}
+
+	if (entry->alias != VM_MEMORY_MALLOC) {
+		/* not tagged as an ObjectiveC's Garbage Collector entry */
+		return FALSE;
+	}
+
+	if (entry->wired_count) {
+		/* wired: can't change the map entry... */
+		return FALSE;
+	}
+
+	object = entry->object.vm_object;
+
+	if (object == VM_OBJECT_NULL) {
+		/* no object yet... */
+		return FALSE;
+	}
+
+	if (!object->internal) {
+		/* not an internal object */
+		return FALSE;
+	}
+
+	if (object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC) {
+		/* not the default copy strategy */
+		return FALSE;
+	}
+
+	if (object->true_share) {
+		/* already true_share: too late to avoid it */
+		return FALSE;
+	}
+
+	if (object->vo_size != ANON_CHUNK_SIZE) {
+		/* not an object created for the ObjC Garbage Collector */
+		return FALSE;
+	}
+
+	/*
+	 * All the criteria match: we have a large object being targeted for "true_share".
+	 * To limit the adverse side-effects linked with "true_share", tell the caller to
+	 * try and avoid setting up the entire object for "true_share" by clipping the
+	 * targeted range and setting it up for copy-on-write.
+	 */
+	return TRUE;
+}
+#endif /* !CONFIG_EMBEDDED */

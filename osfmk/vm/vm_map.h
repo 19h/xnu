@@ -237,7 +237,8 @@ struct vm_map_entry {
 	/* boolean_t */		superpage_size:3,/* use superpages of a certain size */
 	/* boolean_t */		zero_wired_pages:1, /* zero out the wired pages of this entry it is being deleted without unwiring them */
 	/* boolean_t */		used_for_jit:1,
-	/* unsigned char */	pad:1;		/* available bits */
+	/* boolean_t */	from_reserved_zone:1;	/* Allocated from
+							 * kernel reserved zone	 */
 	unsigned short		wired_count;	/* can be paged if = 0 */
 	unsigned short		user_wired_count; /* for vm_wire */
 };
@@ -458,6 +459,8 @@ struct vm_map_copy {
 /* Initialize the module */
 extern void		vm_map_init(void) __attribute__((section("__TEXT, initcode")));
 
+extern void		vm_kernel_reserved_entry_init(void) __attribute__((section("__TEXT, initcode")));
+
 /* Allocate a range in the specified virtual address map and
  * return the entry allocated for that range. */
 extern kern_return_t vm_map_find_space(
@@ -467,6 +470,19 @@ extern kern_return_t vm_map_find_space(
 				vm_map_offset_t		mask,
 				int			flags,
 				vm_map_entry_t		*o_entry);	/* OUT */
+
+extern void vm_map_clip_start(
+	vm_map_t	map,
+	vm_map_entry_t	entry,
+	vm_map_offset_t	endaddr);
+extern void vm_map_clip_end(
+	vm_map_t	map,
+	vm_map_entry_t	entry,
+	vm_map_offset_t	endaddr);
+#if !CONFIG_EMBEDDED
+extern boolean_t vm_map_entry_should_cow_for_true_share(
+	vm_map_entry_t	entry);
+#endif /* !CONFIG_EMBEDDED */
 
 /* Lookup map entry containing or the specified address in the given map */
 extern boolean_t	vm_map_lookup_entry(
