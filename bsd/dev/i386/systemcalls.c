@@ -396,7 +396,6 @@ unsafe:
 			case _SYSCALL_RET_ADDR_T:
 			case _SYSCALL_RET_SIZE_T:
 			case _SYSCALL_RET_SSIZE_T:
-			case _SYSCALL_RET_UINT64_T:
 			        regs->rax = *((uint64_t *)(&uthread->uu_rval[0]));
 				regs->rdx = 0;
 				break;
@@ -505,7 +504,6 @@ unix_syscall_return(int error)
 				case _SYSCALL_RET_ADDR_T:
 				case _SYSCALL_RET_SIZE_T:
 				case _SYSCALL_RET_SSIZE_T:
-				case _SYSCALL_RET_UINT64_T:
 					regs->rax = *((uint64_t *)(&uthread->uu_rval[0]));
 					regs->rdx = 0;
 					break;

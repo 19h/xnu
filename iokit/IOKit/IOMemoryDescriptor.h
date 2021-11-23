@@ -93,7 +93,6 @@ enum {
     kIOMemoryReserved6156215	= 0x00020000,
 #endif
     kIOMemoryThreadSafe		= 0x00100000,	// Shared with Buffer MD
-    kIOMemoryClearEncrypt	= 0x00200000,	// Shared with Buffer MD
 };
 
 #define kIOMapperSystem	((IOMapper *) 0)
@@ -109,9 +108,6 @@ enum
 {
     kIOMemoryIncoherentIOFlush	 = 1,
     kIOMemoryIncoherentIOStore	 = 2,
-
-    kIOMemoryClearEncrypted      = 50,
-    kIOMemorySetEncrypted        = 51,
 };
 
 #define	IOMEMORYDESCRIPTOR_SUPPORTS_DMACOMMAND	1

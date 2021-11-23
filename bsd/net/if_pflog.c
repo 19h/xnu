@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -70,7 +70,6 @@
 #include <sys/ioctl.h>
 
 #include <net/if.h>
-#include <net/if_var.h>
 #include <net/if_types.h>
 #include <net/route.h>
 #include <net/bpf.h>
@@ -101,8 +100,7 @@
 #define DPRINTF(x)
 #endif
 
-static int pflog_clone_create(struct if_clone *, u_int32_t, void *);
-static int pflog_clone_destroy(struct ifnet *);
+static int pflog_create_dev(void);
 static errno_t pflogoutput(struct ifnet *, struct mbuf *);
 static errno_t pflogioctl(struct ifnet *, unsigned long, void *);
 static errno_t pflogdemux(struct ifnet *, struct mbuf *, char *,
@@ -110,43 +108,50 @@ static errno_t pflogdemux(struct ifnet *, struct mbuf *, char *,
 static errno_t pflogaddproto(struct ifnet *, protocol_family_t,
     const struct ifnet_demux_desc *, u_int32_t);
 static errno_t pflogdelproto(struct ifnet *, protocol_family_t);
-static void pflogfree(struct ifnet *);
 
 static LIST_HEAD(, pflog_softc)	pflogif_list;
-static struct if_clone pflog_cloner =
-    IF_CLONE_INITIALIZER(PFLOGNAME, pflog_clone_create, pflog_clone_destroy,
-        0, (PFLOGIFS_MAX - 1));
 
 struct ifnet *pflogifs[PFLOGIFS_MAX];	/* for fast access */
+static int npflog;
+static lck_attr_t *pflog_lock_attr;
+static lck_grp_t *pflog_lock_grp;
+static lck_grp_attr_t *pflog_lock_grp_attr;
+static lck_mtx_t *pflog_lock;
 
 void
 pfloginit(void)
 {
 	int i;
 
-	if (pf_perim_lock == NULL || pf_lock == NULL) {
-		panic("%s: called before PF is initialized", __func__);
+	if (pflog_lock != NULL)
+		return;
+
+	pflog_lock_grp_attr = lck_grp_attr_alloc_init();
+	pflog_lock_grp = lck_grp_alloc_init("pflog", pflog_lock_grp_attr);
+	pflog_lock_attr = lck_attr_alloc_init();
+	pflog_lock = lck_mtx_alloc_init(pflog_lock_grp, pflog_lock_attr);
+	if (pflog_lock == NULL) {
+		panic("%s: unable to allocate lock", __func__);
 		/* NOTREACHED */
 	}
 	LIST_INIT(&pflogif_list);
 	for (i = 0; i < PFLOGIFS_MAX; i++)
 		pflogifs[i] = NULL;
 
-	(void) if_clone_attach(&pflog_cloner);
+	pflog_create_dev();
 }
 
 static int
-pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
+pflog_create_dev(void)
 {
 	struct pflog_softc *pflogif;
 	struct ifnet_init_params pf_init;
 	int error = 0;
 
-	if (unit >= PFLOGIFS_MAX) {
-		/* Either the interface cloner or our initializer is broken */
-		panic("%s: unit (%d) exceeds max (%d)", __func__, unit,
-		    PFLOGIFS_MAX);
-		/* NOTREACHED */
+	lck_mtx_lock(pflog_lock);
+	if (npflog >= PFLOGIFS_MAX) {
+		error = EINVAL;
+		goto done;
 	}
 
 	if ((pflogif = _MALLOC(sizeof (*pflogif),
@@ -156,8 +161,8 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	}
 
 	bzero(&pf_init, sizeof (pf_init));
-	pf_init.name = ifc->ifc_name;
-	pf_init.unit = unit;
+	pf_init.name = PFLOGNAME;
+	pf_init.unit = npflog;
 	pf_init.type = IFT_PFLOG;
 	pf_init.family = IFNET_FAMILY_LOOPBACK;
 	pf_init.output = pflogoutput;
@@ -166,10 +171,9 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	pf_init.del_proto = pflogdelproto;
 	pf_init.softc = pflogif;
 	pf_init.ioctl = pflogioctl;
-	pf_init.detach = pflogfree;
 
 	bzero(pflogif, sizeof (*pflogif));
-	pflogif->sc_unit = unit;
+	pflogif->sc_unit = npflog;
 
 	error = ifnet_allocate(&pf_init, &pflogif->sc_if);
 	if (error != 0) {
@@ -193,34 +197,34 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	bpfattach(pflogif->sc_if, DLT_PFLOG, PFLOG_HDRLEN);
 #endif
 
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
 	LIST_INSERT_HEAD(&pflogif_list, pflogif, sc_list);
-	pflogifs[unit] = pflogif->sc_if;
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
-
+	pflogifs[npflog] = pflogif->sc_if;
+	++npflog;
 done:
+	lck_mtx_unlock(pflog_lock);
+
 	return (error);
 }
 
-static int
-pflog_clone_destroy(struct ifnet *ifp)
+#if 0
+int
+pflog_destroy_dev(struct ifnet *ifp)
 {
-	struct pflog_softc *pflogif = ifp->if_softc;
+	struct pflog_softc	*pflogif = ifp->if_softc;
 
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
+	lck_mtx_lock(pflog_lock);
 	pflogifs[pflogif->sc_unit] = NULL;
 	LIST_REMOVE(pflogif, sc_list);
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(pflog_lock);
 
-	/* bpfdetach() is taken care of as part of interface detach */
-	(void) ifnet_detach(ifp);
-
-	return 0;
+#if NBPFILTER > 0
+	bpfdetach(ifp);
+#endif
+	if_detach(ifp);
+	_FREE(pflogif, M_DEVBUF);
+	return (0);
 }
+#endif
 
 static errno_t
 pflogoutput(struct ifnet *ifp, struct mbuf *m)
@@ -277,14 +281,6 @@ pflogdelproto(struct ifnet *ifp, protocol_family_t pf)
 	return (0);
 }
 
-static void
-pflogfree(struct ifnet *ifp)
-{
-	_FREE(ifp->if_softc, M_DEVBUF);
-	ifp->if_softc = NULL;
-	(void) ifnet_release(ifp);
-}
-
 int
 pflog_packet(struct pfi_kif *kif, struct mbuf *m, sa_family_t af, u_int8_t dir,
     u_int8_t reason, struct pf_rule *rm, struct pf_rule *am,
@@ -293,8 +289,6 @@ pflog_packet(struct pfi_kif *kif, struct mbuf *m, sa_family_t af, u_int8_t dir,
 #if NBPFILTER > 0
 	struct ifnet *ifn;
 	struct pfloghdr hdr;
-
-	lck_mtx_assert(pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (kif == NULL || m == NULL || rm == NULL || pd == NULL)
 		return (-1);

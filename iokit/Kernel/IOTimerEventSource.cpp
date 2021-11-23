@@ -25,6 +25,17 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+ * Copyright (c) 1999 Apple Computer, Inc.  All rights reserved. 
+ *
+ * IOTimerEventSource.cpp
+ *
+ * HISTORY
+ * 2-Feb-1999		Joe Liu (jliu) created.
+ * 1999-10-14		Godfrey van der Linden(gvdl)
+ *		Revamped to use thread_call APIs
+ *
+ */
 
 #include <sys/cdefs.h>
 
@@ -40,7 +51,6 @@ __END_DECLS
 #include <IOKit/IOWorkLoop.h>
 
 #include <IOKit/IOTimeStamp.h>
-#include <IOKit/IOKitDebug.h>
 
 #define super IOEventSource
 OSDefineMetaClassAndStructors(IOTimerEventSource, IOEventSource)
@@ -78,17 +88,9 @@ void IOTimerEventSource::timeout(void *self)
             doit = (Action) me->action;
             if (doit && me->enabled && AbsoluteTime_to_scalar(&me->abstime))
             {
-            	bool    trace = (gIOKitTrace & kIOTraceTimers) ? true : false;
-            	
-            	if (trace)
-                	IOTimeStampStartConstant(IODBG_TIMES(IOTIMES_ACTION),
+                IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
                                     (uintptr_t) doit, (uintptr_t) me->owner);
-				
                 (*doit)(me->owner, me);
-                
-				if (trace)
-                	IOTimeStampEndConstant(IODBG_TIMES(IOTIMES_ACTION),
-										   (uintptr_t) doit, (uintptr_t) me->owner);
             }
             wl->openGate();
         }
@@ -113,17 +115,9 @@ void IOTimerEventSource::timeoutAndRelease(void * self, void * c)
             doit = (Action) me->action;
             if (doit && (me->reserved->calloutGeneration == count))
             {
-            	bool    trace = (gIOKitTrace & kIOTraceTimers) ? true : false;
-            	
-            	if (trace)
-                	IOTimeStampStartConstant(IODBG_TIMES(IOTIMES_ACTION),
+                IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
                                     (uintptr_t) doit, (uintptr_t) me->owner);
-				
                 (*doit)(me->owner, me);
-                
-				if (trace)
-                	IOTimeStampEndConstant(IODBG_TIMES(IOTIMES_ACTION),
-										   (uintptr_t) doit, (uintptr_t) me->owner);
             }
             wl->openGate();
         }

@@ -665,12 +665,6 @@ routine FUNC_NAME(io_service_add_notification_ool)(
 	out notification	: io_object_t
 	);
 
-#else
-
-    skip;
-    skip;
-    skip;
-    skip;
 
 #endif /* KERNEL_SERVER || __LP64__ */
 

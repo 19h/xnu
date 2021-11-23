@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -226,21 +226,6 @@ struct if_data64 {
 #pragma pack()
 
 #ifdef PRIVATE
-struct if_traffic_class {
-	u_int64_t		ifi_ibkpackets;	/* TC_BK packets received on interface */
-	u_int64_t		ifi_ibkbytes;	/* TC_BK bytes received on interface */
-	u_int64_t		ifi_obkpackets;	/* TC_BK packet sent on interface */
-	u_int64_t		ifi_obkbytes;	/* TC_BK bytes sent on interface */
-	u_int64_t		ifi_ivipackets;	/* TC_VI packets received on interface */
-	u_int64_t		ifi_ivibytes;	/* TC_VI bytes received on interface */
-	u_int64_t		ifi_ovipackets;	/* TC_VI packets sent on interface */
-	u_int64_t		ifi_ovibytes;	/* TC_VI bytes sent on interface */
-	u_int64_t		ifi_ivopackets;	/* TC_VO packets received on interface */
-	u_int64_t		ifi_ivobytes;	/* TC_VO bytes received on interface */
-	u_int64_t		ifi_ovopackets;	/* TC_VO packets sent on interface */
-	u_int64_t		ifi_ovobytes;	/* TC_VO bytes sent on interface */
-};
-
 /*
  * Internal storage of if_data. This is bound to change. Various places in the
  * stack will translate this data structure in to the externally visible
@@ -503,14 +488,6 @@ struct ifnet {
 #endif
 	struct route	if_fwd_route;	/* cached IPv4 forwarding route */
 	void	*if_bridge;		/* bridge glue */
-#if IFNET_ROUTE_REFCNT
-	u_int32_t	if_want_aggressive_drain;
-	u_int32_t	if_idle_flags;	/* idle flags */
-	u_int32_t	if_route_refcnt; /* idle: route ref count */
-#endif /* IFNET_ROUTE_REFCNT */
-#if PKT_PRIORITY
-	struct if_traffic_class if_tc __attribute__((aligned(8)));
-#endif /* PKT_PRIORITY */
 };
 
 #ifndef __APPLE__
@@ -530,19 +507,17 @@ struct if_clone {
 	LIST_ENTRY(if_clone) ifc_list;	/* on list of cloners */
 	const char *ifc_name;			/* name of device, e.g. `vlan' */
 	size_t ifc_namelen;		/* length of name */
-	u_int32_t ifc_minifs;			/* minimum number of interfaces */
-	u_int32_t ifc_maxunit;		/* maximum unit number */
+	int ifc_minifs;			/* minimum number of interfaces */
+	int ifc_maxunit;		/* maximum unit number */
 	unsigned char *ifc_units;	/* bitmap to handle units */
-	u_int32_t ifc_bmlen;			/* bitmap length */
+	int ifc_bmlen;			/* bitmap length */
 
-	int	(*ifc_create)(struct if_clone *, u_int32_t, void *);
-	int	(*ifc_destroy)(struct ifnet *);
+	int	(*ifc_create)(struct if_clone *, int);
+	void	(*ifc_destroy)(struct ifnet *);
 };
 
 #define IF_CLONE_INITIALIZER(name, create, destroy, minifs, maxunit)	\
     { { NULL, NULL }, name, sizeof(name) - 1, minifs, maxunit, NULL, 0, create, destroy }
-
-#define M_CLONE         M_IFADDR
 
 /*
  * Bit values in if_ipending
@@ -726,8 +701,6 @@ struct  ifnet *if_withname(struct sockaddr *);
 
 int	if_clone_attach(struct if_clone *);
 void	if_clone_detach(struct if_clone *);
-struct if_clone *
-	if_clone_lookup(const char *, u_int32_t *);
 
 void	ifnet_lock_assert(struct ifnet *ifp, int what);
 void	ifnet_lock_shared(struct ifnet *ifp);

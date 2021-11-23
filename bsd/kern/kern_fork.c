@@ -1277,7 +1277,7 @@ retry:
 	TAILQ_INIT(&child_proc->p_aio_doneq);
 
 	/* Inherit the parent flags for code sign */
-	child_proc->p_csflags = (parent_proc->p_csflags & ~CS_KILLED);
+	child_proc->p_csflags = parent_proc->p_csflags;
 
 	/*
 	 * All processes have work queue locks; cleaned up by
@@ -1375,8 +1375,6 @@ uthread_zone_init(void)
 					THREAD_CHUNK * sizeof(struct uthread),
 					"uthreads");
 		uthread_zone_inited = 1;
-
-		zone_change(uthread_zone, Z_NOENCRYPT, TRUE);
 	}
 }
 

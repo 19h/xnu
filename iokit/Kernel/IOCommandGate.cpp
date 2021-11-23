@@ -31,7 +31,6 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOTimeStamp.h>
-#include <IOKit/IOKitDebug.h>
 
 #define super IOEventSource
 
@@ -130,6 +129,9 @@ IOReturn IOCommandGate::runAction(Action inAction,
     if (!inAction)
         return kIOReturnBadArgument;
 
+    IOTimeStampConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+			(uintptr_t) inAction, (uintptr_t) owner);
+
     // closeGate is recursive needn't worry if we already hold the lock.
     closeGate();
 
@@ -156,19 +158,8 @@ IOReturn IOCommandGate::runAction(Action inAction,
 	}
     }
 
-    bool trace = ( gIOKitTrace & kIOTraceCommandGates ) ? true : false;
-	
-	if (trace)
-		IOTimeStampStartConstant(IODBG_CMDQ(IOCMDQ_ACTION),
-								 (uintptr_t) inAction, (uintptr_t) owner);
-	
     // Must be gated and on the work loop or enabled
     res = (*inAction)(owner, arg0, arg1, arg2, arg3);
-	
-	if (trace)
-		IOTimeStampEndConstant(IODBG_CMDQ(IOCMDQ_ACTION),
-							   (uintptr_t) inAction, (uintptr_t) owner);
-    
     openGate();
 
     return res;
@@ -191,18 +182,10 @@ IOReturn IOCommandGate::attemptAction(Action inAction,
     if (!workLoop->onThread() && !enabled)
         res = kIOReturnNotPermitted;
     else {
-		
-        bool trace = ( gIOKitTrace & kIOTraceCommandGates ) ? true : false;
-		
-        if (trace)
-            IOTimeStampStartConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+	IOTimeStampConstant(IODBG_CMDQ(IOCMDQ_ACTION),
 			    (uintptr_t) inAction, (uintptr_t) owner);
 
 	res = (*inAction)(owner, arg0, arg1, arg2, arg3);
-		
-        if (trace)
-            IOTimeStampEndConstant(IODBG_CMDQ(IOCMDQ_ACTION),
-								   (uintptr_t) inAction, (uintptr_t) owner);
     }
 
     openGate();

@@ -43,7 +43,6 @@ enum {
 					| kIOMemoryAutoPrepare
 #endif
 					| kIOMemoryThreadSafe
-					| kIOMemoryClearEncrypt
 };
 
 #define _IOBUFFERMEMORYDESCRIPTOR_INTASKWITHOPTIONS_	1

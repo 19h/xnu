@@ -33,12 +33,37 @@ HISTORY
         Created.
 */
 #include <IOKit/IOInterruptEventSource.h>
-#include <IOKit/IOKitDebug.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOInterrupts.h>
 #include <IOKit/IOTimeStamp.h>
 #include <IOKit/IOWorkLoop.h>
+
+#if KDEBUG
+
+#define IOTimeTypeStampS(t)						\
+do {									\
+    IOTimeStampStart(IODBG_INTES(t),					\
+                     (uintptr_t) this, (uintptr_t) owner);	\
+} while(0)
+
+#define IOTimeTypeStampE(t)						\
+do {									\
+    IOTimeStampEnd(IODBG_INTES(t),					\
+                   (uintptr_t) this, (uintptr_t) owner);		\
+} while(0)
+
+#define IOTimeStampLatency()						\
+do {									\
+    IOTimeStampEnd(IODBG_INTES(IOINTES_LAT),				\
+                   (uintptr_t) this, (uintptr_t) owner);		\
+} while(0)
+
+#else /* !KDEBUG */
+#define IOTimeTypeStampS(t)
+#define IOTimeTypeStampE(t)
+#define IOTimeStampLatency()
+#endif /* KDEBUG */
 
 #define super IOEventSource
 
@@ -65,41 +90,34 @@ bool IOInterruptEventSource::init(OSObject *inOwner,
     provider = inProvider;
     producerCount = consumerCount = 0;
     autoDisable = explicitDisable = false;
-    intIndex = ~inIntIndex;
+    intIndex = -1;
 
     // Assumes inOwner holds a reference(retain) on the provider
     if (inProvider) {
-        res = (kIOReturnSuccess == registerInterruptHandler(inProvider, inIntIndex));
-	if (res)
-	    intIndex = inIntIndex;
+        int intType;
+
+        res = (kIOReturnSuccess
+                    == inProvider->getInterruptType(inIntIndex, &intType));
+        if (res) {
+            IOInterruptAction intHandler;
+
+            autoDisable = (intType == kIOInterruptTypeLevel);
+            if (autoDisable) {
+                intHandler = OSMemberFunctionCast(IOInterruptAction,
+		    this, &IOInterruptEventSource::disableInterruptOccurred);
+            }
+            else
+                intHandler = OSMemberFunctionCast(IOInterruptAction,
+		    this, &IOInterruptEventSource::normalInterruptOccurred);
+
+            res = (kIOReturnSuccess == inProvider->registerInterrupt
+                                        (inIntIndex, this, intHandler));
+            if (res)
+                intIndex = inIntIndex;
+        }
     }
 
     return res;
-}
-
-IOReturn IOInterruptEventSource::registerInterruptHandler(IOService *inProvider,
-				  int inIntIndex)
-{
-    IOReturn ret;
-    int intType;
-    IOInterruptAction intHandler;
-
-    ret = inProvider->getInterruptType(inIntIndex, &intType);
-    if (kIOReturnSuccess != ret)
-	return (ret);
-
-    autoDisable = (intType == kIOInterruptTypeLevel);
-    if (autoDisable) {
-	intHandler = OSMemberFunctionCast(IOInterruptAction,
-	    this, &IOInterruptEventSource::disableInterruptOccurred);
-    }
-    else
-	intHandler = OSMemberFunctionCast(IOInterruptAction,
-	    this, &IOInterruptEventSource::normalInterruptOccurred);
-
-    ret = provider->registerInterrupt(inIntIndex, this, intHandler);
-
-    return (ret);
 }
 
 IOInterruptEventSource *
@@ -120,7 +138,7 @@ IOInterruptEventSource::interruptEventSource(OSObject *inOwner,
 
 void IOInterruptEventSource::free()
 {
-    if (provider && intIndex >= 0)
+    if (provider && intIndex != -1)
         provider->unregisterInterrupt(intIndex);
 
     super::free();
@@ -128,7 +146,7 @@ void IOInterruptEventSource::free()
 
 void IOInterruptEventSource::enable()
 {
-    if (provider && intIndex >= 0) {
+    if (provider && intIndex != -1) {
         provider->enableInterrupt(intIndex);
         explicitDisable = false;
         enabled = true;
@@ -137,27 +155,10 @@ void IOInterruptEventSource::enable()
 
 void IOInterruptEventSource::disable()
 {
-    if (provider && intIndex >= 0) {
+    if (provider && intIndex != -1) {
         provider->disableInterrupt(intIndex);
         explicitDisable = true;
         enabled = false;
-    }
-}
-
-void IOInterruptEventSource::setWorkLoop(IOWorkLoop *inWorkLoop)
-{
-    super::setWorkLoop(inWorkLoop);
-
-    if (!provider)
-    	return;
-
-    if ( !inWorkLoop ) {
-	if (intIndex >= 0) {
-	    provider->unregisterInterrupt(intIndex);
-	    intIndex = ~intIndex;
-	}
-    } else if ((intIndex < 0) && (kIOReturnSuccess == registerInterruptHandler(provider, ~intIndex))) {
-	intIndex = ~intIndex;
     }
 }
 
@@ -181,38 +182,27 @@ bool IOInterruptEventSource::checkForWork()
     unsigned int cacheProdCount = producerCount;
     int numInts = cacheProdCount - consumerCount;
     IOInterruptEventAction intAction = (IOInterruptEventAction) action;
-	bool trace = (gIOKitTrace & kIOTraceIntEventSource) ? true : false;
 
-	if ( numInts > 0 )
-	{
-		if (trace)
-			IOTimeStampStartConstant(IODBG_INTES(IOINTES_ACTION),
-									 (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+    if (numInts > 0) {
 
-		// Call the handler
-        (*intAction)(owner, this,  numInts);
-		
-		if (trace)
-			IOTimeStampEndConstant(IODBG_INTES(IOINTES_ACTION),
-								   (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+        IOTimeStampLatency();
+        IOTimeTypeStampS(IOINTES_CLIENT);
+            IOTimeStampConstant(IODBG_INTES(IOINTES_ACTION),
+                                (uintptr_t) intAction, (uintptr_t) owner);
+            (*intAction)(owner, this,  numInts);
+        IOTimeTypeStampE(IOINTES_CLIENT);
 
         consumerCount = cacheProdCount;
         if (autoDisable && !explicitDisable)
             enable();
     }
-	
-	else if ( numInts < 0 )
-	{
-		if (trace)
-			IOTimeStampStartConstant(IODBG_INTES(IOINTES_ACTION),
-									 (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
-		
-		// Call the handler
-    	(*intAction)(owner, this, -numInts);
-		
-		if (trace)
-			IOTimeStampEndConstant(IODBG_INTES(IOINTES_ACTION),
-								   (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+    else if (numInts < 0) {
+        IOTimeStampLatency();
+        IOTimeTypeStampS(IOINTES_CLIENT);
+            IOTimeStampConstant(IODBG_INTES(IOINTES_ACTION),
+                                (uintptr_t) intAction, (uintptr_t) owner);
+             (*intAction)(owner, this, -numInts);
+        IOTimeTypeStampE(IOINTES_CLIENT);
     
         consumerCount = cacheProdCount;
         if (autoDisable && !explicitDisable)
@@ -225,35 +215,33 @@ bool IOInterruptEventSource::checkForWork()
 void IOInterruptEventSource::normalInterruptOccurred
     (void */*refcon*/, IOService */*prov*/, int /*source*/)
 {
-	bool trace = (gIOKitTrace & kIOTraceIntEventSource) ? true : false;
+IOTimeTypeStampS(IOINTES_INTCTXT);
+IOTimeStampLatency();
 
     producerCount++;
 
-	if (trace)
-	    IOTimeStampStartConstant(IODBG_INTES(IOINTES_SEMA), (uintptr_t) this, (uintptr_t) owner);
-	
+IOTimeTypeStampS(IOINTES_SEMA);
     signalWorkAvailable();
+IOTimeTypeStampE(IOINTES_SEMA);
 
-	if (trace)
-	    IOTimeStampEndConstant(IODBG_INTES(IOINTES_SEMA), (uintptr_t) this, (uintptr_t) owner);
+IOTimeTypeStampE(IOINTES_INTCTXT);
 }
 
 void IOInterruptEventSource::disableInterruptOccurred
     (void */*refcon*/, IOService *prov, int source)
 {
-	bool trace = (gIOKitTrace & kIOTraceIntEventSource) ? true : false;
+IOTimeTypeStampS(IOINTES_INTCTXT);
+IOTimeStampLatency();
 
     prov->disableInterrupt(source);	/* disable the interrupt */
 
     producerCount++;
 
-	if (trace)
-	    IOTimeStampStartConstant(IODBG_INTES(IOINTES_SEMA), (uintptr_t) this, (uintptr_t) owner);
-    
+IOTimeTypeStampS(IOINTES_SEMA);
     signalWorkAvailable();
+IOTimeTypeStampE(IOINTES_SEMA);
 
-	if (trace)
-	    IOTimeStampEndConstant(IODBG_INTES(IOINTES_SEMA), (uintptr_t) this, (uintptr_t) owner);
+IOTimeTypeStampE(IOINTES_INTCTXT);
 }
 
 void IOInterruptEventSource::interruptOccurred

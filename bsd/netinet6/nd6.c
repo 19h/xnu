@@ -550,8 +550,12 @@ skip1:
 	return 0;
 }
 
+/*
+ * ND6 timer routine to expire default route list and prefix list
+ */
 void
-nd6_drain(__unused void	*ignored_arg)
+nd6_timer(
+	__unused void	*ignored_arg)
 {
 	struct llinfo_nd6 *ln;
 	struct nd_defrouter *dr;
@@ -679,8 +683,7 @@ again:
 		case ND6_LLINFO_REACHABLE:
 			if (ln->ln_expire) {
 				ln->ln_state = ND6_LLINFO_STALE;
-				ln->ln_expire = rt_expiry(rt, timenow.tv_sec,
-				    nd6_gctimer);
+				ln->ln_expire = timenow.tv_sec + nd6_gctimer;
 			}
 			RT_UNLOCK(rt);
 			break;
@@ -718,8 +721,7 @@ again:
 				goto again;
 			}
 			ln->ln_state = ND6_LLINFO_STALE; /* XXX */
-			ln->ln_expire = rt_expiry(rt, timenow.tv_sec,
-			    nd6_gctimer);
+			ln->ln_expire = timenow.tv_sec + nd6_gctimer;
 			RT_UNLOCK(rt);
 			break;
 
@@ -897,15 +899,6 @@ again:
 			pr = pr->ndpr_next;
 	}
 	lck_mtx_unlock(nd6_mutex);
-}
-
-/*
- * ND6 timer routine to expire default route list and prefix list
- */
-void
-nd6_timer(__unused void	*ignored_arg)
-{
-	nd6_drain(NULL);
 	timeout(nd6_timer, (caddr_t)0, nd6_prune * hz);
 }
 
@@ -1193,11 +1186,10 @@ nd6_lookup(
 	 *      use rt->rt_ifa->ifa_ifp, which would specify the REAL
 	 *      interface.
 	 */
-	if (ifp == NULL || (ifp->if_type == IFT_PPP) ||
-	    (ifp->if_eflags & IFEF_NOAUTOIPV6LL) ||
-	    (rt->rt_flags & RTF_GATEWAY) || (rt->rt_flags & RTF_LLINFO) == 0 ||
+	if (((ifp && (ifp->if_type != IFT_PPP)) && ((ifp->if_eflags & IFEF_NOAUTOIPV6LL) == 0)) &&
+	    ((rt->rt_flags & RTF_GATEWAY) || (rt->rt_flags & RTF_LLINFO) == 0 ||
 	    rt->rt_gateway->sa_family != AF_LINK ||  rt->rt_llinfo == NULL ||
-	    (ifp && rt->rt_ifa->ifa_ifp != ifp)) {
+	    (ifp && rt->rt_ifa->ifa_ifp != ifp))) {
 		RT_REMREF_LOCKED(rt);
 		RT_UNLOCK(rt);
 		if (create) {
@@ -1444,8 +1436,8 @@ nd6_nud_hint(
 	ln->ln_state = ND6_LLINFO_REACHABLE;
 	if (ln->ln_expire) {
 		lck_rw_lock_shared(nd_if_rwlock);
-		ln->ln_expire = rt_expiry(rt, timenow.tv_sec,
-			nd_ifinfo[rt->rt_ifp->if_index].reachable);
+		ln->ln_expire = timenow.tv_sec +
+			nd_ifinfo[rt->rt_ifp->if_index].reachable;
 		lck_rw_done(nd_if_rwlock);
 	}
 done:
@@ -1688,14 +1680,6 @@ nd6_rtrequest(
 				SDL(gate)->sdl_alen = ifp->if_addrlen;
 			}
 			if (nd6_useloopback) {
-#if IFNET_ROUTE_REFCNT
-				/* Adjust route ref count for the interfaces */
-				if (rt->rt_if_ref_fn != NULL &&
-				    rt->rt_ifp != lo_ifp) {
-					rt->rt_if_ref_fn(lo_ifp, 1);
-					rt->rt_if_ref_fn(rt->rt_ifp, -1);
-				}
-#endif /* IFNET_ROUTE_REFCNT */
 				rt->rt_ifp = lo_ifp;	/* XXX */
 				/*
 				 * Make sure rt_ifa be equal to the ifaddr
@@ -2331,8 +2315,7 @@ fail:
 			 * we must set the timer now, although it is actually
 			 * meaningless.
 			 */
-			ln->ln_expire = rt_expiry(rt, timenow.tv_sec,
-			    nd6_gctimer);
+			ln->ln_expire = timenow.tv_sec + nd6_gctimer;
 			ln->ln_hold = NULL;
 
 			if (m != NULL) {
@@ -2733,7 +2716,7 @@ lookup:
 	if ((ifp->if_flags & IFF_POINTOPOINT) != 0 &&
 	    ln->ln_state < ND6_LLINFO_REACHABLE) {
 		ln->ln_state = ND6_LLINFO_STALE;
-		ln->ln_expire = rt_expiry(rt, timenow.tv_sec, nd6_gctimer);
+		ln->ln_expire = timenow.tv_sec + nd6_gctimer;
 	}
 
 	/*
@@ -2746,7 +2729,7 @@ lookup:
 	if (ln->ln_state == ND6_LLINFO_STALE) {
 		ln->ln_asked = 0;
 		ln->ln_state = ND6_LLINFO_DELAY;
-		ln->ln_expire = rt_expiry(rt, timenow.tv_sec, nd6_delay);
+		ln->ln_expire = timenow.tv_sec + nd6_delay;
 	}
 
 	/*

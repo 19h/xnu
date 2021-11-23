@@ -368,8 +368,7 @@ hfs_mount(struct mount *mp, vnode_t devvp, user_addr_t data, vfs_context_t conte
 				/*
 				 * Allow hot file clustering if conditions allow.
 				 */
-				if ((hfsmp->hfs_flags & HFS_METADATA_ZONE) &&
-				    ((hfsmp->hfs_mp->mnt_kern_flag & MNTK_SSD) == 0)) {
+				if (hfsmp->hfs_flags & HFS_METADATA_ZONE) {
 					(void) hfs_recording_init(hfsmp);
 				}
 				/* Force ACLs on HFS+ file systems. */
@@ -985,8 +984,7 @@ hfs_mountfs(struct vnode *devvp, struct mount *mp, struct hfs_mount_args *args,
 	daddr64_t mdb_offset;
 	int isvirtual = 0;
 	int isroot = 0;
-	u_int32_t device_features = 0;
-	
+
 	if (args == NULL) {
 		/* only hfs_mountroot passes us NULL as the 'args' argument */
 		isroot = 1;
@@ -1122,19 +1120,7 @@ hfs_mountfs(struct vnode *devvp, struct mount *mp, struct hfs_mount_args *args,
 	bzero(hfsmp, sizeof(struct hfsmount));
 	
 	hfs_chashinit_finish(hfsmp);
-	
-	/*
-	 * See if the disk supports unmap (trim).
-	 *
-	 * NOTE: vfs_init_io_attributes has not been called yet, so we can't use the io_flags field
-	 * returned by vfs_ioattr.  We need to call VNOP_IOCTL ourselves.
-	 */
-	if (VNOP_IOCTL(devvp, DKIOCGETFEATURES, (caddr_t)&device_features, 0, context) == 0) {
-		if (device_features & DK_FEATURE_UNMAP) {
-			hfsmp->hfs_flags |= HFS_UNMAP;
-		}
-	}
-	
+
 	/*
 	 *  Init the volume information structure
 	 */
@@ -1628,7 +1614,7 @@ error_exit:
 			vnode_rele(hfsmp->hfs_devvp);
 		}
 		hfs_delete_chash(hfsmp);
-		
+
 		FREE(hfsmp, M_HFSMNT);
 		vfs_setfsprivate(mp, NULL);
 	}
@@ -3485,11 +3471,10 @@ hfs_extendfs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 	u_int32_t  phys_sectorsize;
 	daddr64_t  prev_alt_sector;
 	daddr_t	   bitmapblks;
-	int  lockflags = 0;
+	int  lockflags;
 	int  error;
 	int64_t oldBitmapSize;
 	Boolean  usedExtendFileC = false;
-	int transaction_begun = 0;
 	
 	devvp = hfsmp->hfs_devvp;
 	vcb = HFSTOVCB(hfsmp);
@@ -3563,27 +3548,12 @@ hfs_extendfs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 	addblks = newblkcnt - vcb->totalBlocks;
 
 	printf("hfs_extendfs: growing %s by %d blocks\n", vcb->vcbVN, addblks);
-
-	HFS_MOUNT_LOCK(hfsmp, TRUE);
-	if (hfsmp->hfs_flags & HFS_RESIZE_IN_PROGRESS) {
-		HFS_MOUNT_UNLOCK(hfsmp, TRUE);
-		error = EALREADY;
-		goto out;
-	}
-	hfsmp->hfs_flags |= HFS_RESIZE_IN_PROGRESS;
-	HFS_MOUNT_UNLOCK(hfsmp, TRUE);
-
-	/* Invalidate the current free extent cache */
-	invalidate_free_extent_cache(hfsmp);
-	
 	/*
 	 * Enclose changes inside a transaction.
 	 */
 	if (hfs_start_transaction(hfsmp) != 0) {
-		error = EINVAL;
-		goto out;
+		return (EINVAL);
 	}
-	transaction_begun = 1;
 
 	/*
 	 * Note: we take the attributes lock in case we have an attribute data vnode
@@ -3776,10 +3746,9 @@ hfs_extendfs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 		}
 	}
 	
-	/* 
-	 * Update the metadata zone size based on current volume size
+	/*
+	 * TODO: Adjust the size of the metadata zone based on new volume size?
 	 */
-	hfs_metadatazone_init(hfsmp);
 	 
 	/*
 	 * Adjust the size of hfsmp->hfs_attrdata_vp
@@ -3813,16 +3782,9 @@ out:
 	   we should reset the allocLimit field. If it changed, it will
 	   get updated; if not, it will remain the same.
 	*/
-	HFS_MOUNT_LOCK(hfsmp, TRUE);	
-	hfsmp->hfs_flags &= ~HFS_RESIZE_IN_PROGRESS;
 	hfsmp->allocLimit = vcb->totalBlocks;
-	HFS_MOUNT_UNLOCK(hfsmp, TRUE);	
-	if (lockflags) {
-		hfs_systemfile_unlock(hfsmp, lockflags);
-	}
-	if (transaction_begun) {
-		hfs_end_transaction(hfsmp);
-	}
+	hfs_systemfile_unlock(hfsmp, lockflags);
+	hfs_end_transaction(hfsmp);
 
 	return (error);
 }
@@ -3889,9 +3851,6 @@ hfs_truncatefs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 		goto out;
 	}
 	
-	/* Invalidate the current free extent cache */
-	invalidate_free_extent_cache(hfsmp);
-	
 	/* Start with a clean journal. */
 	hfs_journal_flush(hfsmp);
 	
@@ -3915,25 +3874,12 @@ hfs_truncatefs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 		hfsmp->allocLimit = newblkcnt - 2;
 	else
 		hfsmp->allocLimit = newblkcnt - 1;
-	/* 
-	 * Update the volume free block count to reflect the total number 
-	 * of free blocks that will exist after a successful resize.
-	 * Relocation of extents will result in no net change in the total
-	 * free space on the disk.  Therefore the code that allocates 
-	 * space for new extent and deallocates the old extent explicitly 
-	 * prevents updating the volume free block count.  It will also 
-	 * prevent false disk full error when the number of blocks in 
-	 * an extent being relocated is more than the free blocks that 
-	 * will exist after the volume is resized.
+	/* Update the volume free block count to reflect the total number of 
+	 * free blocks that will exist after a successful resize.
 	 */
 	hfsmp->freeBlocks -= reclaimblks;
 	updateFreeBlocks = true;
 	HFS_MOUNT_UNLOCK(hfsmp, TRUE);	
-
-	/*
-	 * Update the metadata zone size, and, if required, disable it 
-	 */
-	hfs_metadatazone_init(hfsmp);
 
 	/*
 	 * Look for files that have blocks at or beyond the location of the
@@ -4030,6 +3976,10 @@ hfs_truncatefs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 		panic("hfs_truncatefs: unexpected error flushing volume header (%d)\n", error);
 	
 	/*
+	 * TODO: Adjust the size of the metadata zone based on new volume size?
+	 */
+	
+	/*
 	 * Adjust the size of hfsmp->hfs_attrdata_vp
 	 */
 	if (hfsmp->hfs_attrdata_vp) {
@@ -4058,10 +4008,6 @@ out:
 		hfsmp->nextAllocation = hfsmp->hfs_metazone_end + 1;
 	hfsmp->hfs_flags &= ~HFS_RESIZE_IN_PROGRESS;
 	HFS_MOUNT_UNLOCK(hfsmp, TRUE);	
-	/* On error, reset the metadata zone for original volume size */
-	if (error && (updateFreeBlocks == true)) {
-		hfs_metadatazone_init(hfsmp);
-	}
 	
 	if (lockflags) {
 		hfs_systemfile_unlock(hfsmp, lockflags);
@@ -4278,7 +4224,6 @@ hfs_reclaim_file(struct hfsmount *hfsmp, struct vnode *vp, u_long startblk, int 
 	struct BTreeIterator *iterator = NULL;
 	u_int8_t forktype;
 	u_int32_t fileID;
-	u_int32_t alloc_flags;
 		
 	/* If there is no vnode for this file, then there's nothing to do. */	
 	if (vp == NULL)
@@ -4372,32 +4317,25 @@ hfs_reclaim_file(struct hfsmount *hfsmp, struct vnode *vp, u_long startblk, int 
 		end_block = oldStartBlock + oldBlockCount;
 		/* Check if the file overlaps the target space */
 		if (end_block > startblk) {
-			alloc_flags = HFS_ALLOC_FORCECONTIG | HFS_ALLOC_SKIPFREEBLKS; 
-			if (is_sysfile) {
-				alloc_flags |= HFS_ALLOC_METAZONE;
-			}
-			error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, alloc_flags, &newStartBlock, &newBlockCount);
+			/* Allocate a new extent */
+			error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, true, (is_sysfile ? true : false), &newStartBlock, &newBlockCount);
 			if (error) {
-				if (!is_sysfile && ((error == dskFulErr) || (error == ENOSPC))) {
-					/* Try allocating again using the metadata zone */
-					alloc_flags |= HFS_ALLOC_METAZONE;
-					error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, alloc_flags, &newStartBlock, &newBlockCount);
+				printf("hfs_reclaim_file: BlockAllocate (error=%d) for fileID=%u %u:(%u,%u)\n", error, fileID, i, oldStartBlock, oldBlockCount);
+				goto fail;
+			}
+			if (newBlockCount != oldBlockCount) {
+				printf("hfs_reclaim_file: fileID=%u - newBlockCount=%u, oldBlockCount=%u", fileID, newBlockCount, oldBlockCount);
+				if (BlockDeallocate(hfsmp, newStartBlock, newBlockCount)) {
+					hfs_mark_volume_inconsistent(hfsmp);
 				}
-				if (error) {
-					printf("hfs_reclaim_file: BlockAllocate(metazone) (error=%d) for fileID=%u %u:(%u,%u)\n", error, fileID, i, oldStartBlock, oldBlockCount);
-					goto fail;
-				} else {
-					if (hfs_resize_debug) {
-						printf("hfs_reclaim_file: BlockAllocate(metazone) success for fileID=%u %u:(%u,%u)\n", fileID, i, newStartBlock, newBlockCount);
-					}
-				}
+				goto fail;
 			}
 
 			/* Copy data from old location to new location */
 			error = hfs_copy_extent(hfsmp, vp, oldStartBlock, newStartBlock, newBlockCount, context);
 			if (error) {
 				printf("hfs_reclaim_file: hfs_copy_extent error=%d for fileID=%u %u:(%u,%u) to %u:(%u,%u)\n", error, fileID, i, oldStartBlock, oldBlockCount, i, newStartBlock, newBlockCount);
-				if (BlockDeallocate(hfsmp, newStartBlock, newBlockCount, HFS_ALLOC_SKIPFREEBLKS)) {
+				if (BlockDeallocate(hfsmp, newStartBlock, newBlockCount)) {
 					hfs_mark_volume_inconsistent(hfsmp);
 				}
 				goto fail;
@@ -4407,7 +4345,7 @@ hfs_reclaim_file(struct hfsmount *hfsmp, struct vnode *vp, u_long startblk, int 
 			*blks_moved += newBlockCount;
 
 			/* Deallocate the old extent */
-			error = BlockDeallocate(hfsmp, oldStartBlock, oldBlockCount, HFS_ALLOC_SKIPFREEBLKS);
+			error = BlockDeallocate(hfsmp, oldStartBlock, oldBlockCount);
 			if (error) {
 				printf("hfs_reclaim_file: BlockDeallocate returned %d\n", error);
 				hfs_mark_volume_inconsistent(hfsmp);
@@ -4481,30 +4419,22 @@ hfs_reclaim_file(struct hfsmount *hfsmp, struct vnode *vp, u_long startblk, int 
 				oldBlockCount = record[i].blockCount;
 				end_block = oldStartBlock + oldBlockCount;
 				if (end_block > startblk) {
-					alloc_flags = HFS_ALLOC_FORCECONTIG | HFS_ALLOC_SKIPFREEBLKS; 
-					if (is_sysfile) {
-						alloc_flags |= HFS_ALLOC_METAZONE;
-					}
-					error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, alloc_flags, &newStartBlock, &newBlockCount);
+					error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, true, (is_sysfile ? true : false), &newStartBlock, &newBlockCount);
 					if (error) {
-						if (!is_sysfile && ((error == dskFulErr) || (error == ENOSPC))) {
-							/* Try allocating again using the metadata zone */
-							alloc_flags |= HFS_ALLOC_METAZONE; 
-							error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, alloc_flags, &newStartBlock, &newBlockCount);
-						} 
-						if (error) {
-							printf("hfs_reclaim_file: BlockAllocate(metazone) (error=%d) for fileID=%u %u:(%u,%u)\n", error, fileID, i, oldStartBlock, oldBlockCount);
-							goto fail;
-						} else {
-							if (hfs_resize_debug) {
-								printf("hfs_reclaim_file: BlockAllocate(metazone) success for fileID=%u %u:(%u,%u)\n", fileID, i, newStartBlock, newBlockCount);
-							}
+						printf("hfs_reclaim_file: BlockAllocate (error=%d) for fileID=%u %u:(%u,%u)\n", error, fileID, i, oldStartBlock, oldBlockCount);
+						goto fail;
+					}
+					if (newBlockCount != oldBlockCount) {
+						printf("hfs_reclaim_file: fileID=%u - newBlockCount=%u, oldBlockCount=%u", fileID, newBlockCount, oldBlockCount);
+						if (BlockDeallocate(hfsmp, newStartBlock, newBlockCount)) {
+							hfs_mark_volume_inconsistent(hfsmp);
 						}
+						goto fail;
 					}
 					error = hfs_copy_extent(hfsmp, vp, oldStartBlock, newStartBlock, newBlockCount, context);
 					if (error) {
 						printf("hfs_reclaim_file: hfs_copy_extent error=%d for fileID=%u (%u,%u) to (%u,%u)\n", error, fileID, oldStartBlock, oldBlockCount, newStartBlock, newBlockCount);
-						if (BlockDeallocate(hfsmp, newStartBlock, newBlockCount, HFS_ALLOC_SKIPFREEBLKS)) {
+						if (BlockDeallocate(hfsmp, newStartBlock, newBlockCount)) {
 							hfs_mark_volume_inconsistent(hfsmp);
 						}
 						goto fail;
@@ -4527,7 +4457,7 @@ hfs_reclaim_file(struct hfsmount *hfsmp, struct vnode *vp, u_long startblk, int 
 						hfs_mark_volume_inconsistent(hfsmp);
 						goto fail;
 					}
-					error = BlockDeallocate(hfsmp, oldStartBlock, oldBlockCount, HFS_ALLOC_SKIPFREEBLKS);
+					error = BlockDeallocate(hfsmp, oldStartBlock, oldBlockCount);
 					if (error) {
 						printf("hfs_reclaim_file: BlockDeallocate returned %d\n", error);
 						hfs_mark_volume_inconsistent(hfsmp);
@@ -4652,9 +4582,7 @@ hfs_reclaim_journal_file(struct hfsmount *hfsmp, vfs_context_t context)
 	oldBlockCount = hfsmp->jnl_size / hfsmp->blockSize;
 	
 	/* TODO: Allow the journal to change size based on the new volume size. */
-	error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, 
-			HFS_ALLOC_METAZONE | HFS_ALLOC_FORCECONTIG | HFS_ALLOC_SKIPFREEBLKS, 
-			 &newStartBlock, &newBlockCount);
+	error = BlockAllocate(hfsmp, 1, oldBlockCount, oldBlockCount, true, true, &newStartBlock, &newBlockCount);
 	if (error) {
 		printf("hfs_reclaim_journal_file: BlockAllocate returned %d\n", error);
 		goto fail;
@@ -4664,7 +4592,7 @@ hfs_reclaim_journal_file(struct hfsmount *hfsmp, vfs_context_t context)
 		goto free_fail;
 	}
 	
-	error = BlockDeallocate(hfsmp, hfsmp->jnl_start, oldBlockCount, HFS_ALLOC_SKIPFREEBLKS);
+	error = BlockDeallocate(hfsmp, hfsmp->jnl_start, oldBlockCount);
 	if (error) {
 		printf("hfs_reclaim_journal_file: BlockDeallocate returned %d\n", error);
 		goto free_fail;
@@ -4714,7 +4642,7 @@ hfs_reclaim_journal_file(struct hfsmount *hfsmp, vfs_context_t context)
 	return error;
 
 free_fail:
-	(void) BlockDeallocate(hfsmp, newStartBlock, newBlockCount, HFS_ALLOC_SKIPFREEBLKS);
+	(void) BlockDeallocate(hfsmp, newStartBlock, newBlockCount);
 fail:
 	hfs_systemfile_unlock(hfsmp, lockflags);
 	(void) hfs_end_transaction(hfsmp);
@@ -4750,9 +4678,7 @@ hfs_reclaim_journal_info_block(struct hfsmount *hfsmp, vfs_context_t context)
 	}
 	lockflags = hfs_systemfile_lock(hfsmp, SFL_CATALOG | SFL_BITMAP, HFS_EXCLUSIVE_LOCK);
 	
-	error = BlockAllocate(hfsmp, 1, 1, 1, 
-			HFS_ALLOC_METAZONE | HFS_ALLOC_FORCECONTIG | HFS_ALLOC_SKIPFREEBLKS, 
-			&newBlock, &blockCount);
+	error = BlockAllocate(hfsmp, 1, 1, 1, true, true, &newBlock, &blockCount);
 	if (error) {
 		printf("hfs_reclaim_journal_info_block: BlockAllocate returned %d\n", error);
 		goto fail;
@@ -4761,7 +4687,7 @@ hfs_reclaim_journal_info_block(struct hfsmount *hfsmp, vfs_context_t context)
 		printf("hfs_reclaim_journal_info_block: blockCount != 1 (%u)\n", blockCount);
 		goto free_fail;
 	}
-	error = BlockDeallocate(hfsmp, hfsmp->vcbJinfoBlock, 1, HFS_ALLOC_SKIPFREEBLKS);
+	error = BlockDeallocate(hfsmp, hfsmp->vcbJinfoBlock, 1);
 	if (error) {
 		printf("hfs_reclaim_journal_info_block: BlockDeallocate returned %d\n", error);
 		goto free_fail;
@@ -4836,7 +4762,7 @@ hfs_reclaim_journal_info_block(struct hfsmount *hfsmp, vfs_context_t context)
 	return error;
 
 free_fail:
-	(void) BlockDeallocate(hfsmp, newBlock, blockCount, HFS_ALLOC_SKIPFREEBLKS);
+	(void) BlockDeallocate(hfsmp, newBlock, blockCount);
 fail:
 	hfs_systemfile_unlock(hfsmp, lockflags);
 	(void) hfs_end_transaction(hfsmp);

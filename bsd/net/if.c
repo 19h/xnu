@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -132,6 +132,7 @@ void if_rtproto_del(struct ifnet *ifp, int protocol);
 static int if_rtmtu(struct radix_node *, void *);
 static void if_rtmtu_update(struct ifnet *);
 
+static struct	if_clone *if_clone_lookup(const char *, int *);
 #if IF_CLONE_LIST
 static int	if_clone_list(int count, int * total, user_addr_t dst);
 #endif /* IF_CLONE_LIST */
@@ -156,6 +157,7 @@ static struct ifaddr *ifa_ifwithnet_common(const struct sockaddr *,
 extern void	nd6_setmtu(struct ifnet *);
 #endif
 
+#define M_CLONE		M_IFADDR
 
 /*
  * Network interface utility routines.
@@ -285,13 +287,12 @@ if_next_index(void)
  * Create a clone network interface.
  */
 static int
-if_clone_create(char *name, int len, void *params)
+if_clone_create(char *name, int len)
 {
 	struct if_clone *ifc;
 	char *dp;
-	int wildcard;
-	u_int32_t bytoff, bitoff;
-	u_int32_t unit;
+	int wildcard, bytoff, bitoff;
+	int unit;
 	int err;
 
 	ifc = if_clone_lookup(name, &unit);
@@ -302,7 +303,7 @@ if_clone_create(char *name, int len, void *params)
 		return (EEXIST);
 
 	bytoff = bitoff = 0;
-	wildcard = (unit == UINT32_MAX);
+	wildcard = (unit < 0);
 	/*
 	 * Find a free unit if none was given.
 	 */
@@ -320,7 +321,7 @@ if_clone_create(char *name, int len, void *params)
 	if (unit > ifc->ifc_maxunit)
 		return (ENXIO);
 
-	err = (*ifc->ifc_create)(ifc, unit, params);
+	err = (*ifc->ifc_create)(ifc, unit);
 	if (err != 0)
 		return (err);
 
@@ -363,7 +364,7 @@ if_clone_destroy(const char *name)
 	struct if_clone *ifc;
 	struct ifnet *ifp;
 	int bytoff, bitoff;
-	u_int32_t unit;
+	int unit;
 
 	ifc = if_clone_lookup(name, &unit);
 	if (ifc == NULL)
@@ -396,8 +397,8 @@ if_clone_destroy(const char *name)
  * Look up a network interface cloner.
  */
 
-__private_extern__ struct if_clone *
-if_clone_lookup(const char *name, u_int32_t *unitp)
+static struct if_clone *
+if_clone_lookup(const char *name, int *unitp)
 {
 	struct if_clone *ifc;
 	const char *cp;
@@ -418,7 +419,7 @@ if_clone_lookup(const char *name, u_int32_t *unitp)
 
  found_name:
 	if (*cp == '\0') {
-		i = 0xffff;
+		i = -1;
 	} else {
 		for (i = 0; *cp != '\0'; cp++) {
 			if (*cp < '0' || *cp > '9') {
@@ -443,7 +444,7 @@ if_clone_attach(struct if_clone *ifc)
 	int bytoff, bitoff;
 	int err;
 	int len, maxclone;
-	u_int32_t unit;
+	int unit;
 
 	KASSERT(ifc->ifc_minifs - 1 <= ifc->ifc_maxunit,
 	    ("%s: %s requested more units then allowed (%d > %d)",
@@ -466,7 +467,7 @@ if_clone_attach(struct if_clone *ifc)
 	if_cloners_count++;
 
 	for (unit = 0; unit < ifc->ifc_minifs; unit++) {
-		err = (*ifc->ifc_create)(ifc, unit, NULL);
+		err = (*ifc->ifc_create)(ifc, unit);
 		KASSERT(err == 0,
 		    ("%s: failed to create required interface %s%d",
 		    __func__, ifc->ifc_name, unit));
@@ -1181,17 +1182,13 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	ifr = (struct ifreq *)data;
 	switch (cmd) {
 	case SIOCIFCREATE:
-	case SIOCIFCREATE2:
-                error = proc_suser(p);
-                if (error)
-                        return (error);
-                return if_clone_create(ifr->ifr_name, sizeof(ifr->ifr_name),
-			 cmd == SIOCIFCREATE2 ? ifr->ifr_data : NULL);
 	case SIOCIFDESTROY:
 		error = proc_suser(p);
 		if (error)
 			return (error);
-		return if_clone_destroy(ifr->ifr_name);
+		return ((cmd == SIOCIFCREATE) ?
+			if_clone_create(ifr->ifr_name, sizeof(ifr->ifr_name)) :
+			if_clone_destroy(ifr->ifr_name));
 #if IF_CLONE_LIST
 	case SIOCIFGCLONERS32: {
 		struct if_clonereq32 *ifcr = (struct if_clonereq32 *)data;
@@ -1462,17 +1459,7 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 		ifr->ifr_wake_flags = ifnet_get_wake_flags(ifp);
 		ifnet_lock_done(ifp);
 		break;
-
-	case SIOCGIFGETRTREFCNT:
-#if IFNET_ROUTE_REFCNT
-		ifnet_lock_shared(ifp);
-		ifr->ifr_route_refcnt = ifp->if_route_refcnt;
-		ifnet_lock_done(ifp);
-		break;
-#else
-		return (EOPNOTSUPP);
-#endif /* IFNET_ROUTE_REFCNT */
-
+		
 	default:
 		oif_flags = ifp->if_flags;
 		if (so->so_proto == 0)

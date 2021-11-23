@@ -668,11 +668,6 @@ Retry:
 		if (pmap->stats.resident_count > pmap->stats.resident_max) {
 			pmap->stats.resident_max = pmap->stats.resident_count;
 		}
-	} else if (last_managed_page == 0) {
-		/* Account for early mappings created before "managed pages"
-		 * are determined. Consider consulting the available DRAM map.
-		 */
-		OSAddAtomic(+1,  &pmap->stats.resident_count);
 	}
 	/*
 	 * Step 3) Enter the mapping.
@@ -1117,8 +1112,6 @@ pmap_page_protect(
 				 * Fix up head later.
 				 */
 				pv_h->pmap = PMAP_NULL;
-
-				pmap_phys_attributes[pai] &= ~PHYS_NOENCRYPT;
 			} else {
 				/*
 				 * Delete this entry.
@@ -1281,69 +1274,5 @@ mapping_adjust(void)
 		PV_HASHED_FREE_LIST(pvh_eh, pvh_et, pv_cnt);
 	}
 	mappingrecurse = 0;
-}
-
-
-boolean_t
-pmap_is_noencrypt(ppnum_t pn)
-{
-	int		pai;
-
-	pai = ppn_to_pai(pn);
-
-	if (!IS_MANAGED_PAGE(pai))
-		return (TRUE);
-
-	if (pmap_phys_attributes[pai] & PHYS_NOENCRYPT)
-		return (TRUE);
-
-	return (FALSE);
-}
-
-
-void
-pmap_set_noencrypt(ppnum_t pn)
-{
-	int		pai;
-
-	pai = ppn_to_pai(pn);
-
-	if (IS_MANAGED_PAGE(pai)) {
-		LOCK_PVH(pai);
-
-		pmap_phys_attributes[pai] |= PHYS_NOENCRYPT;
-
-		UNLOCK_PVH(pai);
-	}
-}
-
-
-void
-pmap_clear_noencrypt(ppnum_t pn)
-{
-	int		pai;
-
-	pai = ppn_to_pai(pn);
-
-	if (IS_MANAGED_PAGE(pai)) {
-		LOCK_PVH(pai);
-
-		pmap_phys_attributes[pai] &= ~PHYS_NOENCRYPT;
-
-		UNLOCK_PVH(pai);
-	}
-}
-
-void x86_filter_TLB_coherency_interrupts(boolean_t dofilter) {
-	assert(ml_get_interrupts_enabled() == 0 || get_preemption_level() != 0);
-
-	if (dofilter) {
-		CPU_CR3_MARK_INACTIVE();
-	} else {
-		CPU_CR3_MARK_ACTIVE();
-		__asm__ volatile("mfence");
-		if (current_cpu_datap()->cpu_tlb_invalid)
-			process_pmap_updates();
-	}
 }
 

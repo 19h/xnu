@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -398,8 +398,7 @@ in6_clsroute(struct radix_node *rn, __unused struct radix_node_head *head)
 
 		getmicrotime(&timenow);
 		rt->rt_flags |= RTPRF_OURS;
-		rt->rt_rmx.rmx_expire =
-		    rt_expiry(rt, timenow.tv_sec, rtq_reallyold);
+		rt->rt_rmx.rmx_expire = timenow.tv_sec + rtq_reallyold;
 	}
 }
 
@@ -460,11 +459,11 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 				ap->killed++;
 			}
 		} else {
-			if (ap->updating &&
-			    (unsigned)(rt->rt_rmx.rmx_expire - timenow.tv_sec) >
-			    rt_expiry(rt, 0, rtq_reallyold)) {
-				rt->rt_rmx.rmx_expire = rt_expiry(rt,
-				    timenow.tv_sec, rtq_reallyold);
+			if (ap->updating
+			   && (rt->rt_rmx.rmx_expire - timenow.tv_sec
+			       > rtq_reallyold)) {
+				rt->rt_rmx.rmx_expire = timenow.tv_sec
+					+ rtq_reallyold;
 			}
 			ap->nextstop = lmin(ap->nextstop,
 					    rt->rt_rmx.rmx_expire);
@@ -596,20 +595,23 @@ in6_mtutimo(void *rock)
 	timeout(in6_mtutimo, rock, tvtohz(&atv));
 }
 
+#if 0
 void
 in6_rtqdrain()
 {
 	struct radix_node_head *rnh = rt_tables[AF_INET6];
 	struct rtqk_arg arg;
+	int s;
 	arg.found = arg.killed = 0;
 	arg.rnh = rnh;
 	arg.nextstop = 0;
 	arg.draining = 1;
 	arg.updating = 0;
-	lck_mtx_lock(rnh_lock);
+	s = splnet();
 	rnh->rnh_walktree(rnh, in6_rtqkill, &arg);
-	lck_mtx_unlock(rnh_lock);
+	splx(s);
 }
+#endif
 
 /*
  * Initialize our routing tree.

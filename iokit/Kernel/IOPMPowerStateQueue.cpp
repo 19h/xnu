@@ -62,7 +62,7 @@ bool IOPMPowerStateQueue::init( OSObject * inOwner, Action inAction )
 bool IOPMPowerStateQueue::submitPowerEvent(
      uint32_t eventType,
      void *   arg0,
-     uint64_t arg1 )
+     void *   arg1 )
 {
     PowerEventEntry * entry;
 
@@ -71,8 +71,8 @@ bool IOPMPowerStateQueue::submitPowerEvent(
         return false;
 
     entry->eventType = eventType;
-    entry->arg0 = arg0;
-    entry->arg1 = arg1;
+    entry->args[0]   = arg0;
+    entry->args[1]   = arg1;
 
     IOLockLock(queueLock);
     queue_enter(&queueHead, entry, PowerEventEntry *, chain);
@@ -93,7 +93,7 @@ bool IOPMPowerStateQueue::checkForWork( void )
 		queue_remove_first(&queueHead, entry, PowerEventEntry *, chain);		
 		IOLockUnlock(queueLock);
 
-        (*queueAction)(owner, entry->eventType, entry->arg0, entry->arg1);        
+        (*queueAction)(owner, entry->eventType, entry->args[0], entry->args[1]);        
         IODelete(entry, PowerEventEntry, 1);
 
         IOLockLock(queueLock);

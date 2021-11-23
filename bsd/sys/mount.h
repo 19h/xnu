@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -287,7 +287,6 @@ struct vfs_attr {
 #define	MNT_NODEV	0x00000010	/* don't interpret special files */
 #define	MNT_UNION	0x00000020	/* union with underlying filesystem */
 #define	MNT_ASYNC	0x00000040	/* file system written asynchronously */
-#define	MNT_CPROTECT	0x00000080	/* file system supports content protection */
 
 /*
  * NFS export related mount flags.
@@ -334,7 +333,7 @@ struct vfs_attr {
 			MNT_LOCAL	| MNT_QUOTA | \
 			MNT_ROOTFS	| MNT_DOVOLFS	| MNT_DONTBROWSE | \
 			MNT_IGNORE_OWNERSHIP | MNT_AUTOMOUNTED | MNT_JOURNALED | \
-			MNT_NOUSERXATTR | MNT_DEFWRITE	| MNT_MULTILABEL | MNT_NOATIME | MNT_CPROTECT )
+			MNT_NOUSERXATTR | MNT_DEFWRITE	| MNT_MULTILABEL | MNT_NOATIME)
 /*
  * External filesystem command modifier flags.
  * Unmount can use the MNT_FORCE flag.
@@ -480,8 +479,7 @@ struct vfsioattr {
 	void *		io_reserved[2];		/* extended attribute information */
 };
 
-#define VFS_IOATTR_FLAGS_FUA		0x01	/* Write-through cache supported */
-#define VFS_IOATTR_FLAGS_UNMAP		0x02	/* Unmap (trim) supported */
+#define VFS_IOATTR_FLAGS_FUA	0x01	/* Write-through cache supported */
 
 /*
  * Filesystem Registration information
@@ -1171,7 +1169,6 @@ mount_t	vfs_getvfs_by_mntonname(char *);
 void    vfs_markdependency(mount_t);
 vnode_t vfs_vnodecovered(mount_t mp); /* Returns vnode with an iocount that must be released with vnode_put() */
 void * vfs_mntlabel(mount_t mp); /* Safe to cast to "struct label*"; returns "void*" to limit dependence of mount.h on security headers.  */
-void	vfs_setunmountpreflight(mount_t mp);
 #endif	/* KERNEL_PRIVATE */
 __END_DECLS
 

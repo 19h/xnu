@@ -173,13 +173,6 @@ Entry(get64_cr3)
 	EMARF
 	ret
 
-Entry(cpuid64)
-	ENTER_64BIT_MODE()
-	cpuid
-	ENTER_COMPAT_MODE()
-	ret
-
-
 /* FXSAVE and FXRSTOR operate in a mode dependent fashion, hence these variants.
  * Must be called with interrupts disabled.
  */
@@ -187,29 +180,20 @@ Entry(cpuid64)
 Entry(fxsave64)
 	movl		S_ARG0,%eax
 	ENTER_64BIT_MODE()
-	fxsave		(%eax)
+	fxsave		0(%eax)
 	ENTER_COMPAT_MODE()
 	ret
 
 Entry(fxrstor64)
 	movl		S_ARG0,%eax
 	ENTER_64BIT_MODE()
-	fxrstor		(%rax)
+	fxrstor		0(%rax)
 	ENTER_COMPAT_MODE()
 	ret
 
-Entry(xsave64o)
+Entry(cpuid64)
 	ENTER_64BIT_MODE()
-	.short	0xAE0F
-	/* MOD 0x4, ECX, 0x1 */
-	.byte	0x21
+	cpuid
 	ENTER_COMPAT_MODE()
 	ret
 
-Entry(xrstor64o)
-	ENTER_64BIT_MODE()
-	.short	0xAE0F
-	/* MOD 0x5, ECX 0x1 */
-	.byte	0x29
-	ENTER_COMPAT_MODE()
-	ret

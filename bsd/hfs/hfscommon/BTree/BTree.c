@@ -1583,6 +1583,7 @@ BTUpdateRecord(FCB *filePtr, BTreeIterator *iterator,
 	u_int16_t				index;
 	Boolean					validHint;
 
+
 	////////////////////////// Priliminary Checks ///////////////////////////////
 
 	nodeRec.buffer = nil;					// so we can call ReleaseNode
@@ -1666,9 +1667,9 @@ Success:
 	////////////////////////////// Error Exit ///////////////////////////////////
 
 ErrorExit:
-	
+
 	(void) ReleaseNode (btreePtr, &nodeRec);
-	
+
 	iterator->hint.writeCount 	= 0;
 	iterator->hint.nodeNum		= 0;
 	iterator->hint.index		= 0;

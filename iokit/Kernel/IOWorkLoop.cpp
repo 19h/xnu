@@ -25,6 +25,13 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+Copyright (c) 1998 Apple Computer, Inc.  All rights reserved.
+
+HISTORY
+    1998-7-13	Godfrey van der Linden(gvdl)
+        Created.
+*/
 
 #include <pexpert/pexpert.h>
 #include <IOKit/IOWorkLoop.h>
@@ -32,7 +39,6 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOTimeStamp.h>
-#include <IOKit/IOKitDebug.h>
 #include <libkern/OSDebug.h>
 
 #define super OSObject
@@ -294,16 +300,11 @@ do {									\
 /* virtual */ bool IOWorkLoop::runEventSources()
 {
     bool res = false;
-    bool traceWL = (gIOKitTrace & kIOTraceWorkLoops) ? true : false;
-    bool traceES = (gIOKitTrace & kIOTraceEventSources) ? true : false;
-    
     closeGate();
     if (ISSETP(&fFlags, kLoopTerminate))
 	goto abort;
 
-    if (traceWL)
-    	IOTimeStampStartConstant(IODBG_WORKLOOP(IOWL_WORK), (uintptr_t) this);
-	
+    IOTimeWorkS();
     bool more;
     do {
 	CLRP(&fFlags, kLoopRestart);
@@ -313,13 +314,9 @@ do {									\
 	IOSimpleLockUnlockEnableInterrupt(workToDoLock, is);
 	for (IOEventSource *evnt = eventChain; evnt; evnt = evnt->getNext()) {
 
-		if (traceES)
-			IOTimeStampStartConstant(IODBG_WORKLOOP(IOWL_CLIENT), (uintptr_t) this, (uintptr_t) evnt);
-			
+	    IOTimeClientS();
 	    more |= evnt->checkForWork();
-			
-		if (traceES)
-			IOTimeStampEndConstant(IODBG_WORKLOOP(IOWL_CLIENT), (uintptr_t) this, (uintptr_t) evnt);
+	    IOTimeClientE();
 
 	    if (ISSETP(&fFlags, kLoopTerminate))
 		goto abort;
@@ -331,9 +328,7 @@ do {									\
     } while (more);
 
     res = true;
-	
-    if (traceWL)
-    	IOTimeStampEndConstant(IODBG_WORKLOOP(IOWL_WORK), (uintptr_t) this);
+    IOTimeWorkE();
 
 abort:
     openGate();

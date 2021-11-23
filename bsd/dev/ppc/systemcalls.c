@@ -221,8 +221,7 @@ unsafe:
 				regs->save_r4 = ((u_int)uthread->uu_rval[1]);
 				break;
 			case _SYSCALL_RET_OFF_T:
-			case _SYSCALL_RET_UINT64_T:
-				/* return 64 bits split across two registers for 32 bit */
+				/* off_t returns 64 bits split across two registers for 32 bit */
 				/* process and in one register for 64 bit process */
 				if (IS_64BIT_PROCESS(proc)) {
 					u_int64_t 	*retp = (u_int64_t *)&uthread->uu_rval[0];
@@ -337,8 +336,7 @@ unix_syscall_return(int error)
 				regs->save_r4 = ((u_int)uthread->uu_rval[1]);
 				break;
 			case _SYSCALL_RET_OFF_T:
-			case _SYSCALL_RET_UINT64_T:
-				/* return 64 bits split across two registers for 32 bit */
+				/* off_t returns 64 bits split across two registers for 32 bit */
 				/* process and in one register for 64 bit process */
 				if (IS_64BIT_PROCESS(proc)) {
 					u_int64_t 	*retp = (u_int64_t *)&uthread->uu_rval[0];

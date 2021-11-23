@@ -266,7 +266,6 @@ MACRO_END
 #define lock_try_zone(zone)	lck_mtx_try_lock_spin(&zone->lock)
 
 kern_return_t		zget_space(
-	                        zone_t	zone,
 				vm_offset_t size,
 				vm_offset_t *result);
 
@@ -474,7 +473,7 @@ zinit(
 	zone_t		z;
 
 	if (zone_zone == ZONE_NULL) {
-		if (zget_space(NULL, sizeof(struct zone), (vm_offset_t *)&z)
+		if (zget_space(sizeof(struct zone), (vm_offset_t *)&z)
 		    != KERN_SUCCESS)
 			return(ZONE_NULL);
 	} else
@@ -545,7 +544,6 @@ use_this_allocation:
 	z->expandable  = TRUE;
 	z->waiting = FALSE;
 	z->async_pending = FALSE;
-	z->noencrypt = FALSE;
 
 #if	ZONE_DEBUG
 	z->active_zones.next = z->active_zones.prev = NULL;	
@@ -641,7 +639,6 @@ zcram(
 
 kern_return_t
 zget_space(
-	zone_t	zone,
 	vm_offset_t size,
 	vm_offset_t *result)
 {
@@ -658,8 +655,6 @@ zget_space(
 
 		if (new_space == 0) {
 			kern_return_t retval;
-			int	zflags = KMA_KOBJECT|KMA_NOPAGEWAIT;
-
 			/*
 			 *	Memory cannot be wired down while holding
 			 *	any locks that the pageout daemon might
@@ -675,10 +670,8 @@ zget_space(
 
 			simple_unlock(&zget_space_lock);
 
-			if (zone == NULL || zone->noencrypt)
-				zflags |= KMA_NOENCRYPT;
-
-			retval = kernel_memory_allocate(zone_map, &new_space, space_to_add, 0, zflags);
+			retval = kernel_memory_allocate(zone_map, &new_space,
+				space_to_add, 0, KMA_KOBJECT|KMA_NOPAGEWAIT);
 			if (retval != KERN_SUCCESS)
 				return(retval);
 #if	ZONE_ALIAS_ADDR
@@ -834,10 +827,8 @@ zone_bootstrap(void)
 	zone_zone = zinit(sizeof(struct zone), 128 * sizeof(struct zone),
 			  sizeof(struct zone), "zones");
 	zone_change(zone_zone, Z_COLLECT, FALSE);
-	zone_change(zone_zone, Z_NOENCRYPT, TRUE);
-
 	zone_zone_size = zalloc_end_of_space - zalloc_next_space;
-	zget_space(NULL, zone_zone_size, &zone_zone_space);
+	zget_space(zone_zone_size, &zone_zone_space);
 	zcram(zone_zone, (void *)zone_zone_space, zone_zone_size);
 }
 
@@ -957,7 +948,6 @@ zalloc_canblock(
 				int retry = 0;
 
 				for (;;) {
-					int	zflags = KMA_KOBJECT|KMA_NOPAGEWAIT;
 
 				        if (vm_pool_low() || retry >= 1)
 					        alloc_size = 
@@ -965,10 +955,9 @@ zalloc_canblock(
 					else
 					        alloc_size = zone->alloc_size;
 
-					if (zone->noencrypt)
-						zflags |= KMA_NOENCRYPT;
-
-					retval = kernel_memory_allocate(zone_map, &space, alloc_size, 0, zflags);
+					retval = kernel_memory_allocate(zone_map,
+									&space, alloc_size, 0,
+									KMA_KOBJECT|KMA_NOPAGEWAIT);
 					if (retval == KERN_SUCCESS) {
 #if	ZONE_ALIAS_ADDR
 						if (alloc_size == PAGE_SIZE)
@@ -1011,7 +1000,7 @@ zalloc_canblock(
 				}
 			} else {
 				vm_offset_t space;
-				retval = zget_space(zone, zone->elem_size, &space);
+				retval = zget_space(zone->elem_size, &space);
 
 				lock_zone(zone);
 				zone->doing_alloc = FALSE; 
@@ -1367,9 +1356,6 @@ zone_change(
 	assert( value == TRUE || value == FALSE );
 
 	switch(item){
-	        case Z_NOENCRYPT:
-			zone->noencrypt = value;
-			break;
 		case Z_EXHAUST:
 			zone->exhaustible = value;
 			break;

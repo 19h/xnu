@@ -274,6 +274,13 @@ char	*pmap_phys_attributes;
 unsigned int	last_managed_page = 0;
 
 /*
+ *	Physical page attributes.  Copy bits from PTE definition.
+ */
+#define	PHYS_MODIFIED	INTEL_PTE_MOD	/* page modified */
+#define	PHYS_REFERENCED	INTEL_PTE_REF	/* page referenced */
+#define PHYS_MANAGED	INTEL_PTE_VALID /* page is managed */
+
+/*
  *	Amount of virtual memory mapped by one
  *	page-directory entry.
  */
@@ -387,8 +394,6 @@ decl_simple_lock_data(,pmap_cache_lock)
 extern char end;
 
 static int nkpt;
-
-extern 	long	NMIPI_acks;
 
 pt_entry_t     *DMAP1, *DMAP2;
 caddr_t         DADDR1;
@@ -672,7 +677,13 @@ pmap_cpu_init(void)
 {
 	/*
 	 * Here early in the life of a processor (from cpu_mode_init()).
+	 * If we're not in 64-bit mode, enable the global TLB feature.
+	 * Note: regardless of mode we continue to set the global attribute
+	 * bit in ptes for all (32-bit) global pages such as the commpage.
 	 */
+	if (!cpu_64bit) {
+		set_cr4(get_cr4() | CR4_PGE);
+	}
 
 	/*
 	 * Initialize the per-cpu, TLB-related fields.
@@ -1026,11 +1037,11 @@ pmap_virtual_space(
 void
 pmap_init(void)
 {
-	long		npages;
-	vm_map_offset_t	vaddr;
-	vm_offset_t	addr;
-	vm_size_t	s, vsize;
-	ppnum_t 	ppn;
+	register long		npages;
+	vm_offset_t		addr;
+	register vm_size_t	s;
+	vm_map_offset_t		vaddr;
+	ppnum_t ppn;
 
 	/*
 	 *	Allocate memory for the pv_head_table and its lock bits,
@@ -1056,9 +1067,6 @@ pmap_init(void)
 		panic("pmap_init");
 
 	memset((char *)addr, 0, s);
-
-	vaddr = addr;
-	vsize = s;
 
 #if PV_DEBUG
 	if (0 == npvhash) panic("npvhash not initialized");
@@ -1097,23 +1105,10 @@ pmap_init(void)
 
 						if (pn > last_managed_page)
 						        last_managed_page = pn;
-
-						if (pn < lowest_lo)
-							pmap_phys_attributes[pn] |= PHYS_NOENCRYPT;
-						else if (pn >= lowest_hi && pn <= highest_hi)
-							pmap_phys_attributes[pn] |= PHYS_NOENCRYPT;
 					}
 				}
 			}
 		}
-	}
-	while (vsize) {
-		ppn = pmap_find_phys(kernel_pmap, vaddr);
-
-		pmap_phys_attributes[ppn] |= PHYS_NOENCRYPT;
-
-		vaddr += PAGE_SIZE;
-		vsize -= PAGE_SIZE;
 	}
 
 	/*
@@ -1122,15 +1117,10 @@ pmap_init(void)
 	 */
 	s = (vm_size_t) sizeof(struct pmap);
 	pmap_zone = zinit(s, 400*s, 4096, "pmap"); /* XXX */
-	zone_change(pmap_zone, Z_NOENCRYPT, TRUE);
-
 	s = (vm_size_t) sizeof(struct pv_hashed_entry);
 	pv_hashed_list_zone = zinit(s, 10000*s, 4096, "pv_list"); /* XXX */
-	zone_change(pv_hashed_list_zone, Z_NOENCRYPT, TRUE);
-
 	s = 63;
 	pdpt_zone = zinit(s, 400*s, 4096, "pdpt"); /* XXX */
-	zone_change(pdpt_zone, Z_NOENCRYPT, TRUE);
 
 	kptobj = &kptobj_object_store;
 	_vm_object_allocate((vm_object_size_t)(NPGPTD*NPTDPG), kptobj);
@@ -1855,7 +1845,6 @@ pmap_expand_pml4(
 		OSAddAtomic(-1,  &inuse_ptepages_count);
 		return;
 	}
-	pmap_set_noencrypt(pn);
 
 #if 0 /* DEBUG */
        if (0 != vm_page_lookup(map->pm_obj_pml4, (vm_object_offset_t)i)) {
@@ -1945,7 +1934,6 @@ pmap_expand_pdpt(
 		OSAddAtomic(-1,  &inuse_ptepages_count);
 		return;
 	}
-	pmap_set_noencrypt(pn);
 
 #if 0 /* DEBUG */
        if (0 != vm_page_lookup(map->pm_obj_pdpt, (vm_object_offset_t)i)) {
@@ -2058,7 +2046,6 @@ pmap_expand(
 		OSAddAtomic(-1,  &inuse_ptepages_count);
 		return;
 	}
-	pmap_set_noencrypt(pn);
 
 #if 0 /* DEBUG */
        if (0 != vm_page_lookup(map->pm_obj, (vm_object_offset_t)i)) {
@@ -2986,7 +2973,7 @@ pmap_cpuset_NMIPI(cpu_set cpu_mask) {
 		if (cpu_mask & cpu_bit)
 			cpu_NMI_interrupt(cpu);
 	}
-	deadline = mach_absolute_time() + (LockTimeOut * 2);
+	deadline = mach_absolute_time() + (LockTimeOut);
 	while (mach_absolute_time() < deadline)
 		cpu_pause();
 }
@@ -3055,7 +3042,18 @@ pmap_flush_tlbs(pmap_t	pmap)
 		 * Wait for those other cpus to acknowledge
 		 */
 		while (cpus_to_respond != 0) {
-			long orig_acks = 0;
+			if (mach_absolute_time() > deadline) {
+				if (mp_recent_debugger_activity())
+					continue;
+				if (!panic_active()) {
+					pmap_tlb_flush_timeout = TRUE;
+					pmap_cpuset_NMIPI(cpus_to_respond);
+				}
+				panic("pmap_flush_tlbs() timeout: "
+				    "cpu(s) failing to respond to interrupts, pmap=%p cpus_to_respond=0x%lx",
+				    pmap, cpus_to_respond);
+			}
+
 			for (cpu = 0, cpu_bit = 1; cpu < real_ncpus; cpu++, cpu_bit <<= 1) {
 				if ((cpus_to_respond & cpu_bit) != 0) {
 					if (!cpu_datap(cpu)->cpu_running ||
@@ -3067,17 +3065,6 @@ pmap_flush_tlbs(pmap_t	pmap)
 				}
 				if (cpus_to_respond == 0)
 					break;
-			}
-			if (mach_absolute_time() > deadline) {
-				if (machine_timeout_suspended())
-					continue;
-				pmap_tlb_flush_timeout = TRUE;
-				orig_acks = NMIPI_acks;
-				pmap_cpuset_NMIPI(cpus_to_respond);
-
-				panic("TLB invalidation IPI timeout: "
-				    "CPU(s) failed to respond to interrupts, unresponsive CPU bitmap: 0x%lx, NMIPI acks: orig: 0x%lx, now: 0x%lx",
-				    cpus_to_respond, orig_acks, NMIPI_acks);
 			}
 		}
 	}

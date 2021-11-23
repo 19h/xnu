@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -202,7 +202,6 @@ struct mount {
  * ioflags
  */
 #define MNT_IOFLAGS_FUA_SUPPORTED	0x00000001
-#define MNT_IOFLAGS_UNMAP_SUPPORTED	0x00000002
 
 /*
  * ioqueue depth for devices that don't report one
@@ -240,7 +239,6 @@ extern struct mount * dead_mountp;
 #define	MNTK_LOCK_LOCAL		0x00100000	/* advisory locking is done above the VFS itself */
 #define MNTK_VIRTUALDEV 	0x00200000      /* mounted on a virtual device i.e. a disk image */
 #define MNTK_ROOTDEV    	0x00400000      /* this filesystem resides on the same device as the root */
-#define MNTK_SSD		0x00800000	/* underlying device is of the solid state variety */
 #define MNTK_UNMOUNT		0x01000000	/* unmount in progress */
 #define	MNTK_MWAIT		0x02000000	/* waiting for unmount to finish */
 #define MNTK_WANTRDWR		0x04000000	/* upgrade to read/write requested */

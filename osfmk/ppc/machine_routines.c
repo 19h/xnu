@@ -841,7 +841,3 @@ vm_offset_t ml_stack_remaining(void)
 	    return (local - current_thread()->kernel_stack);
 	}
 }
-
-boolean_t machine_timeout_suspended(void) {
-	return FALSE;
-}

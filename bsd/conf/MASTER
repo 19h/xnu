@@ -128,7 +128,6 @@ options		VLAN		#				# <vlan>
 options		BOND		#				# <bond>
 options		PF		# Packet Filter			# <pf>
 options		PF_PKTHDR	# PF tag inside mbuf pkthdr	# <pf_pkthdr>
-options		PKT_PRIORITY	# Packet priority support	# <pkt_priority>
 options		PFLOG		# PF log interface		# <pflog>
 options		IPDIVERT        # Divert sockets (for NAT)      # <ipdivert>
 options		IPFLOW		# IP fast forwarding		# <ipflow>
@@ -144,7 +143,6 @@ options		RANDOM_IP_ID	# random (not sequential) ip ids	# <randomipid>
 options		TCP_DROP_SYNFIN	# Drop TCP packets with SYN+FIN set	# <tcpdrop_synfin>
 options		ICMP_BANDLIM	# ICMP bandwidth limiting sysctl
 options		IFNET_INPUT_SANITY_CHK	# allow dlil/ifnet input sanity check # <ifnet_input_chk>
-options		IFNET_ROUTE_REFCNT # count route references to ifnet	# <ifnet_route_refcnt>
 options		SYSV_SEM	# SVID semaphores			# <sysv_sem>
 options		SYSV_MSG	# SVID messages				# <sysv_msg>
 options		SYSV_SHM	# SVID shared mem			# <sysv_shm>
@@ -189,7 +187,6 @@ options		FDESC		# fdesc_fs support		# <fdesc>
 options		DEVFS		# devfs support			# <devfs>
 options		JOURNALING	# journaling support	# <journaling>
 options		HFS_COMPRESSION	# hfs compression	# <hfs_compression>
-options		CONFIG_HFS_TRIM	# HFS trims unused blocks	# <config_hfs_trim>
 
 #
 #	file system features
@@ -249,6 +246,7 @@ options			randomipid		# <inet,randomipid>
 
 options		ZLIB		# inflate/deflate support	# <zlib>
 
+options		IF_BRIDGE			# <if_bridge>
 
 makeoptions	LIBDRIVER = "libDriver_kern.o"			# <libdriver>
 makeoptions	LIBOBJC   = "libkobjc.o"			# <kernobjc>
@@ -426,12 +424,6 @@ options		CONFIG_DYNAMIC_CODE_SIGNING	# <dynamic_codesigning>
 # must be set in all the bsd/conf and osfmk/conf MASTER files
 #
 options		CONFIG_CODE_DECRYPTION	# <config_embedded>
-
-#
-# User Content Protection, used on embedded
-#
-
-options		CONFIG_PROTECT	# <config_protect>
 
 
 #

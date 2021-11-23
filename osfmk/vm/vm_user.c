@@ -977,7 +977,7 @@ mach_vm_remap(
 	mach_vm_offset_t	*address,
 	mach_vm_size_t	size,
 	mach_vm_offset_t	mask,
-	int			flags,
+	boolean_t		anywhere,
 	vm_map_t		src_map,
 	mach_vm_offset_t	memory_address,
 	boolean_t		copy,
@@ -991,17 +991,13 @@ mach_vm_remap(
 	if (VM_MAP_NULL == target_map || VM_MAP_NULL == src_map)
 		return KERN_INVALID_ARGUMENT;
 
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_REMAP)
-		return KERN_INVALID_ARGUMENT;
-
 	map_addr = (vm_map_offset_t)*address;
 
 	kr = vm_map_remap(target_map,
 			  &map_addr,
 			  size,
 			  mask,
-			  flags,
+			  anywhere,
 			  src_map,
 			  memory_address,
 			  copy,
@@ -1029,7 +1025,7 @@ vm_remap(
 	vm_offset_t		*address,
 	vm_size_t		size,
 	vm_offset_t		mask,
-	int			flags,
+	boolean_t		anywhere,
 	vm_map_t		src_map,
 	vm_offset_t		memory_address,
 	boolean_t		copy,
@@ -1043,17 +1039,13 @@ vm_remap(
 	if (VM_MAP_NULL == target_map || VM_MAP_NULL == src_map)
 		return KERN_INVALID_ARGUMENT;
 
-	/* filter out any kernel-only flags */
-	if (flags & ~VM_FLAGS_USER_REMAP)
-		return KERN_INVALID_ARGUMENT;
-
 	map_addr = (vm_map_offset_t)*address;
 
 	kr = vm_map_remap(target_map,
 			  &map_addr,
 			  size,
 			  mask,
-			  flags,
+			  anywhere,
 			  src_map,
 			  memory_address,
 			  copy,
@@ -2425,12 +2417,10 @@ redo_lookup:
 
 make_mem_done:
 	if (user_handle != IP_NULL) {
-		/*
-		 * Releasing "user_handle" causes the kernel object
-		 * associated with it ("user_entry" here) to also be
-		 * released and freed.
-		 */
-		mach_memory_entry_port_release(user_handle);
+		ipc_port_dealloc_kernel(user_handle);
+	}
+	if (user_entry != NULL) {
+		kfree(user_entry, sizeof *user_entry);
 	}
 	return kr;
 }

@@ -1184,7 +1184,7 @@ hfs_vnop_removexattr(struct vnop_removexattr_args *ap)
 	bzero(iterator, sizeof(*iterator));
 
 	if ((result = hfs_lock(cp, HFS_EXCLUSIVE_LOCK))) {
-		goto exit_nolock;
+		return (result);
 	}
 
 	result = hfs_buildattrkey(cp->c_fileid, ap->a_name, (HFSPlusAttrKey *)&iterator->key);
@@ -1228,7 +1228,6 @@ hfs_vnop_removexattr(struct vnop_removexattr_args *ap)
 	hfs_end_transaction(hfsmp);
 exit:
 	hfs_unlock(cp);
-exit_nolock:
 	FREE(iterator, M_TEMP);
 	return MacToVFSError(result);
 }
@@ -1546,10 +1545,7 @@ exit:
 	if (user_start) {
 		vsunlock(user_start, user_len, TRUE);
 	}
-	
-	if (iterator) {
-		FREE(iterator, M_TEMP);
-	}
+	FREE(iterator, M_TEMP);
 
 	hfs_unlock(cp);
 	
@@ -2241,7 +2237,7 @@ alloc_attr_blks(struct hfsmount *hfsmp, size_t attrsize, size_t extentbufsize, H
 	lockflags = hfs_systemfile_lock(hfsmp, SFL_BITMAP, HFS_EXCLUSIVE_LOCK);
 
 	for (i = 0; (blkcnt > 0) && (i < maxextents); i++) {
-		result = BlockAllocate(hfsmp, startblk, blkcnt, blkcnt, 0,
+		result = BlockAllocate(hfsmp, startblk, blkcnt, blkcnt, 0, 0,
 				       &extents[i].startBlock, &extents[i].blockCount);
 #if HFS_XATTR_VERBOSE
 		printf("hfs: alloc_attr_blks: BA blkcnt %d [%d, %d] (%d)\n",
@@ -2266,7 +2262,7 @@ alloc_attr_blks(struct hfsmount *hfsmp, size_t attrsize, size_t extentbufsize, H
 #endif
 		for (; i <= 0; i--) {
 			if ((blkcnt = extents[i].blockCount) != 0) {
-				(void) BlockDeallocate(hfsmp, extents[i].startBlock, blkcnt, 0);
+				(void) BlockDeallocate(hfsmp, extents[i].startBlock, blkcnt);
 				extents[i].startBlock = 0;
 				extents[i].blockCount = 0;
 		    }
@@ -2305,7 +2301,7 @@ free_attr_blks(struct hfsmount *hfsmp, int blkcnt, HFSPlusExtentDescriptor *exte
 		if (extents[i].startBlock == 0) {
 			break;
 		}
-		(void)BlockDeallocate(hfsmp, extents[i].startBlock, extents[i].blockCount, 0);
+		(void)BlockDeallocate(hfsmp, extents[i].startBlock, extents[i].blockCount);
 		remblks -= extents[i].blockCount;
 		extents[i].startBlock = 0;
 		extents[i].blockCount = 0;

@@ -54,9 +54,6 @@
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-unsigned int		save_kdebug_enable = 0;
-
-
 hibernate_page_list_t *
 hibernate_page_list_allocate(void)
 {

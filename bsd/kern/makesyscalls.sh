@@ -657,9 +657,6 @@ s/\$//g
 			else if (returntype == "uint32_t") {
 				munge_ret = "_SYSCALL_RET_UINT_T"
 			}
-			else if (returntype == "uint64_t") {
-				munge_ret = "_SYSCALL_RET_UINT64_T"
-			}
 			else if (returntype == "off_t") {
 				munge_ret = "_SYSCALL_RET_OFF_T"
 			}

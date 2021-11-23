@@ -288,8 +288,8 @@ static void		vm_object_deactivate_all_pages(
 #define	VM_OBJECT_HASH_COUNT		1024
 #define	VM_OBJECT_HASH_LOCK_COUNT	512
 
-static lck_mtx_t	vm_object_hashed_lock_data[VM_OBJECT_HASH_LOCK_COUNT];
-static lck_mtx_ext_t	vm_object_hashed_lock_data_ext[VM_OBJECT_HASH_LOCK_COUNT];
+static lck_mtx_t	vm_object_hashed_lock_data[VM_OBJECT_HASH_COUNT];
+static lck_mtx_ext_t	vm_object_hashed_lock_data_ext[VM_OBJECT_HASH_COUNT];
 
 static queue_head_t	vm_object_hashtable[VM_OBJECT_HASH_COUNT];
 static struct zone	*vm_object_hash_zone;
@@ -485,7 +485,6 @@ vm_object_bootstrap(void)
 				round_page(512*1024),
 				round_page(12*1024),
 				"vm objects");
-	zone_change(vm_object_zone, Z_NOENCRYPT, TRUE);
 
 	vm_object_init_lck_grp();
 
@@ -515,7 +514,6 @@ vm_object_bootstrap(void)
 			      round_page(512*1024),
 			      round_page(12*1024),
 			      "vm object hash entries");
-	zone_change(vm_object_hash_zone, Z_NOENCRYPT, TRUE);
 
 	for (i = 0; i < VM_OBJECT_HASH_COUNT; i++)
 		queue_init(&vm_object_hashtable[i]);
@@ -1493,10 +1491,10 @@ restart_after_sleep:
 		}
 		if (reap_type == REAP_DATA_FLUSH || reap_type == REAP_TERMINATE) {
 
-			if (reap_type == REAP_DATA_FLUSH &&
-			    ((p->pageout == TRUE || p->cleaning == TRUE) && p->list_req_pending == TRUE)) {
+			if (reap_type == REAP_DATA_FLUSH && (p->pageout == TRUE && p->list_req_pending == TRUE)) {
 				p->list_req_pending = FALSE;
 				p->cleaning = FALSE;
+				p->pageout = FALSE;
 				/*
 				 * need to drop the laundry count...
 				 * we may also need to remove it
@@ -1505,21 +1503,14 @@ restart_after_sleep:
 				 *
 				 * the laundry and pageout_queue flags are cleared...
 				 */
-#if CONFIG_EMBEDDED
-				if (p->laundry) 
-					vm_pageout_throttle_up(p);
-#else
 				vm_pageout_throttle_up(p);
-#endif
-				if (p->pageout == TRUE) {
-					/*
-					 * toss the wire count we picked up
-					 * when we initially set this page up
-					 * to be cleaned and stolen...
-					 */
-					vm_page_unwire(p, TRUE);
-					p->pageout = FALSE;
-				}
+
+				/*
+				 * toss the wire count we picked up
+				 * when we intially set this page up
+				 * to be cleaned...
+				 */
+				vm_page_unwire(p);
 				PAGE_WAKEUP(p);
 
 			} else if (p->busy || p->cleaning) {
@@ -2286,16 +2277,9 @@ deactivate_pages_in_object(
 				        m->dirty = FALSE;
 
 					clear_refmod |= VM_MEM_MODIFIED;
-					if (m->throttled) {
-						/*
-						 * This page is now clean and
-						 * reclaimable.  Move it out
-						 * of the throttled queue, so
-						 * that vm_pageout_scan() can
-						 * find it.
-						 */
-						dwp->dw_mask |= DW_move_page;
-					}
+#if CONFIG_EMBEDDED
+					dwp->dw_mask |= DW_move_page;
+#endif
 #if	MACH_PAGEMAP
 					vm_external_state_clr(object->existence_map, offset);
 #endif	/* MACH_PAGEMAP */
@@ -2307,13 +2291,6 @@ deactivate_pages_in_object(
 						object->reusable_page_count++;
 						assert(object->resident_page_count >= object->reusable_page_count);
 						reusable++;
-#if CONFIG_EMBEDDED
-					} else {
-						if (m->reusable) {
-							m->reusable = FALSE;
-							object->reusable_page_count--;
-						}
-#endif
 					}
 				}
 				pmap_clear_refmod(m->phys_page, clear_refmod);
@@ -2498,14 +2475,6 @@ vm_object_deactivate_pages(
 		all_reusable = TRUE;
 		reusable_page = FALSE;
 	}
-
-#if CONFIG_EMBEDDED
-	if ((reusable_page || all_reusable) && object->all_reusable) {
-		/* This means MADV_FREE_REUSABLE has been called twice, which 
-		 * is probably illegal. */
-		return;
-	}
-#endif
 
 	while (size) {
 		length = deactivate_a_chunk(object, offset, size, kill_page, reusable_page, all_reusable);
@@ -2858,7 +2827,6 @@ vm_object_copy_slowly(
 	fault_info.hi_offset = src_offset + size;
 	fault_info.no_cache  = FALSE;
 	fault_info.stealth = TRUE;
-	fault_info.mark_zf_absent = FALSE;
 
 	for ( ;
 	    size != 0 ;
@@ -5207,7 +5175,7 @@ vm_object_page_map(
 	    }
 
 	    assert((ppnum_t) addr == addr);
-	    vm_page_init(m, (ppnum_t) addr, FALSE);
+	    vm_page_init(m, (ppnum_t) addr);
 	    /*
 	     * private normally requires lock_queues but since we
 	     * are initializing the page, its not necessary here
@@ -7413,8 +7381,7 @@ _vm_object_lock_try(vm_object_t object)
 boolean_t
 vm_object_lock_try(vm_object_t object)
 {
-    // called from hibernate path so check before blocking
-	if (vm_object_lock_avoid(object) && ml_get_interrupts_enabled()) {
+	if (vm_object_lock_avoid(object)) {
 		mutex_pause(2);
 	}
 	return _vm_object_lock_try(object);

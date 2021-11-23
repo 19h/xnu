@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -479,6 +479,8 @@ igmp_slowtimo(void)
 #endif
 }
 
+static struct route igmprt;
+
 static void
 igmp_sendpkt(struct in_multi *inm, int type, uint32_t addr)
 {
@@ -486,7 +488,6 @@ igmp_sendpkt(struct in_multi *inm, int type, uint32_t addr)
         struct igmp *igmp;
         struct ip *ip;
         struct ip_moptions imo;
-	struct route ro;
 
         MGETHDR(m, M_DONTWAIT, MT_HEADER);	/* MAC-OK */
         if (m == NULL)
@@ -536,12 +537,7 @@ igmp_sendpkt(struct in_multi *inm, int type, uint32_t addr)
 	 * XXX
 	 * Do we have to worry about reentrancy here?  Don't think so.
 	 */
-	bzero(&ro, sizeof (ro));
-        (void) ip_output(m, router_alert, &ro, 0, &imo, NULL);
-	if (ro.ro_rt != NULL) {
-		rtfree(ro.ro_rt);
-		ro.ro_rt = NULL;
-	}
+        ip_output(m, router_alert, &igmprt, 0, &imo, NULL);
 
         ++igmpstat.igps_snd_reports;
 }

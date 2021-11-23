@@ -25,13 +25,19 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+Copyright (c) 1998 Apple Computer, Inc.  All rights reserved.
+
+HISTORY
+    1998-7-13	Godfrey van der Linden(gvdl)
+        Created.
+]*/
 
 #if !defined(__LP64__)
 
 #include <IOKit/IOCommandQueue.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimeStamp.h>
-#include <IOKit/IOKitDebug.h>
 
 #include <mach/sync_policy.h>
 
@@ -131,7 +137,6 @@ void IOCommandQueue::free()
 bool IOCommandQueue::checkForWork()
 {
     void *field0, *field1, *field2, *field3;
-	bool	trace = ( gIOKitTrace & kIOTraceCommandGates ) ? true : false;
 
     if (!enabled || consumerIndex == producerIndex)
         return false;
@@ -148,16 +153,11 @@ bool IOCommandQueue::checkForWork()
     if (++consumerIndex >= size)
         consumerIndex = 0;
 
-	if (trace)
-		IOTimeStampStartConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+    IOTimeStampConstant(IODBG_CMDQ(IOCMDQ_ACTION),
 			(uintptr_t) action, (uintptr_t) owner);
 
     (*(IOCommandQueueAction) action)(owner, field0, field1, field2, field3);
 
-	if (trace)
-		IOTimeStampEndConstant(IODBG_CMDQ(IOCMDQ_ACTION),
-							   (uintptr_t) action, (uintptr_t) owner);
-	
     return (consumerIndex != producerIndex);
 }
 

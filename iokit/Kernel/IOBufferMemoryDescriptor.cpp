@@ -37,6 +37,7 @@
 #include <libkern/OSDebug.h>
 
 #include "IOKitKernelInternal.h"
+#include "IOCopyMapper.h"
 
 __BEGIN_DECLS
 void ipc_port_release_send(ipc_port_t port);
@@ -48,9 +49,10 @@ __END_DECLS
 
 enum
 {
-    kInternalFlagPhysical  = 0x00000001,
-    kInternalFlagPageSized = 0x00000002
+    kInternalFlagRealloc = 0x00000001,
 };
+
+volatile ppnum_t gIOHighestAllocatedPage;
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -82,7 +84,9 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     kern_return_t 	kr;
     task_t		mapTask = NULL;
     vm_map_t 		vmmap = NULL;
+    addr64_t            lastIOAddr;
     mach_vm_address_t   highestMask = 0;
+    bool		usePhys;
     IOOptionBits	iomdOptions = kIOMemoryTypeVirtual64 | kIOMemoryAsReference;
 
     if (!capacity)
@@ -103,26 +107,14 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     // Grab IOMD bits from the Buffer MD options
     iomdOptions  |= (options & kIOBufferDescriptorMemoryFlags);
 
-#if 0
-    // workarounds-
-    if ((options & kIOMemoryPhysicallyContiguous) || ((capacity == 0x1000) && (inTask == kernel_task))
-      && !physicalMask)
-    {
-	highestMask = physicalMask = 0xFFFFF000;
-    }
-    //-
-#endif
-
     if (physicalMask && (alignment <= 1))
     {
 	alignment   = ((physicalMask ^ (-1ULL)) & (physicalMask - 1));
 	highestMask = (physicalMask | alignment);
 	alignment++;
-	if (alignment < page_size)
-            alignment = page_size;
     }
 
-    if ((options & (kIOMemorySharingTypeMask | kIOMapCacheMask | kIOMemoryClearEncrypt)) && (alignment < page_size))
+    if ((options & (kIOMemorySharingTypeMask | kIOMapCacheMask)) && (alignment < page_size))
 	alignment = page_size;
 
     if (alignment >= page_size)
@@ -135,6 +127,9 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 
     if ((inTask != kernel_task) && !(options & kIOMemoryPageable))
 	return false;
+
+    if ((options & kIOMemoryPhysicallyContiguous) && !physicalMask)
+	physicalMask = 0xFFFFFFFF;
 
     // set flags for entry + object create
     vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE;
@@ -179,41 +174,63 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     else
     {
 	memEntryCacheMode |= MAP_MEM_NAMED_REUSE;
-	vmmap = kernel_map;
 
-	// Buffer shouldn't auto prepare they should be prepared explicitly
-	// But it never was enforced so what are you going to do?
-	iomdOptions |= kIOMemoryAutoPrepare;
+	if (IOMapper::gSystem)
+	    // assuming mapped space is 2G
+	    lastIOAddr = (1UL << 31) - PAGE_SIZE;
+	else
+	    lastIOAddr = ptoa_64(gIOHighestAllocatedPage);
 
-	/* Allocate a wired-down buffer inside kernel space. */
+	usePhys = (highestMask && (lastIOAddr != (lastIOAddr & highestMask))
+		    && (alignment <= page_size));
 
-	if ((options & kIOMemoryPhysicallyContiguous) || highestMask || (alignment > page_size))
+	if (!usePhys && (options & kIOMemoryPhysicallyContiguous))
 	{
-            _internalFlags |= kInternalFlagPhysical;
-            if (highestMask)
-            {
-                _internalFlags |= kInternalFlagPageSized;
-                capacity = round_page(capacity);
-            }
-            _buffer = (void *) IOKernelAllocateWithPhysicalRestrict(capacity, highestMask, alignment, 
-                                        (0 != (options & kIOMemoryPhysicallyContiguous)));
+	    _buffer = (void *) IOKernelAllocateContiguous(capacity, highestMask, alignment);
+	    usePhys = (NULL == _buffer);
 	}
-	else if (alignment > 1)
+	if (usePhys)
 	{
-            _buffer = IOMallocAligned(capacity, alignment);
+	    mach_vm_address_t address;
+	    iomdOptions &= ~kIOMemoryTypeVirtual64;
+	    iomdOptions |= kIOMemoryTypePhysical64;
+
+	    address = IOMallocPhysical(capacity, highestMask);
+	    _buffer = (void *) address;
+	    if (!_buffer)
+		return false;
+
+	    mapTask = inTask;
+	    inTask = 0;
 	}
 	else
 	{
-            _buffer = IOMalloc(capacity);
-	}
+	    vmmap = kernel_map;
 
-	if (!_buffer)
-	{
-            return false;
+	    // Buffer shouldn't auto prepare they should be prepared explicitly
+	    // But it never was enforced so what are you going to do?
+	    iomdOptions |= kIOMemoryAutoPrepare;
+
+	    /* Allocate a wired-down buffer inside kernel space. */
+	    if (options & kIOMemoryPhysicallyContiguous)
+	    {
+		// attempted allocate already
+	    }
+	    else if (alignment > 1)
+	    {
+		_buffer = IOMallocAligned(capacity, alignment);
+	    }
+	    else
+	    {
+		_buffer = IOMalloc(capacity);
+	    }
+	    if (!_buffer)
+		return false;
 	}
     }
 
-    if( (options & (kIOMemoryPageable | kIOMapCacheMask))) {
+    if( (kIOMemoryTypePhysical64 != (kIOMemoryTypeMask & iomdOptions)) 
+	&& (options & (kIOMemoryPageable | kIOMapCacheMask))) {
 	ipc_port_t	sharedMem;
 	vm_size_t	size = round_page(capacity);
 
@@ -260,6 +277,42 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 				inTask, iomdOptions, /* System mapper */ 0))
 	return false;
 
+    if (highestMask && !IOMapper::gSystem)
+    {
+	IOMDDMACharacteristics mdSummary;
+
+	bzero(&mdSummary, sizeof(mdSummary));
+	IOReturn rtn = dmaCommandOperation(
+		kIOMDGetCharacteristics,
+		&mdSummary, sizeof(mdSummary));
+	if (rtn)
+	    return false;
+
+	if (mdSummary.fHighestPage)
+	{
+	    ppnum_t highest;
+	    while (mdSummary.fHighestPage > (highest = gIOHighestAllocatedPage))
+	    {
+		if (OSCompareAndSwap(highest, mdSummary.fHighestPage, 
+					(UInt32 *) &gIOHighestAllocatedPage))
+		    break;
+	    }
+	    lastIOAddr = ptoa_64(mdSummary.fHighestPage);
+	}
+	else
+	    lastIOAddr = ptoa_64(gIOLastPage);
+
+	if (lastIOAddr != (lastIOAddr & highestMask))
+	{
+	    if (kIOMemoryTypePhysical64 != (_flags & kIOMemoryTypeMask))
+	    {
+		// flag a retry
+		_internalFlags |= kInternalFlagRealloc;
+	    }
+	    return false;
+	}
+    }
+
     if (mapTask)
     {
 	if (!reserved) {
@@ -297,8 +350,18 @@ IOBufferMemoryDescriptor * IOBufferMemoryDescriptor::inTaskWithOptions(
     IOBufferMemoryDescriptor *me = new IOBufferMemoryDescriptor;
     
     if (me && !me->initWithPhysicalMask(inTask, options, capacity, alignment, 0)) {
+	bool retry = (0 != (kInternalFlagRealloc & me->_internalFlags));
 	me->release();
 	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithPhysicalMask(inTask, options, capacity, alignment, 0))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
     }
     return me;
 }
@@ -313,8 +376,18 @@ IOBufferMemoryDescriptor * IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
     
     if (me && !me->initWithPhysicalMask(inTask, options, capacity, 1, physicalMask))
     {
+	bool retry = (0 != (kInternalFlagRealloc & me->_internalFlags));
 	me->release();
 	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithPhysicalMask(inTask, options, capacity, 1, physicalMask))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
     }
     return me;
 }
@@ -337,8 +410,18 @@ IOBufferMemoryDescriptor * IOBufferMemoryDescriptor::withOptions(
     IOBufferMemoryDescriptor *me = new IOBufferMemoryDescriptor;
     
     if (me && !me->initWithPhysicalMask(kernel_task, options, capacity, alignment, 0)) {
+	bool retry = (0 != (kInternalFlagRealloc & me->_internalFlags));
 	me->release();
 	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithPhysicalMask(kernel_task, options, capacity, alignment, 0))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
     }
     return me;
 }
@@ -407,8 +490,22 @@ IOBufferMemoryDescriptor::withBytes(const void * inBytes,
                 | (inContiguous ? kIOMemoryPhysicallyContiguous : 0),
                inLength, inLength, 0 ))
     {
+	bool retry = (0 != (kInternalFlagRealloc & me->_internalFlags));
 	me->release();
 	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithPhysicalMask(
+	           kernel_task, inDirection | kIOMemoryUnshared
+	            | (inContiguous ? kIOMemoryPhysicallyContiguous : 0),
+	           inLength, inLength, 0 ))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
+
     }
 
     if (me)
@@ -434,13 +531,13 @@ void IOBufferMemoryDescriptor::free()
 {
     // Cache all of the relevant information on the stack for use
     // after we call super::free()!
-    IOOptionBits     flags         = _flags;
-    IOOptionBits     internalFlags = _internalFlags;
+    IOOptionBits     flags     = _flags;
     IOOptionBits     options   = _options;
     vm_size_t        size      = _capacity;
     void *           buffer    = _buffer;
     IOMemoryMap *    map       = 0;
     IOAddressRange * range     = _ranges.v64;
+    mach_vm_address_t source   = range ? range->address : 0;
     vm_offset_t      alignment = _alignment;
 
     if (alignment >= page_size)
@@ -465,12 +562,10 @@ void IOBufferMemoryDescriptor::free()
     }
     else if (buffer)
     {
-        if (internalFlags & kInternalFlagPhysical)
-        {
-            if (kInternalFlagPageSized & internalFlags)
-                size = round_page(size);
-            IOKernelFreePhysical((mach_vm_address_t) buffer, size);
-        }
+	if (kIOMemoryTypePhysical64 == (flags & kIOMemoryTypeMask))
+	    IOFreePhysical(source, size);
+        else if (options & kIOMemoryPhysicallyContiguous)
+            IOKernelFreeContiguous((mach_vm_address_t) buffer, size);
         else if (alignment > 1)
             IOFreeAligned(buffer, size);
         else

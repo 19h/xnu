@@ -559,7 +559,6 @@ ip_proto_dispatch_in(
 	int seen = (inject_ipfref == 0);
 	int	changed_header = 0;
 	struct ip *ip;
-	void (*pr_input)(struct mbuf *, int len);
 
 	if (!TAILQ_EMPTY(&ipv4_filters)) {	
 		ipf_ref();
@@ -599,21 +598,20 @@ ip_proto_dispatch_in(
 	 * otherwise let the protocol deal with its own locking
 	 */
 	ip = mtod(m, struct ip *);
-
+	
 	if (changed_header) {
 		ip->ip_len = ntohs(ip->ip_len) - hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 	}
-
-	if ((pr_input = ip_protox[ip->ip_p]->pr_input) == NULL) {
-		m_freem(m);
-	} else if (!(ip_protox[ip->ip_p]->pr_flags & PR_PROTOLOCK)) {
+	
+	if (!(ip_protox[ip->ip_p]->pr_flags & PR_PROTOLOCK)) {
 		lck_mtx_lock(inet_domain_mutex);
-		pr_input(m, hlen);
+		(*ip_protox[ip->ip_p]->pr_input)(m, hlen);
 		lck_mtx_unlock(inet_domain_mutex);
-	} else {
-		pr_input(m, hlen);
-	}
+	}	
+	else	 
+		(*ip_protox[ip->ip_p]->pr_input)(m, hlen);
+		
 }
 
 /*
@@ -626,16 +624,15 @@ ip_input(struct mbuf *m)
 	struct ip *ip;
 	struct ipq *fp;
 	struct in_ifaddr *ia = NULL;
-	int    hlen, checkif;
+	int    i, hlen, checkif;
 	u_short sum;
 	struct in_addr pkt_dst;
-#if IPFIREWALL
-	int i;
 	u_int32_t div_info = 0;		/* packet divert/tee info */
+#if IPFIREWALL
 	struct ip_fw_args args;
-	struct m_tag	*tag;
 #endif
 	ipfilter_t inject_filter_ref = 0;
+	struct m_tag	*tag;
 
 #if IPFIREWALL
 	args.eh = NULL;

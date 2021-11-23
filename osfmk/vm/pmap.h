@@ -169,7 +169,9 @@ extern void 		mapping_free_prime(void); /* Primes the mapping block release list
  */
 
 extern boolean_t	pmap_next_page(ppnum_t *pnum);
-extern boolean_t	pmap_next_page_hi(ppnum_t *pnum);
+#if defined(__LP64__)
+extern boolean_t	pmap_next_page_k64(ppnum_t *pnum);
+#endif
 						/* During VM initialization,
 						 * return the next unused
 						 * physical page.
@@ -206,15 +208,6 @@ extern void		pmap_enter(	/* Enter a mapping */
 				vm_prot_t	prot,
 				unsigned int	flags,
 				boolean_t	wired);
-
-extern kern_return_t	pmap_enter_options(
-					   pmap_t pmap,
-					   vm_map_offset_t v,
-					   ppnum_t pn,
-					   vm_prot_t prot,
-					   unsigned int flags,
-					   boolean_t wired,
-					   unsigned int options);
 
 extern void		pmap_remove_some_phys(
 				pmap_t		pmap,
@@ -373,44 +366,21 @@ extern kern_return_t	(pmap_attribute)(	/* Get/Set special memory
 	pmap_t		__pmap = (pmap);				\
 	vm_page_t	__page = (page);				\
 									\
-	PMAP_ENTER_CHECK(__pmap, __page)				\
-	pmap_enter(__pmap,					\
-		(virtual_address),					\
-		__page->phys_page,					\
-			(protection),					\
-		(flags),						\
-		(wired));						\
+	if (__pmap != kernel_pmap) {					\
+		ASSERT_PAGE_DECRYPTED(__page);				\
+	}								\
+	if (__page->error) {						\
+		panic("VM page %p should not have an error\n",		\
+			__page);					\
+	}								\
+	pmap_enter(__pmap,						\
+		   (virtual_address),					\
+		   __page->phys_page,					\
+		   (protection),					\
+		   (flags),						\
+		   (wired));						\
 	MACRO_END
 #endif	/* !PMAP_ENTER */
-
-#ifndef	PMAP_ENTER_OPTIONS
-#define PMAP_ENTER_OPTIONS(pmap, virtual_address, page, protection,	\
-				flags, wired, options, result) \
-	MACRO_BEGIN							\
-	pmap_t		__pmap = (pmap);				\
-	vm_page_t	__page = (page);				\
-									\
-	PMAP_ENTER_CHECK(__pmap, __page)				\
-	result = pmap_enter_options(__pmap,				\
-		(virtual_address),					\
-		__page->phys_page,					\
-			(protection),					\
-		(flags),						\
-		(wired),						\
-		options);					\
-	MACRO_END
-#endif	/* !PMAP_ENTER_OPTIONS */
-
-#define PMAP_ENTER_CHECK(pmap, page)					\
-{									\
-	if ((pmap) != kernel_pmap) {					\
-		ASSERT_PAGE_DECRYPTED(page);				\
-	}								\
-	if ((page)->error) {						\
-		panic("VM page %p should not have an error\n",		\
-			(page));					\
-	}								\
-}
 
 /*
  *	Routines to manage reference/modify bits based on
@@ -464,10 +434,6 @@ extern kern_return_t pmap_unnest(pmap_t grand,
 extern boolean_t pmap_adjust_unnest_parameters(pmap_t, vm_map_offset_t *, vm_map_offset_t *);
 #endif	/* MACH_KERNEL_PRIVATE */
 
-extern boolean_t	pmap_is_noencrypt(ppnum_t);
-extern void		pmap_set_noencrypt(ppnum_t pn);
-extern void		pmap_clear_noencrypt(ppnum_t pn);
-
 /*
  * JMM - This portion is exported to other kernel components right now,
  * but will be pulled back in the future when the needed functionality
@@ -488,11 +454,6 @@ extern pmap_t	kernel_pmap;			/* The kernel's map */
 #define VM_WIMG_USE_DEFAULT	0x80000000
 
 #define VM_MEM_SUPERPAGE	0x100		/* map a superpage instead of a base page */
-
-#define PMAP_OPTIONS_NOWAIT	0x1		/* don't block, return 
-						 * KERN_RESOURCE_SHORTAGE 
-						 * instead */
-
 #if	!defined(__LP64__)
 extern vm_offset_t	pmap_extract(pmap_t pmap,
 				vm_map_offset_t va);

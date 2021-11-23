@@ -466,6 +466,7 @@ thread_unblock(
 			if (processor != current_processor())
 				machine_signal_idle(processor);
 		}
+
 		result = TRUE;
 	}
 
@@ -962,7 +963,7 @@ clear_wait_internal(
 	wait_result_t	wresult)
 {
 	wait_queue_t	wq = thread->wait_queue;
-	uint32_t	i = LockTimeOut;
+	int				i = LockTimeOut;
 
 	do {
 		if (wresult == THREAD_INTERRUPTED && (thread->state & TH_UNINT))
@@ -986,7 +987,7 @@ clear_wait_internal(
 		}
 
 		return (thread_go(thread, wresult));
-	} while ((--i > 0) || machine_timeout_suspended());
+	} while (--i > 0);
 
 	panic("clear_wait_internal: deadlock: thread=%p, wq=%p, cpu=%d\n",
 		  thread, wq, cpu_number());
@@ -1113,12 +1114,7 @@ thread_select(
 		 *	bound to a different processor, nor be in the wrong
 		 *	processor set.
 		 */
-		if (
-#if CONFIG_EMBEDDED
-				((thread->state & ~TH_SUSP) == TH_RUN)					&&
-#else
-				thread->state == TH_RUN									&&
-#endif
+		if (	thread->state == TH_RUN									&&
 				(thread->sched_pri >= BASEPRI_RTQUEUES		||
 				 processor->processor_meta == PROCESSOR_META_NULL ||
 				 processor->processor_meta->primary == processor)		&&
@@ -1257,8 +1253,12 @@ thread_select(
 			}
 			else {
 				enqueue_head(&processor->processor_meta->idle_queue, (queue_entry_t)processor);
-				pset_unlock(pset);
-				return (processor->idle_thread);
+
+				if (thread->sched_pri < BASEPRI_RTQUEUES) {
+					pset_unlock(pset);
+
+					return (processor->idle_thread);
+				}
 			}
 		}
 
@@ -2258,32 +2258,38 @@ choose_processor(
 {
 	processor_set_t		nset, cset = pset;
 	processor_meta_t	pmeta = PROCESSOR_META_NULL;
-	processor_t		mprocessor;
-	
+
 	/*
 	 *	Prefer the hinted processor, when appropriate.
 	 */
-
 	if (processor != PROCESSOR_NULL) {
+		processor_t			mprocessor;
+
 		if (processor->processor_meta != PROCESSOR_META_NULL)
 			processor = processor->processor_meta->primary;
-	}
 
-	mprocessor = machine_choose_processor(pset, processor);
-	if (mprocessor != PROCESSOR_NULL)
-		processor = mprocessor;
+		mprocessor = machine_choose_processor(pset, processor);
+		if (mprocessor != PROCESSOR_NULL)
+			processor = mprocessor;
 
-	if (processor != PROCESSOR_NULL) {
-		if (processor->processor_set != pset ||
-		    processor->state == PROCESSOR_INACTIVE ||
-		    processor->state == PROCESSOR_SHUTDOWN ||
-		    processor->state == PROCESSOR_OFF_LINE)
+		if (processor->processor_set != pset || processor->state == PROCESSOR_INACTIVE ||
+				processor->state == PROCESSOR_SHUTDOWN || processor->state == PROCESSOR_OFF_LINE)
 			processor = PROCESSOR_NULL;
 		else
-			if (processor->state == PROCESSOR_IDLE ||
-			    ((thread->sched_pri >= BASEPRI_RTQUEUES) &&
-			    (processor->current_pri < BASEPRI_RTQUEUES)))
-				return (processor);
+		if (processor->state == PROCESSOR_IDLE)
+			return (processor);
+	}
+	else {
+		processor = machine_choose_processor(pset, processor);
+
+		if (processor != PROCESSOR_NULL) {
+			if (processor->processor_set != pset || processor->state == PROCESSOR_INACTIVE ||
+					processor->state == PROCESSOR_SHUTDOWN || processor->state == PROCESSOR_OFF_LINE)
+				processor = PROCESSOR_NULL;
+			else
+				if (processor->state == PROCESSOR_IDLE)
+					return (processor);
+		}
 	}
 
 	/*
@@ -2298,67 +2304,27 @@ choose_processor(
 			return ((processor_t)queue_first(&cset->idle_queue));
 
 		if (thread->sched_pri >= BASEPRI_RTQUEUES) {
-			integer_t lowest_priority = MAXPRI + 1;
-			integer_t lowest_unpaired = MAXPRI + 1;
-			uint64_t  furthest_deadline = 1;
-			processor_t lp_processor = PROCESSOR_NULL;
-			processor_t lp_unpaired = PROCESSOR_NULL;
-			processor_t fd_processor = PROCESSOR_NULL;
-
-			lp_processor = cset->low_pri;
-			/* Consider hinted processor */
-			if (lp_processor != PROCESSOR_NULL &&
-			((lp_processor->processor_meta == PROCESSOR_META_NULL) ||
-			((lp_processor == lp_processor->processor_meta->primary) &&
-			    !queue_empty(&lp_processor->processor_meta->idle_queue))) &&
-			    lp_processor->state != PROCESSOR_INACTIVE &&
-			    lp_processor->state != PROCESSOR_SHUTDOWN &&
-			    lp_processor->state != PROCESSOR_OFF_LINE &&
-			    (lp_processor->current_pri < thread->sched_pri))
-				return lp_processor;
-
+			/*
+			 *	For an RT thread, iterate through active processors, first fit.
+			 */
 			processor = (processor_t)queue_first(&cset->active_queue);
 			while (!queue_end(&cset->active_queue, (queue_entry_t)processor)) {
-				/* Discover the processor executing the
-				 * thread with the lowest priority within
-				 * this pset, or the one with the furthest
-				 * deadline
-				 */
-				integer_t cpri = processor->current_pri;
-				if (cpri < lowest_priority) {
-					lowest_priority = cpri;
-					lp_processor = processor;
-				}
+				if (thread->sched_pri > processor->current_pri ||
+						thread->realtime.deadline < processor->deadline)
+					return (processor);
 
-				if ((cpri >= BASEPRI_RTQUEUES) && (processor->deadline > furthest_deadline)) {
-					furthest_deadline = processor->deadline;
-					fd_processor = processor;
-				}
-
-
-				if (processor->processor_meta != PROCESSOR_META_NULL &&
-				    !queue_empty(&processor->processor_meta->idle_queue)) {
-					if (cpri < lowest_unpaired) {
-						lowest_unpaired = cpri;
-						lp_unpaired = processor;
+				if (pmeta == PROCESSOR_META_NULL) {
+					if (processor->processor_meta != PROCESSOR_META_NULL &&
+								!queue_empty(&processor->processor_meta->idle_queue))
 						pmeta = processor->processor_meta;
-					}
-					else
-						if (pmeta == PROCESSOR_META_NULL)
-							pmeta = processor->processor_meta;
 				}
+
 				processor = (processor_t)queue_next((queue_entry_t)processor);
 			}
 
-			if (thread->sched_pri > lowest_unpaired)
-				return lp_unpaired;
-
 			if (pmeta != PROCESSOR_META_NULL)
 				return ((processor_t)queue_first(&pmeta->idle_queue));
-			if (thread->sched_pri > lowest_priority)
-				return lp_processor;
-			if (thread->realtime.deadline < furthest_deadline)
-				return fd_processor;
+
 			processor = PROCESSOR_NULL;
 		}
 		else {
@@ -2387,9 +2353,10 @@ choose_processor(
 				if (processor != PROCESSOR_NULL)
 					enqueue_tail(&cset->active_queue, (queue_entry_t)processor);
 			}
+
 			if (processor != PROCESSOR_NULL && pmeta == PROCESSOR_META_NULL) {
 				if (processor->processor_meta != PROCESSOR_META_NULL &&
-				    !queue_empty(&processor->processor_meta->idle_queue))
+											!queue_empty(&processor->processor_meta->idle_queue))
 					pmeta = processor->processor_meta;
 			}
 		}
@@ -2519,7 +2486,21 @@ thread_setrun(
 			processor = thread->last_processor;
 			pset = processor->processor_set;
 			pset_lock(pset);
-			processor = choose_processor(pset, processor, thread);
+
+			/*
+			 *	Choose a different processor in certain cases.
+			 */
+			if (thread->sched_pri >= BASEPRI_RTQUEUES) {
+				/*
+				 *	If the processor is executing an RT thread with
+				 *	an earlier deadline, choose another.
+				 */
+				if (thread->sched_pri <= processor->current_pri ||
+						thread->realtime.deadline >= processor->deadline)
+					processor = choose_processor(pset, PROCESSOR_NULL, thread);
+			}
+			else
+				processor = choose_processor(pset, processor, thread);
 		}
 		else {
 			/*

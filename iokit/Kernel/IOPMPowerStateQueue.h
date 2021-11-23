@@ -33,7 +33,7 @@
 #include <IOKit/IOLocks.h>
 #include <kern/queue.h>
 
-typedef void (*IOPMPowerStateQueueAction)(OSObject *, uint32_t event, void *, uint64_t);
+typedef void (*IOPMPowerStateQueueAction)(OSObject *, uint32_t event, void *, void *);
 
 class IOPMPowerStateQueue : public IOEventSource
 {
@@ -43,8 +43,7 @@ private:
     struct PowerEventEntry {
         queue_chain_t   chain;
         uint32_t        eventType;
-        void *          arg0;
-        uint64_t        arg1;
+        void *          args[2];
     };
 
     queue_head_t    queueHead;
@@ -57,7 +56,7 @@ protected:
 public:
     static IOPMPowerStateQueue * PMPowerStateQueue( OSObject * owner, Action action );
 
-    bool submitPowerEvent( uint32_t eventType, void * arg0 = 0, uint64_t arg1 = 0 );
+    bool submitPowerEvent( uint32_t eventType, void * arg0 = 0, void * arg1 = 0 );
 };
 
 #endif /* _IOPMPOWERSTATEQUEUE_H_ */

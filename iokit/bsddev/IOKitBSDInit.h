@@ -32,15 +32,6 @@ extern "C" {
 kern_return_t
 IOKitBSDInit( void );
 
-void
-IOServicePublishResource( const char * property, boolean_t value );
-
-boolean_t
-IOServiceWaitForMatchingResource( const char * property, uint64_t timeout );
-
-boolean_t
-IOCatalogueMatchingDriversPresent( const char * property );
-
 #ifdef __cplusplus
 }
 #endif

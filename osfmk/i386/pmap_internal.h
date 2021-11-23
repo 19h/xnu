@@ -278,7 +278,6 @@ typedef struct pv_hashed_entry {     /* first three entries must match pv_rooted
 #define	PHYS_MODIFIED	INTEL_PTE_MOD	/* page modified */
 #define	PHYS_REFERENCED	INTEL_PTE_REF	/* page referenced */
 #define PHYS_MANAGED	INTEL_PTE_VALID /* page is managed */
-#define PHYS_NOENCRYPT	INTEL_PTE_USER	/* no need to encrypt this page in the hibernation image */
 
 /*
  *	Amount of virtual memory mapped by one
@@ -354,10 +353,6 @@ extern uint64_t pde_mapped_size;
 
 extern char		*pmap_phys_attributes;
 extern unsigned int	last_managed_page;
-
-extern ppnum_t	lowest_lo;
-extern ppnum_t	lowest_hi;
-extern ppnum_t	highest_hi;
 
 /*
  * when spinning through pmap_remove

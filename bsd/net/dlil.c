@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -95,19 +95,6 @@
 #define DLIL_PRINTF	kprintf
 #endif
 
-#define atomic_add_32(a, n)						\
-	((void) OSAddAtomic(n, (volatile SInt32 *)a))
-
-#if PKT_PRIORITY
-#define	_CASSERT(x)	\
-	switch (0) { case 0: case (x): ; }
-
-#define	IF_DATA_REQUIRE_ALIGNED_32(f)	\
-	_CASSERT(!(offsetof(struct if_data_internal, f) % sizeof (u_int32_t)))
-
-#define	IFNET_IF_DATA_REQUIRE_ALIGNED_32(f)	\
-	_CASSERT(!(offsetof(struct ifnet, if_data.f) % sizeof (u_int32_t)))
-#endif /* PKT_PRIORITY */
 
 enum {
 	kProtoKPI_v1	= 1,
@@ -189,16 +176,6 @@ static u_int32_t dlil_read_count = 0;
 static u_int32_t dlil_detach_waiting = 0;
 u_int32_t dlil_filter_count = 0;
 extern u_int32_t	ipv4_ll_arp_aware;
-
-#if IFNET_ROUTE_REFCNT
-/*
- * Updating this variable should be done by first acquiring the global
- * radix node head (rnh_lock), in tandem with settting/clearing the
- * PR_AGGDRAIN for routedomain.
- */
-u_int32_t ifnet_aggressive_drainers;
-static u_int32_t net_rtref;
-#endif /* IFNET_ROUTE_REFCNT */
 
 static struct dlil_threading_info dlil_lo_thread;
 __private_extern__  struct dlil_threading_info *dlil_lo_thread_ptr = &dlil_lo_thread;
@@ -601,10 +578,7 @@ dlil_init(void)
 	thread_t		thread = THREAD_NULL;
 
 	PE_parse_boot_argn("net_affinity", &net_affinity, sizeof (net_affinity));
-#if IFNET_ROUTE_REFCNT
-	PE_parse_boot_argn("net_rtref", &net_rtref, sizeof (net_rtref));
-#endif /* IFNET_ROUTE_REFCNT */
-
+	
 	TAILQ_INIT(&dlil_ifnet_head);
 	TAILQ_INIT(&ifnet_head);
 	
@@ -1104,26 +1078,6 @@ dlil_input_packet_list(struct ifnet * ifp_param, struct mbuf *m)
 			locked = 1;
 			dlil_read_begin();
 		}
-
-#if PKT_PRIORITY
-		switch (m->m_pkthdr.prio) {
-			case MBUF_TC_BK:
-				ifp->if_tc.ifi_ibkpackets++;
-				ifp->if_tc.ifi_ibkbytes += m->m_pkthdr.len;
-				break;
-			case MBUF_TC_VI:
-				ifp->if_tc.ifi_ivipackets++;
-				ifp->if_tc.ifi_ivibytes += m->m_pkthdr.len;
-				break;
-			case MBUF_TC_VO:
-				ifp->if_tc.ifi_ivopackets++;
-				ifp->if_tc.ifi_ivobytes += m->m_pkthdr.len;
-				break;
-			default:
-				break;
-		}
-#endif PKT_PRIORITY
-
 		/* find which protocol family this packet is for */
 		error = (*ifp->if_demux)(ifp, m, frame_header,
 					 &protocol_family);
@@ -1323,36 +1277,6 @@ static int dlil_get_socket_type(struct mbuf **mp, int family, int raw)
 	return (type);
 }
 #endif
-
-static void
-if_inc_traffic_class_out(ifnet_t ifp, mbuf_t m)
-{
-#if !PKT_PRIORITY
-#pragma unused(ifp)
-#pragma unused(m)
-	return;
-#else
-	if (!(m->m_flags & M_PKTHDR))
-		return;
-
-	switch (m->m_pkthdr.prio) {
-		case MBUF_TC_BK:
-			ifp->if_tc.ifi_obkpackets++;
-			ifp->if_tc.ifi_obkbytes += m->m_pkthdr.len;
-			break;
-		case MBUF_TC_VI:
-			ifp->if_tc.ifi_ovipackets++;
-			ifp->if_tc.ifi_ovibytes += m->m_pkthdr.len;
-			break;
-		case MBUF_TC_VO:
-			ifp->if_tc.ifi_ovopackets++;
-			ifp->if_tc.ifi_ovobytes += m->m_pkthdr.len;
-			break;
-		default:
-			break;
-	}
-#endif PKT_PRIORITY
-}
 
 #if 0
 int
@@ -1688,9 +1612,6 @@ preout_again:
 		}
 		else {
 			KERNEL_DEBUG(DBG_FNC_DLIL_IFOUT | DBG_FUNC_START, 0,0,0,0,0);
-			
-			if_inc_traffic_class_out(ifp, m);
-
 			retval = ifp->if_output(ifp, m);
 			if (retval && dlil_verbose) {
 				printf("dlil_output: output error on %s%d retval = %d\n", 
@@ -1710,9 +1631,6 @@ next:
 
 	if (send_head) {
 		KERNEL_DEBUG(DBG_FNC_DLIL_IFOUT | DBG_FUNC_START, 0,0,0,0,0);
-		
-		if_inc_traffic_class_out(ifp, send_head);
-
 		retval = ifp->if_output(ifp, send_head);
 		if (retval && dlil_verbose) {
 			printf("dlil_output: output error on %s%d retval = %d\n", 
@@ -2759,13 +2677,6 @@ ifnet_attach(
 #endif /* PF */
 	dlil_write_end();
 
-#if IFNET_ROUTE_REFCNT
-	if (net_rtref) {
-		(void) ifnet_set_idle_flags(ifp, IFRF_IDLE_NOTIFY,
-		    IFRF_IDLE_NOTIFY);
-	}
-#endif /* IFNET_ROUTE_REFCNT */
-
 	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_IF_ATTACHED, NULL, 0);
 
     return 0;
@@ -2807,17 +2718,6 @@ ifnet_detach(
 	/* Let BPF know we're detaching */
 	bpfdetach(ifp);
 	
-#if IFNET_ROUTE_REFCNT
-	/*
-	 * Check to see if this interface has previously triggered
-	 * aggressive protocol draining; if so, decrement the global
-	 * refcnt and clear PR_AGGDRAIN on the route domain if
-	 * there are no more of such an interface around.
-	 */
-	 if (ifp->if_want_aggressive_drain != 0)
-		(void) ifnet_set_idle_flags(ifp, 0, ~0);
-#endif /* IFNET_ROUTE_REFCNT */
-
 	if ((retval = dlil_write_begin()) != 0) {
 		if (retval == EDEADLK) {
 			retval = 0;

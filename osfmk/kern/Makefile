@@ -19,7 +19,6 @@ EXPORT_ONLY_FILES = \
 	debug.h \
 	etimer.h \
 	ipc_mig.h \
-	ipc_misc.h \
 	kalloc.h \
 	kext_alloc.h \
 	kern_types.h \

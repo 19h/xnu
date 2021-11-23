@@ -206,25 +206,6 @@ static struct shift_data	sched_decay_shifts[SCHED_DECAY_TICKS] = {
  *
  *	Calculate the timesharing priority based upon usage and load.
  */
-#ifdef CONFIG_EMBEDDED
-
-#define do_priority_computation(thread, pri)							\
-	MACRO_BEGIN															\
-	(pri) = (thread)->priority		/* start with base priority */		\
-	    - ((thread)->sched_usage >> (thread)->pri_shift);				\
-	if ((pri) < MAXPRI_THROTTLE) {										\
-		if ((thread)->task->max_priority > MAXPRI_THROTTLE)				\
-			(pri) = MAXPRI_THROTTLE;									\
-		else															\
-			if ((pri) < MINPRI_USER)									\
-				(pri) = MINPRI_USER;									\
-	} else																\
-	if ((pri) > MAXPRI_KERNEL)											\
-		(pri) = MAXPRI_KERNEL;											\
-	MACRO_END
-
-#else
-
 #define do_priority_computation(thread, pri)							\
 	MACRO_BEGIN															\
 	(pri) = (thread)->priority		/* start with base priority */		\
@@ -235,8 +216,6 @@ static struct shift_data	sched_decay_shifts[SCHED_DECAY_TICKS] = {
 	if ((pri) > MAXPRI_KERNEL)											\
 		(pri) = MAXPRI_KERNEL;											\
 	MACRO_END
-
-#endif
 
 /*
  *	set_priority:

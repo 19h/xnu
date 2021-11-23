@@ -491,11 +491,6 @@ protected:
 public:
     static  IOPMWorkQueue * create( IOService * inOwner, Action work, Action retire );
     void    queuePMRequest( IOPMRequest * request );
-
-    inline boolean_t isEmpty( void )
-    {
-        return queue_empty(&fWorkQueue);
-    }
 };
 
 class IOPMCompletionQueue : public IOEventSource

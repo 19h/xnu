@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -182,14 +182,7 @@ struct PE_Video {
 	char		v_pixelFormat[64];
 	unsigned long	v_offset;	/* offset into video memory to start at */
 	unsigned long	v_length;	/* length of video memory (0 for v_rowBytes * v_height) */
-	unsigned char	v_rotate;	/* Rotation: 0:normal, 1:right 90, 2:left 180, 3:left 90 */
-	unsigned char	v_scale;	/* Scale Factor for both X & Y */
-	char		reserved1[2];
-#ifdef __LP64__
-	long		reserved2;
-#else
-	long		v_baseAddrHigh;
-#endif
+	long		v_resv[ 2 ];
 };
 
 typedef struct PE_Video       PE_Video;
@@ -215,7 +208,6 @@ extern int PE_initialize_console(
 #define kPEReleaseScreen	5
 #define kPEEnableScreen	 	6
 #define kPEDisableScreen	7
-#define kPEBaseAddressChange	8
 
 extern void PE_display_icon( unsigned int flags,
 			     const char * name );

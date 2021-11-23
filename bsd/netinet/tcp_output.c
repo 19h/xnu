@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -183,7 +183,7 @@ extern u_int32_t dlil_filter_count;
 extern u_int32_t kipf_count;
 
 static int tcp_ip_output(struct socket *, struct tcpcb *, struct mbuf *, int,
-    struct mbuf *, int, int, int32_t);
+    struct mbuf *, int, int);
 
 static __inline__ u_int16_t
 get_socket_id(struct socket * s)
@@ -578,7 +578,7 @@ after_sack_rexmit:
 
 				error = tcp_ip_output(so, tp, packetlist,
 				    packchain_listadd, tp_inp_options,
-				    (so_options & SO_DONTROUTE), (sack_rxmit | (sack_bytes_rxmt != 0)), 0);
+				    (so_options & SO_DONTROUTE), (sack_rxmit | (sack_bytes_rxmt != 0)));
 
 				tp->t_flags &= ~TF_SENDINPROG;
 			}
@@ -825,7 +825,7 @@ just_return:
 		tp->t_flags |= TF_SENDINPROG;
 
 		error = tcp_ip_output(so, tp, packetlist, packchain_listadd,
-		    tp_inp_options, (so_options & SO_DONTROUTE), (sack_rxmit | (sack_bytes_rxmt != 0)), recwin);
+		    tp_inp_options, (so_options & SO_DONTROUTE), (sack_rxmit | (sack_bytes_rxmt != 0)));
 
 		tp->t_flags &= ~TF_SENDINPROG;
 	}
@@ -1530,10 +1530,6 @@ timer:
 		}
 #endif /*IPSEC*/
 		m->m_pkthdr.socket_id = socket_id;
-
-#if PKT_PRIORITY
-		set_traffic_class(m, so, MBUF_TC_NONE);
-#endif /* PKT_PRIORITY */
 		error = ip6_output(m,
 			    inp6_pktopts,
 			    &tp->t_inpcb->in6p_route,
@@ -1596,9 +1592,6 @@ timer:
 	lost = 0;
 	m->m_pkthdr.socket_id = socket_id;
 	m->m_nextpkt = NULL;
-#if PKT_PRIORITY
-	set_traffic_class(m, so, MBUF_TC_NONE);
-#endif /* PKT_PRIORITY */
 	tp->t_pktlist_sentlen += len;
 	tp->t_lastchain++;
 	if (tp->t_pktlist_head != NULL) {
@@ -1625,7 +1618,7 @@ timer:
 
 			error = tcp_ip_output(so, tp, packetlist,
 			    packchain_listadd, tp_inp_options,
-			    (so_options & SO_DONTROUTE), (sack_rxmit | (sack_bytes_rxmt != 0)), recwin);
+			    (so_options & SO_DONTROUTE), (sack_rxmit | (sack_bytes_rxmt != 0)));
 
 			tp->t_flags &= ~TF_SENDINPROG;
 			if (error) {
@@ -1653,6 +1646,10 @@ timer:
 		packchain_looped++;
 		tcpstat.tcps_sndtotal++;
 
+		if (recwin > 0 && SEQ_GT(tp->rcv_nxt+recwin, tp->rcv_adv))
+			tp->rcv_adv = tp->rcv_nxt + recwin;
+		tp->last_ack_sent = tp->rcv_nxt;
+		tp->t_flags &= ~(TF_ACKNOW|TF_DELACK);
 		goto again;
 	}
    }
@@ -1729,18 +1726,12 @@ out:
 	 * Data sent (as far as we can tell).
 	 * If this advertises a larger window than any other segment,
 	 * then remember the size of the advertised window.
-	 * Make sure ACK/DELACK conditions are cleared before
-	 * we unlock the socket.
-	 *  NOTE: for now, this is done in tcp_ip_output for IPv4
+	 * Any pending ACK has now been sent.
 	 */
-#if INET6
-	if (isipv6) {
-		if (recwin > 0 && SEQ_GT(tp->rcv_nxt + recwin, tp->rcv_adv))
-			tp->rcv_adv = tp->rcv_nxt + recwin;
-		tp->last_ack_sent = tp->rcv_nxt;
-		tp->t_flags &= ~(TF_ACKNOW | TF_DELACK);
-	}
-#endif
+	if (recwin > 0 && SEQ_GT(tp->rcv_nxt + recwin, tp->rcv_adv))
+		tp->rcv_adv = tp->rcv_nxt + recwin;
+	tp->last_ack_sent = tp->rcv_nxt;
+	tp->t_flags &= ~(TF_ACKNOW|TF_DELACK);
 
 	KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_END,0,0,0,0,0);
 	if (sendalot && (!tcp_do_newreno || --maxburst))
@@ -1750,7 +1741,7 @@ out:
 
 static int
 tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
-    int cnt, struct mbuf *opt, int flags, int sack_in_progress, int recwin)
+    int cnt, struct mbuf *opt, int flags, int sack_in_progress)
 {
 	int error = 0;
 	boolean_t chain;
@@ -1758,9 +1749,6 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	struct inpcb *inp = tp->t_inpcb;
 	struct ip_out_args ipoa;
 	struct route ro;
-#if CONFIG_OUT_IF
-	unsigned int outif;
-#endif /* CONFIG_OUT_IF */
 
 	/* If socket was bound to an ifindex, tell ip_output about it */
 	ipoa.ipoa_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
@@ -1771,15 +1759,9 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	inp_route_copyout(inp, &ro);
 
 	/*
-	 * Data sent (as far as we can tell).
-	 * If this advertises a larger window than any other segment,
-	 * then remember the size of the advertised window.
 	 * Make sure ACK/DELACK conditions are cleared before
 	 * we unlock the socket.
 	 */
-	if (recwin > 0 && SEQ_GT(tp->rcv_nxt + recwin, tp->rcv_adv))
-		tp->rcv_adv = tp->rcv_nxt + recwin;
-	tp->last_ack_sent = tp->rcv_nxt;
 	tp->t_flags &= ~(TF_ACKNOW | TF_DELACK);
 
 	/*
@@ -1828,7 +1810,6 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			 */
 			cnt = 0;
 		}
-	
 		error = ip_output_list(pkt, cnt, opt, &ro, flags, 0, &ipoa);
 		if (chain || error) {
 			/*

@@ -107,7 +107,6 @@ IOTimeStamp(uintptr_t csc,
 
 
 /* IOKit infrastructure subclasses */
-#define IODBG_INTC(code)			(KDBG_CODE(DBG_IOKIT, DBG_IOINTC, code))
 #define IODBG_WORKLOOP(code)		(KDBG_CODE(DBG_IOKIT, DBG_IOWORKLOOP, code))
 #define IODBG_INTES(code)			(KDBG_CODE(DBG_IOKIT, DBG_IOINTES, code))
 #define IODBG_TIMES(code)			(KDBG_CODE(DBG_IOKIT, DBG_IOCLKES, code))
@@ -132,9 +131,6 @@ IOTimeStamp(uintptr_t csc,
 /* DBG_IOKIT/DBG_IOSERIAL codes */
 
 /* DBG_IOKIT/DBG_IOTTY codes */
-
-/* DBG_IOKIT/DBG_IOINTC codes */
-#define IOINTC_HANDLER	1	/* 0x05000004 */
 
 /* DBG_IOKIT/DBG_IOWORKLOOP codes */
 #define IOWL_CLIENT		1	/* 0x05010004 */

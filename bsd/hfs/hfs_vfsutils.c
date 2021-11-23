@@ -66,6 +66,7 @@
 static void ReleaseMetaFileVNode(struct vnode *vp);
 static int  hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_args);
 
+static void hfs_metadatazone_init(struct hfsmount *);
 static u_int32_t hfs_hotfile_freeblocks(struct hfsmount *);
 
 
@@ -144,13 +145,9 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 	 * When an HFS name cannot be encoded with the current
 	 * volume encoding we use MacRoman as a fallback.
 	 */
-	if (error || (utf8chars == 0)) {
+	if (error || (utf8chars == 0))
 		(void) mac_roman_to_utf8(mdb->drVN, NAME_MAX, &utf8chars, vcb->vcbVN);
-		/* If we fail to encode to UTF8 from Mac Roman, the name is bad. Deny mount */
-		if (error) {
-			goto MtVolErr;
-		}
-	}
+
 	hfsmp->hfs_logBlockSize = BestBlockSizeFit(vcb->blockSize, MAXBSIZE, hfsmp->hfs_logical_block_size);
 	vcb->vcbVBMIOSize = kHFSBlockSize;
 
@@ -245,7 +242,7 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 	}
 	hfsmp->hfs_allocation_cp = VTOC(hfsmp->hfs_allocation_vp);
 
-    /* mark the volume dirty (clear clean unmount bit) */
+      	/* mark the volume dirty (clear clean unmount bit) */
 	vcb->vcbAtrb &=	~kHFSVolumeUnmountedMask;
 
     if (error == noErr)
@@ -268,17 +265,14 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 	hfs_unlock(VTOC(hfsmp->hfs_catalog_vp));
 	hfs_unlock(VTOC(hfsmp->hfs_extents_vp));
 
-	if (error == noErr) {
-		/* If successful, then we can just return once we've unlocked the cnodes */
-		return error;
-	}
+    goto	CmdDone;
 
     //--	Release any resources allocated so far before exiting with an error:
 MtVolErr:
 	ReleaseMetaFileVNode(hfsmp->hfs_catalog_vp);
 	ReleaseMetaFileVNode(hfsmp->hfs_extents_vp);
-	ReleaseMetaFileVNode(hfsmp->hfs_allocation_vp);
 
+CmdDone:
     return (error);
 }
 
@@ -739,8 +733,7 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	 * Allow hot file clustering if conditions allow.
 	 */
 	if ((hfsmp->hfs_flags & HFS_METADATA_ZONE)  &&
-	    ((hfsmp->hfs_flags & HFS_READ_ONLY) == 0) &&
-	    ((hfsmp->hfs_mp->mnt_kern_flag & MNTK_SSD) == 0)) {
+	    ((hfsmp->hfs_flags & HFS_READ_ONLY) == 0)) {
 		(void) hfs_recording_init(hfsmp);
 	}
 
@@ -2408,7 +2401,7 @@ hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_a
 #define HOTBAND_MINIMUM_SIZE  (10*1024*1024)
 #define HOTBAND_MAXIMUM_SIZE  (512*1024*1024)
 
-void
+static void
 hfs_metadatazone_init(struct hfsmount *hfsmp)
 {
 	ExtendedVCB  *vcb;
@@ -2420,7 +2413,7 @@ hfs_metadatazone_init(struct hfsmount *hfsmp)
 	int  items, really_do_it=1;
 
 	vcb = HFSTOVCB(hfsmp);
-	fs_size = (u_int64_t)vcb->blockSize * (u_int64_t)vcb->allocLimit;
+	fs_size = (u_int64_t)vcb->blockSize * (u_int64_t)vcb->totalBlocks;
 
 	/*
 	 * For volumes less than 10 GB, don't bother.
@@ -2542,34 +2535,16 @@ hfs_metadatazone_init(struct hfsmount *hfsmp)
 	hfsmp->hfs_min_alloc_start = zonesize / vcb->blockSize;
 	/*
 	 * If doing the round up for hfs_min_alloc_start would push us past
-	 * allocLimit, then just reset it back to 0.  Though using a value 
-	 * bigger than allocLimit would not cause damage in the block allocator
+	 * totalBlocks, then just reset it back to 0.  Though using a value 
+	 * bigger than totalBlocks would not cause damage in the block allocator
 	 * code, this value could get stored in the volume header and make it out 
 	 * to disk, making the volume header technically corrupt.
 	 */
-	if (hfsmp->hfs_min_alloc_start >= hfsmp->allocLimit) {
+	if (hfsmp->hfs_min_alloc_start >= hfsmp->totalBlocks) {
 		hfsmp->hfs_min_alloc_start = 0;
 	}
 
 	if (really_do_it == 0) {
-		/* If metadata zone needs to be disabled because the 
-		 * volume was truncated, clear the bit and zero out 
-		 * the values that are no longer needed.
-		 */
-		if (hfsmp->hfs_flags & HFS_METADATA_ZONE) {
-			/* Disable metadata zone */
-			hfsmp->hfs_flags &= ~HFS_METADATA_ZONE;
-			
-			/* Zero out mount point values that are not required */
-			hfsmp->hfs_catalog_maxblks = 0;
-			hfsmp->hfs_hotfile_maxblks = 0;
-			hfsmp->hfs_hotfile_start = 0;
-			hfsmp->hfs_hotfile_end = 0;
-			hfsmp->hfs_hotfile_freeblks = 0;
-			hfsmp->hfs_metazone_start = 0;
-			hfsmp->hfs_metazone_end = 0;
-		}
-		
 		return;
 	}
 	
@@ -2791,16 +2766,15 @@ int
 hfs_journal_flush(struct hfsmount *hfsmp)
 {
 	int ret;
-	
-	/* Only peek at hfsmp->jnl while holding the global lock */
-	lck_rw_lock_shared(&hfsmp->hfs_global_lock);
+
 	if (hfsmp->jnl) {
+		lck_rw_lock_shared(&hfsmp->hfs_global_lock);
 		ret = journal_flush(hfsmp->jnl);
+		lck_rw_unlock_shared(&hfsmp->hfs_global_lock);
 	} else {
 		ret = 0;
 	}
-	lck_rw_unlock_shared(&hfsmp->hfs_global_lock);
-	
+
 	return ret;
 }
 

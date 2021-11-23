@@ -452,14 +452,11 @@ memory_object_control_uiomove(
 					 */
 					break;
 				}
-				if (dst_page->pageout || dst_page->cleaning) {
+				if (dst_page->pageout) {
 					/*
 					 * this is the list_req_pending | pageout | busy case
-					 * or the list_req_pending | cleaning case...
-					 * which originate from the pageout_scan and
-					 * msync worlds for the pageout case and the hibernate
-					 * pre-cleaning world for the cleaning case...
-					 * we need to reset the state of this page to indicate
+					 * which can originate from both the pageout_scan and
+					 * msync worlds... we need to reset the state of this page to indicate
 					 * it should stay in the cache marked dirty... nothing else we
 					 * can do at this point... we can't block on it, we can't busy
 					 * it and we can't clean it from this routine.
@@ -602,8 +599,6 @@ vnode_pager_bootstrap(void)
 	size = (vm_size_t) sizeof(struct vnode_pager);
 	vnode_pager_zone = zinit(size, (vm_size_t) MAX_VNODE*size,
 				PAGE_SIZE, "vnode pager structures");
-	zone_change(vnode_pager_zone, Z_NOENCRYPT, TRUE);
-
 #if CONFIG_CODE_DECRYPTION
 	apple_protect_pager_bootstrap();
 #endif	/* CONFIG_CODE_DECRYPTION */

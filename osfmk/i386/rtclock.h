@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2007 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -42,15 +42,15 @@
 
 #ifndef ASSEMBLER
 typedef struct rtc_nanotime {
-	volatile uint64_t	tsc_base;	/* timestamp */
-	volatile uint64_t	ns_base;	/* nanoseconds */
-	uint32_t		scale;		/* tsc -> nanosec multiplier */
-	uint32_t		shift;		/* tsc -> nanosec shift/div */
+	uint64_t	tsc_base;		/* timestamp */
+	uint64_t	ns_base;		/* nanoseconds */
+	uint32_t	scale;			/* tsc -> nanosec multiplier */
+	uint32_t	shift;			/* tsc -> nanosec shift/div */
 						/* shift is overloaded with
 						 * lower 32bits of tsc_freq
 						 * on slower machines (SLOW_TSC_THRESHOLD) */
-	volatile uint32_t	generation;	/* 0 == being updated */
-	uint32_t		spare1;
+	uint32_t	generation;		/* 0 == being updated */
+	uint32_t	spare1;
 } rtc_nanotime_t;
 
 #if 0
@@ -66,10 +66,6 @@ extern void	_rtc_nanotime_store(
 			uint64_t	nsec,
 			uint32_t	scale,
 			uint32_t	shift,
-			rtc_nanotime_t	*dst);
-
-extern void	_rtc_nanotime_adjust(
-			uint64_t	tsc_base_delta,
 			rtc_nanotime_t	*dst);
 
 extern uint64_t	_rtc_nanotime_read(

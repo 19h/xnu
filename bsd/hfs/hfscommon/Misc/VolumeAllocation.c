@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -46,7 +46,6 @@ Public routines:
 	BlockDeallocate
 					Deallocate a contiguous run of allocation blocks.
 
-	invalidate_free_extent_cache	Invalidate free extent cache for a given volume.
 
 Internal routines:
 	BlockMarkFree
@@ -87,9 +86,7 @@ Internal routines:
 #include <sys/types.h>
 #include <sys/buf.h>
 #include <sys/systm.h>
-#include <sys/sysctl.h>
 #include <sys/disk.h>
-#include <kern/kalloc.h>
 
 #include "../../hfs.h"
 #include "../../hfs_dbg.h"
@@ -97,10 +94,6 @@ Internal routines:
 #include "../../hfs_endian.h"
 
 #include "../headers/FileMgrInternal.h"
-
-#ifndef CONFIG_HFS_TRIM
-#define CONFIG_HFS_TRIM 0
-#endif
 
 
 enum {
@@ -160,88 +153,6 @@ static OSErr BlockAllocateKnown(
 	u_int32_t		maxBlocks,
 	u_int32_t		*actualStartBlock,
 	u_int32_t		*actualNumBlocks);
-
-static int free_extent_cache_active(
-	ExtendedVCB 		*vcb);
-
-
-/*
-;________________________________________________________________________________
-;
-; Routine:		hfs_unmap_free_extent
-;
-; Function:		Make note of a range of allocation blocks that should be
-;				unmapped (trimmed).  That is, the given range of blocks no
-;				longer have useful content, and the device can unmap the
-;				previous contents.  For example, a solid state disk may reuse
-;				the underlying storage for other blocks.
-;
-;				This routine is only supported for journaled volumes.  The extent
-;				being freed is passed to the journal code, and the extent will
-;				be unmapped after the current transaction is written to disk.
-;
-; Input Arguments:
-;	hfsmp			- The volume containing the allocation blocks.
-;	startingBlock	- The first allocation block of the extent being freed.
-;	numBlocks		- The number of allocation blocks of the extent being freed.
-;________________________________________________________________________________
-*/
-static void hfs_unmap_free_extent(struct hfsmount *hfsmp, u_int32_t startingBlock, u_int32_t numBlocks)
-{
-	if (CONFIG_HFS_TRIM) {
-		u_int64_t offset;
-		u_int64_t length;
-		int err;
-		
-		if ((hfsmp->hfs_flags & HFS_UNMAP) && (hfsmp->jnl != NULL)) {
-			offset = (u_int64_t) startingBlock * hfsmp->blockSize + (u_int64_t) hfsmp->hfsPlusIOPosOffset;
-			length = (u_int64_t) numBlocks * hfsmp->blockSize;
-	
-			err = journal_trim_add_extent(hfsmp->jnl, offset, length);
-			if (err) {
-				printf("hfs_unmap_free_extent: error %d from journal_trim_add_extent", err);
-				hfsmp->hfs_flags &= ~HFS_UNMAP;
-			}
-		}
-	}
-}
-
-
-/*
-;________________________________________________________________________________
-;
-; Routine:		hfs_unmap_alloc_extent
-;
-; Function:		Make note of a range of allocation blocks, some of
-;				which may have previously been passed to hfs_unmap_free_extent,
-;				is now in use on the volume.  The given blocks will be removed
-;				from any pending DKIOCUNMAP.
-;
-; Input Arguments:
-;	hfsmp			- The volume containing the allocation blocks.
-;	startingBlock	- The first allocation block of the extent being allocated.
-;	numBlocks		- The number of allocation blocks being allocated.
-;________________________________________________________________________________
-*/
-static void hfs_unmap_alloc_extent(struct hfsmount *hfsmp, u_int32_t startingBlock, u_int32_t numBlocks)
-{
-	if (CONFIG_HFS_TRIM) {
-		u_int64_t offset;
-		u_int64_t length;
-		int err;
-		
-		if ((hfsmp->hfs_flags & HFS_UNMAP) && (hfsmp->jnl != NULL)) {
-			offset = (u_int64_t) startingBlock * hfsmp->blockSize + (u_int64_t) hfsmp->hfsPlusIOPosOffset;
-			length = (u_int64_t) numBlocks * hfsmp->blockSize;
-			
-			err = journal_trim_remove_extent(hfsmp->jnl, offset, length);
-			if (err) {
-				printf("hfs_unmap_alloc_extent: error %d from journal_trim_remove_extent", err);
-				hfsmp->hfs_flags &= ~HFS_UNMAP;
-			}
-		}
-	}
-}
 
 
 /*
@@ -324,7 +235,10 @@ OSErr BlockAllocate (
 	u_int32_t		startingBlock,		/* preferred starting block, or 0 for no preference */
 	u_int32_t		minBlocks,		/* desired number of blocks to allocate */
 	u_int32_t		maxBlocks,		/* maximum number of blocks to allocate */
-	u_int32_t		flags,			/* option flags */
+	Boolean			forceContiguous,	/* non-zero to force contiguous allocation and to force */
+							/* minBlocks bytes to actually be allocated */
+							
+	Boolean	useMetaZone,
 	u_int32_t		*actualStartBlock,	/* actual first block of allocation */
 	u_int32_t		*actualNumBlocks)	/* number of blocks actually allocated; if forceContiguous */
 							/* was zero, then this may represent fewer than minBlocks */
@@ -332,20 +246,6 @@ OSErr BlockAllocate (
 	u_int32_t  freeBlocks;
 	OSErr			err;
 	Boolean			updateAllocPtr = false;		//	true if nextAllocation needs to be updated
-	Boolean useMetaZone;
-	Boolean forceContiguous;
-
-	if (flags & HFS_ALLOC_FORCECONTIG) {
-		forceContiguous = true;
-	} else {
-		forceContiguous = false;
-	}
-
-	if (flags & HFS_ALLOC_METAZONE) {
-		useMetaZone = true;
-	} else {
-		useMetaZone = false;
-	}
 
 	//
 	//	Initialize outputs in case we get an error
@@ -354,38 +254,25 @@ OSErr BlockAllocate (
 	*actualNumBlocks = 0;
 	freeBlocks = hfs_freeblks(VCBTOHFS(vcb), 0);
 	
-	/* Skip free block check if blocks are being allocated for relocating 
-	 * data during truncating a volume.
-	 * 
-	 * During hfs_truncatefs(), the volume free block count is updated 
-	 * before relocating data to reflect the total number of free blocks 
-	 * that will exist on the volume after resize is successful.  This 
-	 * means that we have reserved allocation blocks required for relocating 
-	 * the data and hence there is no need to check the free blocks.
-	 * It will also prevent resize failure when the number of blocks in 
-	 * an extent being relocated is more than the free blocks that will 
-	 * exist after the volume is resized.
+	//
+	//	If the disk is already full, don't bother.
+	//
+	if (freeBlocks == 0) {
+		err = dskFulErr;
+		goto Exit;
+	}
+	if (forceContiguous && freeBlocks < minBlocks) {
+		err = dskFulErr;
+		goto Exit;
+	}
+	/*
+	 * Clip if necessary so we don't over-subscribe the free blocks.
 	 */
-	if ((flags & HFS_ALLOC_SKIPFREEBLKS) == 0) {
-		//	If the disk is already full, don't bother.
-		if (freeBlocks == 0) {
-			err = dskFulErr;
-			goto Exit;
-		}
-		if (forceContiguous && freeBlocks < minBlocks) {
-			err = dskFulErr;
-			goto Exit;
-		}
-
-		/*
-		 * Clip if necessary so we don't over-subscribe the free blocks.
-		 */
-		if (minBlocks > freeBlocks) {
-			minBlocks = freeBlocks;
-		}
-		if (maxBlocks > freeBlocks) {
-			maxBlocks = freeBlocks;
-		}
+	if (minBlocks > freeBlocks) {
+		minBlocks = freeBlocks;
+	}
+	if (maxBlocks > freeBlocks) {
+		maxBlocks = freeBlocks;
 	}
 
 	//
@@ -497,16 +384,11 @@ Exit:
 				// than one entry in the array
 			}
 		}
-
-		/* 
-		 * Update the number of free blocks on the volume 
-		 *
-		 * Skip updating the free blocks count if the block are 
-		 * being allocated to relocate data as part of hfs_truncatefs()
-		 */
-		if ((flags & HFS_ALLOC_SKIPFREEBLKS) == 0) {
-			vcb->freeBlocks -= *actualNumBlocks;
-		}
+		
+		//
+		//	Update the number of free blocks on the volume
+		//
+		vcb->freeBlocks -= *actualNumBlocks;
 		MarkVCBDirty(vcb);
 		HFS_MOUNT_UNLOCK(vcb, TRUE);
 
@@ -543,8 +425,7 @@ __private_extern__
 OSErr BlockDeallocate (
 	ExtendedVCB		*vcb,			//	Which volume to deallocate space on
 	u_int32_t		firstBlock,		//	First block in range to deallocate
-	u_int32_t		numBlocks, 		//	Number of contiguous blocks to deallocate
-	u_int32_t 		flags)
+	u_int32_t		numBlocks)		//	Number of contiguous blocks to deallocate
 {
 	OSErr			err;
 	u_int32_t		tempWord;
@@ -568,15 +449,7 @@ OSErr BlockDeallocate (
 	//	Update the volume's free block count, and mark the VCB as dirty.
 	//
 	HFS_MOUNT_LOCK(vcb, TRUE);
-	
-	/* 
-	 * Do not update the free block count.  This flags is specified 
-	 * when a volume is being truncated.  
-	 */
-	if ((flags & HFS_ALLOC_SKIPFREEBLKS) == 0) {
-		vcb->freeBlocks += numBlocks;
-	}
-
+	vcb->freeBlocks += numBlocks;
 	vcb->hfs_freed_block_count += numBlocks;
 	if (firstBlock < vcb->sparseAllocation) {
 		vcb->sparseAllocation = firstBlock;
@@ -584,10 +457,6 @@ OSErr BlockDeallocate (
 
 	if (vcb->nextAllocation == (firstBlock + numBlocks)) {
 		HFS_UPDATE_NEXT_ALLOCATION(vcb, (vcb->nextAllocation - numBlocks));
-	}
-
-	if (free_extent_cache_active(vcb) == 0) {
-		goto skip_cache;
 	}
 
 	tempWord = vcb->vcbFreeExtCnt;
@@ -638,7 +507,6 @@ OSErr BlockDeallocate (
 		}
 	}
 
-skip_cache:
 	MarkVCBDirty(vcb);
   	HFS_MOUNT_UNLOCK(vcb, TRUE); 
 
@@ -1124,15 +992,9 @@ Exit:
 	if (err == noErr) {
 		*actualNumBlocks = block - *actualStartBlock;
 
-		// sanity check
-		if ((*actualStartBlock + *actualNumBlocks) > vcb->allocLimit) {
-			panic("hfs: BlockAllocateAny: allocation overflow on \"%s\"", vcb->vcbVN);
-		}
-
-		/* Remove these blocks from the TRIM list if applicable */
-		if (CONFIG_HFS_TRIM) {
-			hfs_unmap_alloc_extent(vcb, *actualStartBlock, *actualNumBlocks);
-		}	
+	// sanity check
+	if ((*actualStartBlock + *actualNumBlocks) > vcb->allocLimit)
+		panic("hfs: BlockAllocateAny: allocation overflow on \"%s\"", vcb->vcbVN);
 	}
 	else {
 		*actualStartBlock = 0;
@@ -1178,14 +1040,8 @@ static OSErr BlockAllocateKnown(
 	u_int32_t		foundBlocks;
 	u_int32_t		newStartBlock, newBlockCount;
 
-	HFS_MOUNT_LOCK(vcb, TRUE);
-	if (free_extent_cache_active(vcb) == 0 ||
-	    vcb->vcbFreeExtCnt == 0 || 
-	    vcb->vcbFreeExt[0].blockCount == 0) {
-		HFS_MOUNT_UNLOCK(vcb, TRUE);
+	if (vcb->vcbFreeExtCnt == 0 || vcb->vcbFreeExt[0].blockCount == 0)
 		return dskFulErr;
-	}
-	HFS_MOUNT_UNLOCK(vcb, TRUE);
 
 	//	Just grab up to maxBlocks of the first (largest) free exent.
 	*actualStartBlock = vcb->vcbFreeExt[0].startBlock;
@@ -1304,10 +1160,7 @@ OSErr BlockMarkAllocated(
 	// XXXdbg
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
 
-	if (CONFIG_HFS_TRIM) {
-		hfs_unmap_alloc_extent(vcb, startingBlock, numBlocks);
-	}
-	
+
 	//
 	//	Pre-read the bitmap block containing the first word of allocation
 	//
@@ -1460,12 +1313,10 @@ _______________________________________________________________________
 __private_extern__
 OSErr BlockMarkFree(
 	ExtendedVCB		*vcb,
-	u_int32_t		startingBlock_in,
-	register u_int32_t	numBlocks_in)
+	u_int32_t		startingBlock,
+	register u_int32_t	numBlocks)
 {
 	OSErr			err;
-	u_int32_t	startingBlock = startingBlock_in;
-	u_int32_t	numBlocks = numBlocks_in;
 	register u_int32_t	*currentWord;	//	Pointer to current word within bitmap block
 	register u_int32_t	wordsLeft;		//	Number of words left in this bitmap block
 	register u_int32_t	bitMask;		//	Word with given bits already set (ready to OR in)
@@ -1477,6 +1328,7 @@ OSErr BlockMarkFree(
 	u_int32_t  wordsPerBlock;
     // XXXdbg
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
+	dk_discard_t discard;
 
 	/*
 	 * NOTE: We use vcb->totalBlocks instead of vcb->allocLimit because we
@@ -1488,6 +1340,11 @@ OSErr BlockMarkFree(
 		err = EIO;
 		goto Exit;
 	}
+
+	memset(&discard, 0, sizeof(dk_discard_t));
+	discard.offset = (uint64_t)startingBlock * (uint64_t)vcb->blockSize;
+	discard.length = (uint64_t)numBlocks * (uint64_t)vcb->blockSize;
+
 
 	//
 	//	Pre-read the bitmap block containing the first word of allocation
@@ -1612,8 +1469,9 @@ Exit:
 	if (buffer)
 		(void)ReleaseBitmapBlock(vcb, blockRef, true);
 
-	if (CONFIG_HFS_TRIM && err == noErr) {
-		hfs_unmap_free_extent(vcb, startingBlock_in, numBlocks_in);
+	if (err == noErr) {
+		// it doesn't matter if this fails, it's just informational anyway
+		VNOP_IOCTL(vcb->hfs_devvp, DKIOCDISCARD, (caddr_t)&discard, 0, vfs_context_kernel());
 	}
 
 
@@ -1916,13 +1774,6 @@ FoundUsed:
 		if (foundBlocks >= minBlocks)
 			break;		//	Found what we needed!
 
-		HFS_MOUNT_LOCK(vcb, TRUE);
-		if (free_extent_cache_active(vcb) == 0) {
-			HFS_MOUNT_UNLOCK(vcb, TRUE);
-			goto skip_cache;
-		}
-		HFS_MOUNT_UNLOCK(vcb, TRUE);
-
 		//	This free chunk wasn't big enough.  Try inserting it into the free extent cache in case
 		//	the allocation wasn't forced contiguous.
 		really_add = 0;
@@ -1987,7 +1838,7 @@ FoundUsed:
 				updated_free_extents = 1;
 			}
 		}
-skip_cache:
+
 		sanity_check_free_ext(vcb, 0);
 
 	} while (currentBlock < stopBlock);
@@ -2167,43 +2018,4 @@ Exit:
 	return (inuse);
 }
 
-/* Invalidate free extent cache for a given volume.
- * This cache is invalidated and disabled when a volume is being resized 
- * (via hfs_trucatefs() or hfs_extendefs()).
- *
- * Returns: Nothing
- */
-void invalidate_free_extent_cache(ExtendedVCB *vcb)
-{
-	u_int32_t i;
 
-	HFS_MOUNT_LOCK(vcb, TRUE);
-	for (i = 0; i < vcb->vcbFreeExtCnt; i++) {
-		vcb->vcbFreeExt[i].startBlock = 0;
-		vcb->vcbFreeExt[i].blockCount = 0;
-	}
-	vcb->vcbFreeExtCnt = 0;
-	HFS_MOUNT_UNLOCK(vcb, TRUE);
-
-	return;
-}
-
-/* Check whether free extent cache is active or not. 
- * This cache is invalidated and disabled when a volume is being resized 
- * (via hfs_trucatefs() or hfs_extendefs()).
- *
- * This function assumes that the caller is holding the lock on 
- * the mount point.
- *
- * Returns: 0 if the cache is not active,
- *          1 if the cache is active.
- */
-static int free_extent_cache_active(ExtendedVCB *vcb)
-{
-	int retval = 1;
-
-	if (vcb->hfs_flags & HFS_RESIZE_IN_PROGRESS) {
-		retval = 0;
-	}
-	return retval;
-}

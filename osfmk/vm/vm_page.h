@@ -249,8 +249,7 @@ struct vm_page {
 					   /* other pages		   */
 			zero_fill:1,
 			reusable:1,
-		        lopage:1,
-			__unused_object_bits:6;  /* 6 bits available here */
+			__unused_object_bits:7;  /* 7 bits available here */
 
 #if __LP64__
 	unsigned int __unused_padding;	/* Pad structure explicitly
@@ -475,20 +474,13 @@ extern ppnum_t	vm_page_guard_addr;
 
 extern boolean_t	vm_page_deactivate_hint;
 
-/*
-   0 = all pages avail ( default. )
-   1 = disable high mem ( cap max pages to 4G)
-   2 = prefer himem
-*/   
+// 0 = all pages avail, 1 = disable high mem, 2 = prefer himem
 extern int		vm_himemory_mode;
 
-extern boolean_t	vm_lopage_needed;
-extern uint32_t		vm_lopage_free_count;
-extern uint32_t		vm_lopage_free_limit;
-extern uint32_t		vm_lopage_lowater;
-extern boolean_t	vm_lopage_refill;
+extern ppnum_t		vm_lopage_poolend;
+extern int		vm_lopage_poolsize;
 extern uint64_t		max_valid_dma_address;
-extern ppnum_t		max_valid_low_ppnum;
+
 
 /*
  * Prototypes for functions exported by this module.
@@ -544,8 +536,7 @@ extern vm_page_t	vm_page_alloc_guard(
 
 extern void		vm_page_init(
 					vm_page_t	page,
-					ppnum_t		phys_page,
-					boolean_t	lopage);
+					ppnum_t		phys_page);
 
 extern void		vm_page_free(
 	                                vm_page_t	page);
@@ -628,8 +619,7 @@ extern void		vm_page_wire(
 					vm_page_t	page);
 
 extern void		vm_page_unwire(
-	                                vm_page_t	page,
-					boolean_t	queueit);
+					vm_page_t	page);
 
 extern void		vm_set_page_size(void);
 

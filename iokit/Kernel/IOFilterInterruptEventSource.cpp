@@ -25,12 +25,43 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+/*
+Copyright (c) 1999 Apple Computer, Inc.  All rights reserved.
 
+HISTORY
+    1999-4-15	Godfrey van der Linden(gvdl)
+        Created.
+*/
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/IOService.h>
-#include <IOKit/IOKitDebug.h>
 #include <IOKit/IOTimeStamp.h>
 #include <IOKit/IOWorkLoop.h>
+
+#if KDEBUG
+
+#define IOTimeTypeStampS(t)						\
+do {									\
+    IOTimeStampStart(IODBG_INTES(t),					\
+                     (uintptr_t) this, (uintptr_t) owner);	\
+} while(0)
+
+#define IOTimeTypeStampE(t)						\
+do {									\
+    IOTimeStampEnd(IODBG_INTES(t),					\
+                   (uintptr_t) this, (uintptr_t) owner);		\
+} while(0)
+
+#define IOTimeStampLatency()						\
+do {									\
+    IOTimeStampEnd(IODBG_INTES(IOINTES_LAT),				\
+                   (uintptr_t) this, (uintptr_t) owner);		\
+} while(0)
+
+#else /* !KDEBUG */
+#define IOTimeTypeStampS(t)
+#define IOTimeTypeStampE(t)
+#define IOTimeStampLatency()
+#endif /* KDEBUG */
 
 #define super IOInterruptEventSource
 
@@ -102,18 +133,13 @@ IOFilterInterruptEventSource *IOFilterInterruptEventSource
 
 void IOFilterInterruptEventSource::signalInterrupt()
 {
-	bool trace = (gIOKitTrace & kIOTraceIntEventSource) ? true : false;
+IOTimeStampLatency();
 
     producerCount++;
 
-	if (trace)
-	    IOTimeStampStartConstant(IODBG_INTES(IOINTES_SEMA), (uintptr_t) this, (uintptr_t) owner);
-    
+IOTimeTypeStampS(IOINTES_SEMA);
     signalWorkAvailable();
-	
-	if (trace)
-	    IOTimeStampEndConstant(IODBG_INTES(IOINTES_SEMA), (uintptr_t) this, (uintptr_t) owner);
-	
+IOTimeTypeStampE(IOINTES_SEMA);
 }
 
 
@@ -130,42 +156,38 @@ void IOFilterInterruptEventSource::normalInterruptOccurred
     (void */*refcon*/, IOService */*prov*/, int /*source*/)
 {
     bool filterRes;
-	bool	trace = (gIOKitTrace & kIOTraceIntEventSource) ? true : false;
 
-	if (trace)
-		IOTimeStampStartConstant(IODBG_INTES(IOINTES_FILTER),
-								 (uintptr_t) filterAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+IOTimeTypeStampS(IOINTES_INTCTXT);
 
-    // Call the filter.
+IOTimeTypeStampS(IOINTES_INTFLTR);
+    IOTimeStampConstant(IODBG_INTES(IOINTES_FILTER),
+                        (uintptr_t) filterAction, (uintptr_t) owner);
     filterRes = (*filterAction)(owner, this);
-	
-	if (trace)
-		IOTimeStampEndConstant(IODBG_INTES(IOINTES_FILTER),
-							   (uintptr_t) filterAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+IOTimeTypeStampE(IOINTES_INTFLTR);
 
     if (filterRes)
         signalInterrupt();
+
+IOTimeTypeStampE(IOINTES_INTCTXT);
 }
 
 void IOFilterInterruptEventSource::disableInterruptOccurred
     (void */*refcon*/, IOService *prov, int source)
 {
     bool filterRes;
-	bool	trace = (gIOKitTrace & kIOTraceIntEventSource) ? true : false;
 
-	if (trace)
-		IOTimeStampStartConstant(IODBG_INTES(IOINTES_FILTER),
-								 (uintptr_t) filterAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+IOTimeTypeStampS(IOINTES_INTCTXT);
 
-    // Call the filter.
+IOTimeTypeStampS(IOINTES_INTFLTR);
+    IOTimeStampConstant(IODBG_INTES(IOINTES_FILTER),
+                        (uintptr_t) filterAction, (uintptr_t) owner);
     filterRes = (*filterAction)(owner, this);
-	
-	if (trace)
-		IOTimeStampEndConstant(IODBG_INTES(IOINTES_FILTER),
-							   (uintptr_t) filterAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+IOTimeTypeStampE(IOINTES_INTFLTR);
 
     if (filterRes) {
         prov->disableInterrupt(source);	/* disable the interrupt */
+
         signalInterrupt();
     }
+IOTimeTypeStampE(IOINTES_INTCTXT);
 }

@@ -2033,7 +2033,6 @@ wq_runitem(proc_t p, user_addr_t item, thread_t th, struct threadlist *tl,
 	   int reuse_thread, int wake_thread, int return_directly)
 {
 	int ret = 0;
-	boolean_t need_resume = FALSE;
 
 	KERNEL_DEBUG1(0xefffd004 | DBG_FUNC_START, tl->th_workq, tl->th_priority, tl->th_affinity_tag, thread_tid(current_thread()), thread_tid(th));
 
@@ -2064,19 +2063,11 @@ wq_runitem(proc_t p, user_addr_t item, thread_t th, struct threadlist *tl,
 		if (tl->th_flags & TH_LIST_NEED_WAKEUP)
 			wakeup(tl);
 		else
-			need_resume = TRUE;
+			thread_resume(th);
 
 		tl->th_flags &= ~(TH_LIST_BUSY | TH_LIST_NEED_WAKEUP);
 		
 		workqueue_unlock(p);
-
-		if (need_resume) {
-			/*
-			 * need to do this outside of the workqueue spin lock
-			 * since thread_resume locks the thread via a full mutex
-			 */
-			thread_resume(th);
-		}
 	}
 }
 
@@ -2284,10 +2275,11 @@ out:
 	return(error);
 }
 
-int thread_selfid(__unused struct proc *p, __unused struct thread_selfid_args *uap, uint64_t *retval)
+int thread_selfid(__unused struct proc *p, __unused struct thread_selfid_args *uap, user_addr_t *retval)
 {
-	thread_t thread = current_thread();
-	*retval = thread_tid(thread);
+	thread_t		thread = current_thread();
+	uint64_t		thread_id = thread_tid(thread);
+	*retval = thread_id;
 	return KERN_SUCCESS;
 }
 

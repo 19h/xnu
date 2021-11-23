@@ -212,6 +212,8 @@ int			pv_hashed_kern_free_count = 0;
 
 zone_t		pv_hashed_list_zone;	/* zone of pv_hashed_entry structures */
 
+static zone_t pdpt_zone;
+
 /*
  *	Each entry in the pv_head_table is locked by a bit in the
  *	pv_lock_table.  The lock bits are accessed by the physical
@@ -642,7 +644,7 @@ pmap_init(void)
 {
 	long			npages;
 	vm_offset_t		addr;
-	vm_size_t		s, vsize;
+	vm_size_t		s;
 	vm_map_offset_t		vaddr;
 	ppnum_t ppn;
 
@@ -681,9 +683,6 @@ pmap_init(void)
 
 	memset((char *)addr, 0, s);
 
-	vaddr = addr;
-	vsize = s;
-
 #if PV_DEBUG
 	if (0 == npvhash) panic("npvhash not initialized");
 #endif
@@ -715,37 +714,23 @@ pmap_init(void)
 		for (pn = pmptr->base; pn <= pmptr->end; pn++) {
 			if (pn < last_pn) {
 				pmap_phys_attributes[pn] |= PHYS_MANAGED;
-
 				if (pn > last_managed_page)
 					last_managed_page = pn;
-
-				if (pn < lowest_lo)
-					pmap_phys_attributes[pn] |= PHYS_NOENCRYPT;
-				else if (pn >= lowest_hi && pn <= highest_hi)
-					pmap_phys_attributes[pn] |= PHYS_NOENCRYPT;
-
 			}
 		}
 	}
-	while (vsize) {
-		ppn = pmap_find_phys(kernel_pmap, vaddr);
 
-		pmap_phys_attributes[ppn] |= PHYS_NOENCRYPT;
-
-		vaddr += PAGE_SIZE;
-		vsize -= PAGE_SIZE;
-	}
 	/*
 	 *	Create the zone of physical maps,
 	 *	and of the physical-to-virtual entries.
 	 */
 	s = (vm_size_t) sizeof(struct pmap);
 	pmap_zone = zinit(s, 400*s, 4096, "pmap"); /* XXX */
-        zone_change(pmap_zone, Z_NOENCRYPT, TRUE);
-
 	s = (vm_size_t) sizeof(struct pv_hashed_entry);
 	pv_hashed_list_zone = zinit(s, 10000*s, 4096, "pv_list"); /* XXX */
-	zone_change(pv_hashed_list_zone, Z_NOENCRYPT, TRUE);
+	s = 63;
+	pdpt_zone = zinit(s, 400*s, 4096, "pdpt"); /* XXX */
+
 
 	/* create pv entries for kernel pages mapped by low level
 	   startup code.  these have to exist so we can pmap_remove()
@@ -1485,7 +1470,7 @@ pmap_pre_expand(pmap_t pmap, vm_map_offset_t vaddr) {
 	PMAP_LOCK(pmap);
 
 	if(pmap64_pdpt(pmap, vaddr) == PDPT_ENTRY_NULL) {
-		if (!pmap_next_page_hi(&pn))
+		if (!pmap_next_page_k64(&pn))
 			panic("pmap_pre_expand");
 
 		pmap_zero_page(pn);
@@ -1499,7 +1484,7 @@ pmap_pre_expand(pmap_t pmap, vm_map_offset_t vaddr) {
 	}
 
 	if(pmap64_pde(pmap, vaddr) == PD_ENTRY_NULL) {
-		if (!pmap_next_page_hi(&pn))
+		if (!pmap_next_page_k64(&pn))
 			panic("pmap_pre_expand");
 
 		pmap_zero_page(pn);
@@ -1513,7 +1498,7 @@ pmap_pre_expand(pmap_t pmap, vm_map_offset_t vaddr) {
 	}
 
 	if(pmap_pte(pmap, vaddr) == PT_ENTRY_NULL) {
-		if (!pmap_next_page_hi(&pn))
+		if (!pmap_next_page_k64(&pn))
 			panic("pmap_pre_expand");
 
 		pmap_zero_page(pn);
@@ -2134,8 +2119,6 @@ pt_fake_zone_info(
 	*exhaustable = 0;
 }
 
-extern 	long	NMIPI_acks;
-
 static inline void
 pmap_cpuset_NMIPI(cpu_set cpu_mask) {
 	unsigned int cpu, cpu_bit;
@@ -2238,7 +2221,17 @@ pmap_flush_tlbs(pmap_t	pmap)
 		 * Wait for those other cpus to acknowledge
 		 */
 		while (cpus_to_respond != 0) {
-			long orig_acks = 0;
+			if (mach_absolute_time() > deadline) {
+				if (mp_recent_debugger_activity())
+					continue;
+				if (!panic_active()) {
+					pmap_tlb_flush_timeout = TRUE;
+					pmap_cpuset_NMIPI(cpus_to_respond);
+				}
+				panic("pmap_flush_tlbs() timeout: "
+				    "cpu(s) failing to respond to interrupts, pmap=%p cpus_to_respond=0x%lx",
+				    pmap, cpus_to_respond);
+			}
 
 			for (cpu = 0, cpu_bit = 1; cpu < real_ncpus; cpu++, cpu_bit <<= 1) {
 				if ((cpus_to_respond & cpu_bit) != 0) {
@@ -2251,17 +2244,6 @@ pmap_flush_tlbs(pmap_t	pmap)
 				}
 				if (cpus_to_respond == 0)
 					break;
-			}
-			if (mach_absolute_time() > deadline) {
-				if (machine_timeout_suspended())
-					continue;
-				pmap_tlb_flush_timeout = TRUE;
-				orig_acks = NMIPI_acks;
-				pmap_cpuset_NMIPI(cpus_to_respond);
-
-				panic("TLB invalidation IPI timeout: "
-				    "CPU(s) failed to respond to interrupts, unresponsive CPU bitmap: 0x%lx, NMIPI acks: orig: 0x%lx, now: 0x%lx",
-				    cpus_to_respond, orig_acks, NMIPI_acks);
 			}
 		}
 	}
