@@ -108,20 +108,17 @@ unsigned int backtrace_interrupted(uintptr_t *bt, unsigned int btlen,
  * thread, nor can it be called from interrupt context or with interrupts
  * disabled.
  *
- * @param error The precise error code that occurred is stored here, or 0 if no
- * error occurred.
+ * @param btwritten On success, the number of return addresses written is stored
+ * here.
  *
  * @param user64 On success, true is stored here if user space was running in
  * 64-bit mode, and false is stored otherwise.
  *
- * @param was_truncated true is stored here if the full stack could not be written
- * to bt.
- *
- * @return Returns the number of frames written to bt.
+ * @return Returns 0 on success and an errno value on error.
  *
  * @seealso backtrace
  */
-unsigned int backtrace_user(uintptr_t *bt, unsigned int btlen, int *error,
+int backtrace_user(uintptr_t *bt, unsigned int btlen, unsigned int *btwritten,
     bool *user64, bool *was_truncated);
 
 /*
@@ -137,8 +134,8 @@ unsigned int backtrace_user(uintptr_t *bt, unsigned int btlen, int *error,
  *
  * @see backtrace_user
  */
-unsigned int backtrace_thread_user(void *thread, uintptr_t *bt,
-    unsigned int btlen, int *error, bool *user64, bool *was_truncated);
+int backtrace_thread_user(void *thread, uintptr_t *bt, unsigned int btlen,
+    unsigned int *btwritten, bool *user64, bool *was_truncated);
 
 __END_DECLS
 

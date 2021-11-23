@@ -372,7 +372,6 @@ rip_output(
 	int flags = (so->so_options & SO_DONTROUTE) | IP_ALLOWBROADCAST;
 	struct ip_out_args ipoa;
 	struct ip_moptions *imo;
-	int tos = IPTOS_UNSPEC;
 	int error = 0;
 
 	bzero(&ipoa, sizeof(ipoa));
@@ -384,7 +383,6 @@ rip_output(
 
 
 	if (control != NULL) {
-		tos = so_tos_from_control(control);
 		sotc = so_tc_from_control(control, &netsvctype);
 
 		m_freem(control);
@@ -446,11 +444,7 @@ rip_output(
 			return ENOBUFS;
 		}
 		ip = mtod(m, struct ip *);
-		if (tos != IPTOS_UNSPEC) {
-			ip->ip_tos = (uint8_t)(tos & IPTOS_MASK);
-		} else {
-			ip->ip_tos = inp->inp_ip_tos;
-		}
+		ip->ip_tos = inp->inp_ip_tos;
 		ip->ip_off = 0;
 		ip->ip_p = inp->inp_ip_p;
 		ip->ip_len = m->m_pkthdr.len;

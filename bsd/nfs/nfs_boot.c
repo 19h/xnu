@@ -92,9 +92,6 @@
  *	- replaced big automatic arrays with MALLOC'd data
  */
 
-#include <nfs/nfs_conf.h>
-#if CONFIG_NFS_CLIENT
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -829,5 +826,3 @@ out:
 }
 
 #endif /* NETHER */
-
-#endif /* CONFIG_NFS_CLIENT */

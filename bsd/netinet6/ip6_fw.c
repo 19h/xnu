@@ -483,53 +483,53 @@ ip6fw_report(struct ip6_fw *f, struct ip6_hdr *ip6,
 
 	switch (nxt) {
 	case IPPROTO_TCP:
-		len = scnprintf(SNPARGS(proto, 0), "TCP [%s]",
+		len = snprintf(SNPARGS(proto, 0), "TCP [%s]",
 		    ip6_sprintf(&ip6->ip6_src));
 		if (off > 0) {
-			len += scnprintf(SNPARGS(proto, len), ":%d ",
+			len += snprintf(SNPARGS(proto, len), ":%d ",
 			    ntohs(tcp6->th_sport));
 		} else {
-			len += scnprintf(SNPARGS(proto, len), " ");
+			len += snprintf(SNPARGS(proto, len), " ");
 		}
-		len += scnprintf(SNPARGS(proto, len), "[%s]",
+		len += snprintf(SNPARGS(proto, len), "[%s]",
 		    ip6_sprintf(&ip6->ip6_dst));
 		if (off > 0) {
-			scnprintf(SNPARGS(proto, len), ":%d",
+			snprintf(SNPARGS(proto, len), ":%d",
 			    ntohs(tcp6->th_dport));
 		}
 		break;
 	case IPPROTO_UDP:
-		len = scnprintf(SNPARGS(proto, 0), "UDP [%s]",
+		len = snprintf(SNPARGS(proto, 0), "UDP [%s]",
 		    ip6_sprintf(&ip6->ip6_src));
 		if (off > 0) {
-			len += scnprintf(SNPARGS(proto, len), ":%d ",
+			len += snprintf(SNPARGS(proto, len), ":%d ",
 			    ntohs(udp->uh_sport));
 		} else {
-			len += scnprintf(SNPARGS(proto, len), " ");
+			len += snprintf(SNPARGS(proto, len), " ");
 		}
-		len += scnprintf(SNPARGS(proto, len), "[%s]",
+		len += snprintf(SNPARGS(proto, len), "[%s]",
 		    ip6_sprintf(&ip6->ip6_dst));
 		if (off > 0) {
-			scnprintf(SNPARGS(proto, len), ":%d",
+			snprintf(SNPARGS(proto, len), ":%d",
 			    ntohs(udp->uh_dport));
 		}
 		break;
 	case IPPROTO_ICMPV6:
 		if (off > 0) {
-			len = scnprintf(SNPARGS(proto, 0), "IPV6-ICMP:%u.%u ",
+			len = snprintf(SNPARGS(proto, 0), "IPV6-ICMP:%u.%u ",
 			    icmp6->icmp6_type, icmp6->icmp6_code);
 		} else {
-			len = scnprintf(SNPARGS(proto, 0), "IPV6-ICMP ");
+			len = snprintf(SNPARGS(proto, 0), "IPV6-ICMP ");
 		}
-		len += scnprintf(SNPARGS(proto, len), "[%s]",
+		len += snprintf(SNPARGS(proto, len), "[%s]",
 		    ip6_sprintf(&ip6->ip6_src));
-		scnprintf(SNPARGS(proto, len), " [%s]",
+		snprintf(SNPARGS(proto, len), " [%s]",
 		    ip6_sprintf(&ip6->ip6_dst));
 		break;
 	default:
-		len = scnprintf(SNPARGS(proto, 0), "P:%d [%s]", nxt,
+		len = snprintf(SNPARGS(proto, 0), "P:%d [%s]", nxt,
 		    ip6_sprintf(&ip6->ip6_src));
-		scnprintf(SNPARGS(proto, len), " [%s]",
+		snprintf(SNPARGS(proto, len), " [%s]",
 		    ip6_sprintf(&ip6->ip6_dst));
 		break;
 	}

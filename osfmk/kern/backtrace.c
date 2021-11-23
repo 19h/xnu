@@ -242,17 +242,17 @@ backtrace_interrupted(uintptr_t *bt, unsigned int max_frames,
 	    was_truncated_out) + 1;
 }
 
-unsigned int
+int
 backtrace_user(uintptr_t *bt, unsigned int max_frames,
-    int *error_out, bool *user_64_out, bool *was_truncated_out)
+    unsigned int *frames_out, bool *user_64_out, bool *was_truncated_out)
 {
 	return backtrace_thread_user(current_thread(), bt, max_frames,
-	    error_out, user_64_out, was_truncated_out);
+	    frames_out, user_64_out, was_truncated_out);
 }
 
-unsigned int
+int
 backtrace_thread_user(void *thread, uintptr_t *bt, unsigned int max_frames,
-    int *error_out, bool *user_64_out, bool *was_truncated_out)
+    unsigned int *frames_out, bool *user_64_out, bool *was_truncated_out)
 {
 	bool user_64;
 	uintptr_t pc = 0, fp = 0, next_fp = 0;
@@ -263,6 +263,7 @@ backtrace_thread_user(void *thread, uintptr_t *bt, unsigned int max_frames,
 
 	assert(bt != NULL);
 	assert(max_frames > 0);
+	assert(frames_out != NULL);
 
 #if defined(__x86_64__)
 
@@ -328,7 +329,7 @@ backtrace_thread_user(void *thread, uintptr_t *bt, unsigned int max_frames,
 
 	assert(ml_get_interrupts_enabled() == TRUE);
 	if (!ml_get_interrupts_enabled()) {
-		goto out;
+		return EINVAL;
 	}
 
 	union {
@@ -348,7 +349,7 @@ backtrace_thread_user(void *thread, uintptr_t *bt, unsigned int max_frames,
 	if (thread != current_thread()) {
 		map = get_task_map_reference(get_threadtask(thread));
 		if (map == NULL) {
-			goto out;
+			return EINVAL;
 		}
 		old_map = vm_map_switch(map);
 	} else {
@@ -404,10 +405,8 @@ out:
 	if (user_64_out) {
 		*user_64_out = user_64;
 	}
-	if (error_out) {
-		*error_out = err;
-	}
 
-	return frame_index;
+	*frames_out = frame_index;
+	return err;
 #undef INVALID_USER_FP
 }

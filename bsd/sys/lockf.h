@@ -107,7 +107,6 @@ struct lockf {
 __BEGIN_DECLS
 
 #ifdef KERNEL_PRIVATE
-void    lf_init(void);
 int     lf_advlock(struct vnop_advlock_args *);
 int     lf_assert(struct vnop_advlock_args *, void **);
 void    lf_commit(void *, int);

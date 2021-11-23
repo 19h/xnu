@@ -26,9 +26,6 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#include <nfs/nfs_conf.h>
-#if CONFIG_NFS_CLIENT
-
 /*
  * miscellaneous support functions for NFSv4
  */
@@ -3035,5 +3032,3 @@ recheckdeleg:
 		    vfs_statfs(nmp->nm_mountp)->f_mntfromname, nmp->nm_stategenid, error);
 	}
 }
-
-#endif /* CONFIG_NFS_CLIENT */

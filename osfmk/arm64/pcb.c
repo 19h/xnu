@@ -158,6 +158,7 @@ machine_thread_create(thread_t thread,
 	}
 	thread->machine.preemption_count = 0;
 	thread->machine.cthread_self = 0;
+	thread->machine.cthread_data = 0;
 #if defined(HAS_APPLE_PAC)
 	thread->machine.rop_pid = task->rop_pid;
 	thread->machine.disable_user_jop = task->disable_user_jop;
@@ -271,15 +272,6 @@ machine_thread_init(void)
 
 }
 
-/*
- * Routine:	machine_thread_template_init
- *
- */
-void
-machine_thread_template_init(thread_t __unused thr_template)
-{
-	/* Nothing to do on this platform. */
-}
 
 /*
  * Routine: get_useraddr

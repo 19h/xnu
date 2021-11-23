@@ -808,6 +808,7 @@ private:
 	OSArray *               _systemWakeEventsArray;
 	bool                    _acceptSystemWakeEvents;
 
+#if !(defined(RC_HIDE_N144) || defined(RC_HIDE_N146))
 	// AOT --
 	IOPMCalendarStruct   _aotWakeTimeCalendar;
 	IOTimerEventSource * _aotTimerES;
@@ -837,6 +838,7 @@ public:
 	bool        isAOTMode(void);
 private:
 	// -- AOT
+#endif /* !(defined(RC_HIDE_N144) || defined(RC_HIDE_N146)) */
 
 	void        updateTasksSuspend(void);
 	int         findSuspendedPID(uint32_t pid, uint32_t *outRefCount);

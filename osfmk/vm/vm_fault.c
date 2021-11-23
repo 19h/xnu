@@ -4088,9 +4088,7 @@ FastPmapEnter:
 					}
 
 					KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, event_code, trace_real_vaddr, (fault_info.user_tag << 16) | (caller_prot << 8) | type_of_fault, m->vmp_offset, get_current_unique_pid(), 0);
-					if (need_retry == FALSE) {
-						KDBG_FILTERED(MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_REAL_FAULT_FAST), get_current_unique_pid(), 0, 0, 0, 0);
-					}
+
 					DTRACE_VM6(real_fault, vm_map_offset_t, real_vaddr, vm_map_offset_t, m->vmp_offset, int, event_code, int, caller_prot, int, type_of_fault, int, fault_info.user_tag);
 				}
 				if (kr == KERN_SUCCESS &&
@@ -5089,7 +5087,6 @@ handle_copy_delay:
 			}
 
 			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, event_code, trace_real_vaddr, (fault_info.user_tag << 16) | (caller_prot << 8) | type_of_fault, m->vmp_offset, get_current_unique_pid(), 0);
-			KDBG_FILTERED(MACHDBG_CODE(DBG_MACH_WORKINGSET, VM_REAL_FAULT_SLOW), get_current_unique_pid(), 0, 0, 0, 0);
 
 			DTRACE_VM6(real_fault, vm_map_offset_t, real_vaddr, vm_map_offset_t, m->vmp_offset, int, event_code, int, caller_prot, int, type_of_fault, int, fault_info.user_tag);
 		}
@@ -6682,7 +6679,7 @@ vm_record_rtfault(thread_t cthread, uint64_t fstart, vm_map_offset_t fault_vaddr
 	uint64_t cupid = get_current_unique_pid();
 
 	uintptr_t bpc = 0;
-	int btr = 0;
+	uint32_t bfrs = 0;
 	bool u64 = false;
 
 	/* Capture a single-frame backtrace; this extracts just the program
@@ -6690,7 +6687,7 @@ vm_record_rtfault(thread_t cthread, uint64_t fstart, vm_map_offset_t fault_vaddr
 	 * further user stack traversals, thus avoiding copyin()s and further
 	 * faults.
 	 */
-	unsigned int bfrs = backtrace_thread_user(cthread, &bpc, 1U, &btr, &u64, NULL);
+	int btr = backtrace_thread_user(cthread, &bpc, 1U, &bfrs, &u64, NULL);
 
 	if ((btr == 0) && (bfrs > 0)) {
 		cfpc = bpc;

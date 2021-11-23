@@ -4270,8 +4270,7 @@ ipc_kmsg_copyout_header(
 					assert(entry->ie_bits & MACH_PORT_TYPE_SEND_RECEIVE);
 				} else {
 					ip_lock(reply);
-					/* Is the reply port still active and allowed to be copied out? */
-					if (!ip_active(reply) || !ip_label_check(space, reply, reply_type)) {
+					if (!ip_active(reply)) {
 						/* clear the context value */
 						reply->ip_reply_context = 0;
 						ip_unlock(reply);

@@ -1295,11 +1295,7 @@ init_task_ledgers(void)
 	    task_wakeups_rate_exceeded, NULL, NULL);
 	ledger_set_callback(t, task_ledgers.physical_writes, task_io_rate_exceeded, (void *)FLAVOR_IO_PHYSICAL_WRITES, NULL);
 
-#if XNU_MONITOR
-	ledger_template_complete_secure_alloc(t);
-#else /* XNU_MONITOR */
 	ledger_template_complete(t);
-#endif /* XNU_MONITOR */
 	task_ledger_template = t;
 }
 
@@ -1644,7 +1640,6 @@ task_create_internal(
 #if __arm64__
 	new_task->task_legacy_footprint = FALSE;
 	new_task->task_extra_footprint_limit = FALSE;
-	new_task->task_ios13extended_footprint_limit = FALSE;
 #endif /* __arm64__ */
 	new_task->task_region_footprint = FALSE;
 	new_task->task_has_crossed_thread_limit = FALSE;
@@ -2217,7 +2212,7 @@ task_mark_corpse(task_t task)
 
 	ipc_task_reset(task);
 	/* Remove the naked send right for task port, needed to arm no sender notification */
-	task_set_special_port_internal(task, TASK_KERNEL_PORT, IPC_PORT_NULL);
+	task_set_special_port(task, TASK_KERNEL_PORT, IPC_PORT_NULL);
 	ipc_task_enable(task);
 
 	task_unlock(task);
@@ -2282,7 +2277,7 @@ task_port_notify(mach_msg_header_t *msg)
 
 	require_ip_active(port);
 	assert(IKOT_TASK == ip_kotype(port));
-	task = (task_t) ip_get_kobject(port);
+	task = (task_t) port->ip_kobject;
 
 	assert(task_is_a_corpse(task));
 
@@ -2682,7 +2677,18 @@ task_terminate_internal(
 	pmap_set_process(task->map->pmap, pid, procname);
 #endif /* MACH_ASSERT */
 
-	vm_map_terminate(task->map);
+	vm_map_remove(task->map,
+	    task->map->min_offset,
+	    task->map->max_offset,
+	    /*
+	     * Final cleanup:
+	     * + no unnesting
+	     * + remove immutable mappings
+	     * + allow gaps in range
+	     */
+	    (VM_MAP_REMOVE_NO_UNNESTING |
+	    VM_MAP_REMOVE_IMMUTABLE |
+	    VM_MAP_REMOVE_GAPS_OK));
 
 	/* release our shared region */
 	vm_shared_region_set(task, NULL);
@@ -4256,7 +4262,6 @@ task_freeze(
 	task_unlock(task);
 
 	if (VM_CONFIG_COMPRESSOR_IS_PRESENT &&
-	    (kr == KERN_SUCCESS) &&
 	    (eval_only == FALSE)) {
 		vm_wake_compactor_swapper();
 		/*
@@ -4332,6 +4337,7 @@ host_security_set_task_token(
 	task_lock(task);
 	task->sec_token = sec_token;
 	task->audit_token = audit_token;
+
 	task_unlock(task);
 
 	if (host_priv != HOST_PRIV_NULL) {
@@ -4340,8 +4346,7 @@ host_security_set_task_token(
 		kr = host_get_host_port(host_priv_self(), &host_port);
 	}
 	assert(kr == KERN_SUCCESS);
-
-	kr = task_set_special_port_internal(task, TASK_HOST_PORT, host_port);
+	kr = task_set_special_port(task, TASK_HOST_PORT, host_port);
 	return kr;
 }
 
@@ -5534,27 +5539,6 @@ task_energy(
 	return energy;
 }
 
-#if __AMP__
-
-uint64_t
-task_cpu_ptime(
-	task_t  task)
-{
-	uint64_t cpu_ptime = 0;
-	thread_t thread;
-
-	task_lock(task);
-	cpu_ptime += task->total_ptime;
-
-	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		cpu_ptime += timer_grab(&thread->ptime);
-	}
-
-	task_unlock(task);
-	return cpu_ptime;
-}
-
-#else /* __AMP__ */
 
 uint64_t
 task_cpu_ptime(
@@ -5563,7 +5547,6 @@ task_cpu_ptime(
 	return 0;
 }
 
-#endif /* __AMP__ */
 
 /* This function updates the cpu time in the arrays for each
  * effective and requested QoS class
@@ -6725,7 +6708,6 @@ task_update_logical_writes(task_t task, uint32_t io_size, int flags, void *vp)
 	int64_t io_delta = 0;
 	int64_t * global_counter_to_update;
 	boolean_t needs_telemetry = FALSE;
-	boolean_t is_external_device = FALSE;
 	int ledger_to_update = 0;
 	struct task_writes_counters * writes_counters_to_update;
 
@@ -6742,42 +6724,32 @@ task_update_logical_writes(task_t task, uint32_t io_size, int flags, void *vp)
 		global_counter_to_update = &global_logical_writes_count;
 		ledger_to_update = task_ledgers.logical_writes;
 		writes_counters_to_update = &task->task_writes_counters_internal;
-		is_external_device = FALSE;
 	} else {
 		global_counter_to_update = &global_logical_writes_to_external_count;
 		ledger_to_update = task_ledgers.logical_writes_to_external;
 		writes_counters_to_update = &task->task_writes_counters_external;
-		is_external_device = TRUE;
 	}
 
 	switch (flags) {
 	case TASK_WRITE_IMMEDIATE:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_immediate_writes));
 		ledger_credit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
 		break;
 	case TASK_WRITE_DEFERRED:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_deferred_writes));
 		ledger_credit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
 		break;
 	case TASK_WRITE_INVALIDATED:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_invalidated_writes));
 		ledger_debit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, FALSE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, FALSE, io_size);
 		break;
 	case TASK_WRITE_METADATA:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_metadata_writes));
 		ledger_credit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
 		break;
 	}
 
@@ -6785,7 +6757,7 @@ task_update_logical_writes(task_t task, uint32_t io_size, int flags, void *vp)
 	if (io_telemetry_limit != 0) {
 		/* If io_telemetry_limit is 0, disable global updates and I/O telemetry */
 		needs_telemetry = global_update_logical_writes(io_delta, global_counter_to_update);
-		if (needs_telemetry && !is_external_device) {
+		if (needs_telemetry) {
 			act_set_io_telemetry_ast(current_thread());
 		}
 	}
@@ -7340,7 +7312,6 @@ task_set_exc_guard_behavior(
 #if __arm64__
 extern int legacy_footprint_entitlement_mode;
 extern void memorystatus_act_on_legacy_footprint_entitlement(proc_t, boolean_t);
-extern void memorystatus_act_on_ios13extended_footprint_entitlement(proc_t);
 
 void
 task_set_legacy_footprint(
@@ -7359,30 +7330,11 @@ task_set_extra_footprint_limit(
 		return;
 	}
 	task_lock(task);
-	if (task->task_extra_footprint_limit) {
-		task_unlock(task);
-		return;
+	if (!task->task_extra_footprint_limit) {
+		memorystatus_act_on_legacy_footprint_entitlement(task->bsd_info, TRUE);
+		task->task_extra_footprint_limit = TRUE;
 	}
-	task->task_extra_footprint_limit = TRUE;
 	task_unlock(task);
-	memorystatus_act_on_legacy_footprint_entitlement(task->bsd_info, TRUE);
-}
-
-void
-task_set_ios13extended_footprint_limit(
-	task_t task)
-{
-	if (task->task_ios13extended_footprint_limit) {
-		return;
-	}
-	task_lock(task);
-	if (task->task_ios13extended_footprint_limit) {
-		task_unlock(task);
-		return;
-	}
-	task->task_ios13extended_footprint_limit = TRUE;
-	task_unlock(task);
-	memorystatus_act_on_ios13extended_footprint_entitlement(task->bsd_info);
 }
 #endif /* __arm64__ */
 

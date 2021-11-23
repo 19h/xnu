@@ -302,14 +302,14 @@ mach_node_register(mach_node_t  node)
 	proxy_space->is_node_id = nid;
 
 	/* Create the bootstrap proxy port for this remote node */
-	bs_port = ipc_port_alloc_special(proxy_space, IPC_PORT_INIT_MESSAGE_QUEUE);
+	bs_port = ipc_port_alloc_special(proxy_space);
 	if (bs_port == MACH_PORT_NULL) {
 		kr = KERN_RESOURCE_SHORTAGE;
 		goto out;
 	}
 
 	/* Create the control (ack) port for this remote node */
-	ack_port = ipc_port_alloc_special(proxy_space, IPC_PORT_INIT_MESSAGE_QUEUE);
+	ack_port = ipc_port_alloc_special(proxy_space);
 	if (ack_port == MACH_PORT_NULL) {
 		kr = KERN_RESOURCE_SHORTAGE;
 		goto out;

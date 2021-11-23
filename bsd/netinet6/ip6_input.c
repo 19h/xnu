@@ -1956,9 +1956,11 @@ ip6_notify_pmtu(struct inpcb *in6p, struct sockaddr_in6 *dst, u_int32_t *mtu)
 	}
 
 	if (sbappendaddr(&so->so_rcv, SA(dst), NULL, m_mtu, NULL) == 0) {
-		return;
+		m_freem(m_mtu);
+		/* XXX: should count statistics */
+	} else {
+		sorwakeup(so);
 	}
-	sorwakeup(so);
 }
 
 /*

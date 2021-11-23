@@ -646,13 +646,8 @@ mptcp_output(struct mptses *mpte)
 	int error = 0;
 
 	mp_so = mptetoso(mpte);
-	mp_tp = mpte->mpte_mptcb;
-
 	socket_lock_assert_owned(mp_so);
-
-	if (mp_so->so_flags & SOF_DEFUNCT) {
-		return 0;
-	}
+	mp_tp = mpte->mpte_mptcb;
 
 	VERIFY(!(mpte->mpte_mppcb->mpp_flags & MPP_WUPCALL));
 	mpte->mpte_mppcb->mpp_flags |= MPP_WUPCALL;
@@ -1467,10 +1462,6 @@ mptcp_session_necp_cb(void *handle, int action, uint32_t interface_index,
 		ifnet_head_done();
 
 		if (ifp == NULL) {
-			goto out;
-		}
-
-		if (IFNET_IS_COMPANION_LINK(ifp)) {
 			goto out;
 		}
 

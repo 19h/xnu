@@ -260,9 +260,6 @@
 0x132000c	RealFaultAddressPurgeable
 0x1320010	RealFaultAddressExternal
 0x1320014	RealFaultAddressSharedCache
-0x1320018   vm_fast_fault
-0x132001c   vm_slow_fault
-0x1320020   vm_map_lookup_object
 0x1400000	MACH_SCHED
 0x1400004	MACH_STKATTACH
 0x1400008	MACH_STKHANDOFF
@@ -992,7 +989,6 @@
 0x3130164	VFS_devfs_label_associate_device
 0x3130168	VFS_devfs_label_associate_directory
 0x313016C	VFS_label_associate_fdesc
-0x3130170	VFS_mount_check_snapshot_mount
 0x3CF0000	CP_OFFSET_IO
 0x4010004	proc_exit
 0x4010008	force_exit

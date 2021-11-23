@@ -500,17 +500,13 @@ def GetKObjectFromPort(portval):
         params: portval - core.value representation of 'ipc_port *' object
         returns: str - string of kobject information
     """
+    kobject_str = "{0: <#020x}".format(portval.kdata.kobject)
     io_bits = unsigned(portval.ip_object.io_bits)
-    if io_bits & 0x400 :
-        kobject_val = portval.kdata.kolabel.ikol_kobject
-    else:
-        kobject_val = portval.kdata.kobject
-    kobject_str = "{0: <#020x}".format(kobject_val)
-    objtype_index = io_bits & 0x3ff
+    objtype_index = io_bits & 0x7ff
     if objtype_index < len(xnudefines.kobject_types) :
         objtype_str = xnudefines.kobject_types[objtype_index]
         if objtype_str == 'IOKIT_OBJ':
-            iokit_classnm = GetObjectTypeStr(kobject_val)
+            iokit_classnm = GetObjectTypeStr(portval.kdata.kobject)
             if not iokit_classnm:
                 iokit_classnm = "<unknown class>"
             else:
@@ -519,7 +515,7 @@ def GetKObjectFromPort(portval):
         else:
             desc_str = "kobject({0:s})".format(objtype_str)
             if xnudefines.kobject_types[objtype_index] in ('TASK_RESUME', 'TASK'):
-                desc_str += " " + GetProcNameForTask(Cast(kobject_val, 'task *'))
+                desc_str += " " + GetProcNameForTask(Cast(portval.kdata.kobject, 'task *'))
     else:
         desc_str = "kobject(UNKNOWN) {:d}".format(objtype_index)
     return kobject_str + " " + desc_str
@@ -1553,7 +1549,7 @@ def ShowMQueue(cmd_args=None, cmd_options={}):
         pset = unsigned(ArgumentStringToInt(cmd_args[0])) - unsigned(psetoff)
         print PrintPortSetSummary.header
         PrintPortSetSummary(kern.GetValueFromAddress(pset, 'struct ipc_pset *'), space)
-    elif int(wq_type) in [2, 1]:
+    elif int(wq_type) == 2:
         portoff = getfieldoffset('struct ipc_port', 'ip_messages')
         port = unsigned(ArgumentStringToInt(cmd_args[0])) - unsigned(portoff)
         print PrintPortSummary.header

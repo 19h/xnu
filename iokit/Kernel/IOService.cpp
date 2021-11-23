@@ -134,8 +134,6 @@ const OSSymbol *                gIOMatchedPersonalityKey;
 const OSSymbol *                gIORematchPersonalityKey;
 const OSSymbol *                gIORematchCountKey;
 const OSSymbol *                gIODEXTMatchCountKey;
-const OSSymbol *                gIOSupportedPropertiesKey;
-const OSSymbol *                gIOUserServicePropertiesKey;
 #if !CONFIG_EMBEDDED
 const OSSymbol *                gIOServiceLegacyMatchingRegistryIDKey;
 #endif
@@ -430,9 +428,6 @@ IOService::initialize( void )
 	        = OSSymbol::withCStringNoCopy("IOInterruptControllers");
 	gIOInterruptSpecifiersKey
 	        = OSSymbol::withCStringNoCopy("IOInterruptSpecifiers");
-
-	gIOSupportedPropertiesKey = OSSymbol::withCStringNoCopy(kIOSupportedPropertiesKey);
-	gIOUserServicePropertiesKey = OSSymbol::withCStringNoCopy(kIOUserServicePropertiesKey);
 
 	gIOMapperIDKey = OSSymbol::withCStringNoCopy(kIOMapperIDKey);
 
@@ -3028,12 +3023,8 @@ IOService::terminateWorker( IOOptionBits options )
 				}
 				if (doPhase2) {
 					if (kIOServiceNeedWillTerminate & victim->__state[1]) {
-						if (NULL == victim->reserved->uvars) {
-							_workLoopAction((IOWorkLoop::Action) &actionWillStop,
-							    victim, (void *)(uintptr_t) options);
-						} else {
-							actionWillStop(victim, options, NULL, NULL, NULL);
-						}
+						_workLoopAction((IOWorkLoop::Action) &actionWillStop,
+						    victim, (void *)(uintptr_t) options, NULL );
 					}
 
 					OSArray * notifiers;

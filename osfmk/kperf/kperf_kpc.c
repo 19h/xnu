@@ -42,7 +42,8 @@ kperf_kpc_thread_ast(thread_t thread)
 {
 	kpc_thread_ast_handler(thread);
 	kperf_thread_ast_handler(thread);
-	thread->kperf_ast = 0;
+
+	thread->kperf_flags = 0;
 }
 
 void

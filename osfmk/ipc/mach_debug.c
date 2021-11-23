@@ -86,7 +86,6 @@
 #include <ipc/ipc_right.h>
 
 #include <security/mac_mach_internal.h>
-#include <device/device_types.h>
 #endif
 
 /*
@@ -453,23 +452,21 @@ mach_port_dnrequest_info(
 
 #if !MACH_IPC_DEBUG
 kern_return_t
-mach_port_kobject_description(
+mach_port_kobject(
 	__unused ipc_space_t            space,
 	__unused mach_port_name_t       name,
 	__unused natural_t              *typep,
-	__unused mach_vm_address_t      *addrp,
-	__unused kobject_description_t  desc)
+	__unused mach_vm_address_t      *addrp)
 {
 	return KERN_FAILURE;
 }
 #else
 kern_return_t
-mach_port_kobject_description(
+mach_port_kobject(
 	ipc_space_t                     space,
 	mach_port_name_t                name,
 	natural_t                       *typep,
-	mach_vm_address_t               *addrp,
-	kobject_description_t           desc)
+	mach_vm_address_t               *addrp)
 {
 	ipc_entry_t entry;
 	ipc_port_t port;
@@ -503,52 +500,18 @@ mach_port_kobject_description(
 	}
 
 	*typep = (unsigned int) ip_kotype(port);
-	kaddr = (mach_vm_address_t)ip_get_kobject(port);
+	kaddr = (mach_vm_address_t)port->ip_kobject;
 	*addrp = 0;
 #if (DEVELOPMENT || DEBUG)
 	if (kaddr && ip_is_kobject(port)) {
 		*addrp = VM_KERNEL_UNSLIDE_OR_PERM(kaddr);
 	}
 #endif
-
-	io_object_t obj = NULL;
-	natural_t   kotype = ip_kotype(port);
-	if (desc) {
-		*desc = '\0';
-		switch (kotype) {
-		case IKOT_IOKIT_OBJECT:
-		case IKOT_IOKIT_CONNECT:
-		case IKOT_IOKIT_IDENT:
-		case IKOT_UEXT_OBJECT:
-			obj = (io_object_t) kaddr;
-			iokit_add_reference(obj, IKOT_IOKIT_OBJECT);
-			break;
-
-		default:
-			break;
-		}
-	}
-
 	ip_unlock(port);
-
-	if (obj) {
-		iokit_port_object_description(obj, desc);
-		iokit_remove_reference(obj);
-	}
 
 	return KERN_SUCCESS;
 }
 #endif /* MACH_IPC_DEBUG */
-
-kern_return_t
-mach_port_kobject(
-	ipc_space_t                     space,
-	mach_port_name_t                name,
-	natural_t                       *typep,
-	mach_vm_address_t               *addrp)
-{
-	return mach_port_kobject_description(space, name, typep, addrp, NULL);
-}
 
 /*
  *	Routine:	mach_port_kernel_object [Legacy kernel call]

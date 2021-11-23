@@ -252,6 +252,8 @@ xcpu_update(void)
 	cpu_apply_microcode();
 	/* Update the cpuid info */
 	ucode_cpuid_set_info();
+	/* Now apply workarounds */
+	cpuid_do_was();
 	mp_enable_preemption();
 
 	/* Get all other CPUs to perform the update */

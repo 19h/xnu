@@ -728,11 +728,7 @@ struct knote {
 	union {
 		void               *kn_hook;
 		uint32_t            kn_hook32;
-#if __LP64__
-		uint64_t            kn_hook_waitqid;
-#else
-		uint32_t            kn_hook_waitqid;
-#endif
+		uint64_t            kn_hook64;
 	};
 
 	/* per filter pointer to the resource being watched */

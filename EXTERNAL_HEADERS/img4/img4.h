@@ -453,6 +453,9 @@ img4_set_nonce_domain(img4_t *i4, const img4_nonce_domain_t *nd);
  *                  in the manifest
  *     [EIO]        The payload could not be fetched
  *
+ * Additionally, errors from the routines specified in the
+ * {@link img4_environment_t} may be returned.
+ *
  * @discussion
  * This routine will perform the following validation:
  *
@@ -540,7 +543,7 @@ img4_get_trusted_payload(img4_t *i4, img4_tag_t tag,
  *
  * @discussion
  * This routine performs the same validation steps as
- * {@link img4_get_trusted_payload} and has the same caveats.
+ * {@link img4_get_trusted_payload}.
  */
 #if !XNU_KERNEL_PRIVATE
 IMG4_API_AVAILABLE_20180112

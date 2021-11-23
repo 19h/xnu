@@ -1809,29 +1809,19 @@ waitq_irq_safe(struct waitq *waitq)
 	return waitq->waitq_irq;
 }
 
-static inline bool
-waitq_empty(struct waitq *wq)
-{
-	if (waitq_is_turnstile_queue(wq)) {
-		return priority_queue_empty(&wq->waitq_prio_queue);
-	} else if (waitq_is_turnstile_proxy(wq)) {
-		struct turnstile *ts = wq->waitq_ts;
-		return ts == TURNSTILE_NULL ||
-		       priority_queue_empty(&ts->ts_waitq.waitq_prio_queue);
-	} else {
-		return queue_empty(&wq->waitq_queue);
-	}
-}
-
-static struct waitq *
+struct waitq *
 waitq_get_safeq(struct waitq *waitq)
 {
+	struct waitq *safeq;
+
 	/* Check if it's a port waitq */
-	if (waitq_is_turnstile_proxy(waitq)) {
-		struct turnstile *ts = waitq->waitq_ts;
-		return ts ? &ts->ts_waitq : NULL;
+	if (waitq_is_port_queue(waitq)) {
+		assert(!waitq_irq_safe(waitq));
+		safeq = ipc_port_rcv_turnstile_waitq(waitq);
+	} else {
+		safeq = global_eventq(waitq);
 	}
-	return global_eventq(waitq);
+	return safeq;
 }
 
 static uint32_t
@@ -2397,15 +2387,6 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 		/* JMM - add flag to waitq to avoid global lookup if no waiters */
 		eventmask = _CAST_TO_EVENT_MASK(waitq);
 		safeq = waitq_get_safeq(waitq);
-		if (safeq == NULL) {
-			/*
-			 * in the WQT_TSPROXY case, if there's no turnstile,
-			 * there's no queue and no waiters, so we can move straight
-			 * to the waitq set recursion
-			 */
-			goto handle_waitq_set;
-		}
-
 		if (*nthreads == 0) {
 			spl = splsched();
 		}
@@ -2483,7 +2464,6 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 		return;
 	}
 
-handle_waitq_set:
 	/*
 	 * wait queues that are not in any sets
 	 * are the bottom of the recursion
@@ -2698,22 +2678,13 @@ waitq_select_thread_locked(struct waitq *waitq,
 	kern_return_t kr;
 	spl_t s;
 
+	s = splsched();
+
 	/* Find and lock the interrupts disabled queue the thread is actually on */
 	if (!waitq_irq_safe(waitq)) {
 		safeq = waitq_get_safeq(waitq);
-		if (safeq == NULL) {
-			/*
-			 * in the WQT_TSPROXY case, if there's no turnstile,
-			 * there's no queue and no waiters, so we can move straight
-			 * to the waitq set recursion
-			 */
-			goto handle_waitq_set;
-		}
-
-		s = splsched();
 		waitq_lock(safeq);
 	} else {
-		s = splsched();
 		safeq = waitq;
 	}
 
@@ -2738,7 +2709,6 @@ waitq_select_thread_locked(struct waitq *waitq,
 
 	splx(s);
 
-handle_waitq_set:
 	if (!waitq->waitq_set_id) {
 		return KERN_NOT_WAITING;
 	}
@@ -2849,10 +2819,6 @@ waitq_assert_wait64_locked(struct waitq *waitq,
 	 */
 	if (!waitq_irq_safe(waitq)) {
 		safeq = waitq_get_safeq(waitq);
-		if (__improbable(safeq == NULL)) {
-			panic("Trying to assert_wait on a turnstile proxy "
-			    "that hasn't been donated one (waitq: %p)", waitq);
-		}
 		eventmask = _CAST_TO_EVENT_MASK(waitq);
 		waitq_lock(safeq);
 	} else {
@@ -2956,10 +2922,6 @@ waitq_pull_thread_locked(struct waitq *waitq, thread_t thread)
 	/* Find the interrupts disabled queue thread is waiting on */
 	if (!waitq_irq_safe(waitq)) {
 		safeq = waitq_get_safeq(waitq);
-		if (__improbable(safeq == NULL)) {
-			panic("Trying to clear_wait on a turnstile proxy "
-			    "that hasn't been donated one (waitq: %p)", waitq);
-		}
 	} else {
 		safeq = waitq;
 	}
@@ -3284,12 +3246,8 @@ waitq_init(struct waitq *waitq, int policy)
 	waitq->waitq_fifo = ((policy & SYNC_POLICY_REVERSED) == 0);
 	waitq->waitq_irq = !!(policy & SYNC_POLICY_DISABLE_IRQ);
 	waitq->waitq_prepost = 0;
-	if (policy & SYNC_POLICY_TURNSTILE_PROXY) {
-		waitq->waitq_type = WQT_TSPROXY;
-	} else {
-		waitq->waitq_type = WQT_QUEUE;
-	}
-	waitq->waitq_turnstile = !!(policy & SYNC_POLICY_TURNSTILE);
+	waitq->waitq_type = WQT_QUEUE;
+	waitq->waitq_turnstile_or_port = !!(policy & SYNC_POLICY_TURNSTILE);
 	waitq->waitq_eventmask = 0;
 
 	waitq->waitq_set_id = 0;
@@ -3301,9 +3259,6 @@ waitq_init(struct waitq *waitq, int policy)
 		priority_queue_init(&waitq->waitq_prio_queue,
 		    PRIORITY_QUEUE_BUILTIN_MAX_HEAP);
 		assert(waitq->waitq_fifo == 0);
-	} else if (policy & SYNC_POLICY_TURNSTILE_PROXY) {
-		waitq->waitq_ts = TURNSTILE_NULL;
-		waitq->waitq_tspriv = NULL;
 	} else {
 		queue_init(&waitq->waitq_queue);
 	}
@@ -3388,12 +3343,7 @@ waitq_deinit(struct waitq *waitq)
 {
 	spl_t s;
 
-	assert(waitq);
-	if (!waitq_is_valid(waitq)) {
-		return;
-	}
-
-	if (!waitq_is_queue(waitq) && !waitq_is_turnstile_proxy(waitq)) {
+	if (!waitq || !waitq_is_queue(waitq)) {
 		return;
 	}
 
@@ -3401,33 +3351,25 @@ waitq_deinit(struct waitq *waitq)
 		s = splsched();
 	}
 	waitq_lock(waitq);
-
-	if (waitq_valid(waitq)) {
-		waitq->waitq_isvalid = 0;
-		if (!waitq_irq_safe(waitq)) {
-			waitq_unlink_all_unlock(waitq);
-			/* waitq unlocked and set links deallocated */
-			goto out;
+	if (!waitq_valid(waitq)) {
+		waitq_unlock(waitq);
+		if (waitq_irq_safe(waitq)) {
+			splx(s);
 		}
+		return;
 	}
 
-	waitq_unlock(waitq);
-	if (waitq_irq_safe(waitq)) {
+	waitq->waitq_isvalid = 0;
+
+	if (!waitq_irq_safe(waitq)) {
+		waitq_unlink_all_unlock(waitq);
+		/* waitq unlocked and set links deallocated */
+	} else {
+		waitq_unlock(waitq);
 		splx(s);
 	}
 
-out:
-#if MACH_ASSERT
-	if (waitq_is_turnstile_queue(waitq)) {
-		assert(priority_queue_empty(&waitq->waitq_prio_queue));
-	} else if (waitq_is_turnstile_proxy(waitq)) {
-		assert(waitq->waitq_ts == TURNSTILE_NULL);
-	} else {
-		assert(queue_empty(&waitq->waitq_queue));
-	}
-#else
-	(void)0;
-#endif // MACH_ASSERT
+	assert(waitq_empty(waitq));
 }
 
 void

@@ -108,8 +108,6 @@
  *  taken when the port was destroyed.
  */
 
-struct task_watchport_elem;
-
 typedef unsigned int ipc_port_timestamp_t;
 
 struct ipc_port {
@@ -129,7 +127,6 @@ struct ipc_port {
 
 	union {
 		ipc_kobject_t kobject;
-		ipc_kobject_label_t kolabel;
 		ipc_importance_task_t imp_task;
 		ipc_port_t sync_inheritor_port;
 		struct knote *sync_inheritor_knote;
@@ -143,6 +140,8 @@ struct ipc_port {
 		struct ipc_kmsg *premsg;
 		struct turnstile *send_turnstile;
 	} kdata2;
+
+	struct task_watchport_elem *ip_watchport_elem;
 
 	mach_vm_address_t ip_context;
 
@@ -191,7 +190,6 @@ struct ipc_port {
 #define ip_timestamp            data.timestamp
 
 #define ip_kobject              kdata.kobject
-#define ip_kolabel              kdata.kolabel
 #define ip_imp_task             kdata.imp_task
 #define ip_sync_inheritor_port  kdata.sync_inheritor_port
 #define ip_sync_inheritor_knote kdata.sync_inheritor_knote
@@ -215,7 +213,7 @@ MACRO_END
 (IP_PREALLOC(port) ? &((port)->ip_premsg->ikm_turnstile) : &((port)->ip_send_turnstile))
 
 #define port_rcv_turnstile_address(port) \
-	&(port)->ip_messages.imq_wait_queue.waitq_ts
+	(NULL)
 
 
 /*
@@ -282,10 +280,6 @@ MACRO_END
 
 #define ip_kotype(port)         io_kotype(ip_to_object(port))
 #define ip_is_kobject(port)     io_is_kobject(ip_to_object(port))
-#define ip_is_kolabeled(port)   io_is_kolabeled(ip_to_object(port))
-#define ip_get_kobject(port)    ipc_kobject_get(port)
-#define ip_label_check(space, port, msgt_name) \
-	(!ip_is_kolabeled(port) || ipc_kobject_label_check((space), (port), (msgt_name)))
 
 #define ip_full_kernel(port)    imq_full_kernel(&(port)->ip_messages)
 #define ip_full(port)           imq_full(&(port)->ip_messages)
@@ -478,31 +472,22 @@ extern boolean_t ipc_port_clear_receiver(
 	ipc_port_t              port,
 	boolean_t               should_destroy);
 
-__options_decl(ipc_port_init_flags_t, uint32_t, {
-	IPC_PORT_INIT_NONE            = 0x00000000,
-	IPC_PORT_INIT_MAKE_SEND_RIGHT = 0x00000001,
-	IPC_PORT_INIT_MESSAGE_QUEUE   = 0x00000002,
-	IPC_PORT_INIT_SPECIAL_REPLY   = 0x00000004,
-});
-
 /* Initialize a newly-allocated port */
 extern void ipc_port_init(
 	ipc_port_t              port,
 	ipc_space_t             space,
-	ipc_port_init_flags_t   flags,
 	mach_port_name_t        name);
 
 /* Allocate a port */
 extern kern_return_t ipc_port_alloc(
 	ipc_space_t             space,
-	ipc_port_init_flags_t   flags,
+	bool                    make_send_right,
 	mach_port_name_t        *namep,
 	ipc_port_t              *portp);
 
 /* Allocate a port, with a specific name */
 extern kern_return_t ipc_port_alloc_name(
 	ipc_space_t             space,
-	ipc_port_init_flags_t   flags,
 	mach_port_name_t        name,
 	ipc_port_t              *portp);
 
@@ -574,7 +559,8 @@ ipc_port_adjust_sync_link_state_locked(
 void
 ipc_port_adjust_special_reply_port(
 	ipc_port_t special_reply_port,
-	uint8_t flags);
+	uint8_t flags,
+	boolean_t get_turnstile);
 
 void
 ipc_port_adjust_port_locked(
@@ -700,8 +686,7 @@ extern void ipc_port_finalize(
 
 /* Allocate a port in a special space */
 extern ipc_port_t ipc_port_alloc_special(
-	ipc_space_t             space,
-	ipc_port_init_flags_t   flags);
+	ipc_space_t     space);
 
 /* Deallocate a port in a special space */
 extern void ipc_port_dealloc_special(
@@ -726,12 +711,12 @@ extern void ipc_port_send_update_inheritor(ipc_port_t port,
     turnstile_update_flags_t flags);
 
 #define ipc_port_alloc_kernel()         \
-	        ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_INIT_NONE)
+	        ipc_port_alloc_special(ipc_space_kernel)
 #define ipc_port_dealloc_kernel(port)   \
 	        ipc_port_dealloc_special((port), ipc_space_kernel)
 
 #define ipc_port_alloc_reply()          \
-	        ipc_port_alloc_special(ipc_space_reply, IPC_PORT_INIT_MESSAGE_QUEUE)
+	        ipc_port_alloc_special(ipc_space_reply)
 #define ipc_port_dealloc_reply(port)    \
 	        ipc_port_dealloc_special((port), ipc_space_reply)
 
