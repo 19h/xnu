@@ -373,11 +373,14 @@ vm_page_pack_ptr(uintptr_t p)
 static inline uintptr_t
 vm_page_unpack_ptr(uintptr_t p)
 {
+	extern unsigned int vm_pages_count;
+
 	if (!p) {
 		return (uintptr_t)0;
 	}
 
 	if (p & VM_PACKED_FROM_VM_PAGES_ARRAY) {
+		assert((uint32_t)(p & ~VM_PACKED_FROM_VM_PAGES_ARRAY) < vm_pages_count);
 		return (uintptr_t)(&vm_pages[(uint32_t)(p & ~VM_PACKED_FROM_VM_PAGES_ARRAY)]);
 	}
 	return (p << VM_PACKED_POINTER_SHIFT) + (uintptr_t) VM_MIN_KERNEL_AND_KEXT_ADDRESS;
@@ -1017,22 +1020,28 @@ unsigned int    vm_cache_geometry_colors; /* optimal #colors based on cache geom
  * Wired memory is a very limited resource and we can't let users exhaust it
  * and deadlock the entire system.  We enforce the following limits:
  *
- * vm_user_wire_limit (default: all memory minus vm_global_no_user_wire_amount)
+ * vm_per_task_user_wire_limit
  *      how much memory can be user-wired in one user task
  *
- * vm_global_user_wire_limit (default: same as vm_user_wire_limit)
+ * vm_global_user_wire_limit (default: same as vm_per_task_user_wire_limit)
  *      how much memory can be user-wired in all user tasks
  *
- * vm_global_no_user_wire_amount (default: VM_NOT_USER_WIREABLE)
- *	how much memory must remain user-unwired at any time
+ * These values are set to defaults based on the number of pages managed
+ * by the VM system. They can be overriden via sysctls.
+ * See kmem_set_user_wire_limits for details on the default values.
+ *
+ * Regardless of the amount of memory in the system, we never reserve
+ * more than VM_NOT_USER_WIREABLE_MAX bytes as unlockable.
  */
-#define VM_NOT_USER_WIREABLE (64*1024*1024)     /* 64MB */
+#if defined(__LP64__)
+#define VM_NOT_USER_WIREABLE_MAX (32ULL*1024*1024*1024)     /* 32GB */
+#else
+#define VM_NOT_USER_WIREABLE_MAX (1UL*1024*1024*1024)     /* 1GB */
+#endif /* __LP64__ */
 extern
-vm_map_size_t   vm_user_wire_limit;
+vm_map_size_t   vm_per_task_user_wire_limit;
 extern
 vm_map_size_t   vm_global_user_wire_limit;
-extern
-vm_map_size_t   vm_global_no_user_wire_amount;
 
 /*
  *	Each pageable resident page falls into one of three lists:
@@ -1151,9 +1160,36 @@ unsigned int    vm_page_inactive_count; /* How many pages are inactive? */
 extern
 unsigned int    vm_page_secluded_count; /* How many pages are secluded? */
 extern
-unsigned int    vm_page_secluded_count_free;
+unsigned int    vm_page_secluded_count_free; /* how many of them are free? */
 extern
-unsigned int    vm_page_secluded_count_inuse;
+unsigned int    vm_page_secluded_count_inuse; /* how many of them are in use? */
+/*
+ * We keep filling the secluded pool with new eligible pages and
+ * we can overshoot our target by a lot.
+ * When there's memory pressure, vm_pageout_scan() will re-balance the queues,
+ * pushing the extra secluded pages to the active or free queue.
+ * Since these "over target" secluded pages are actually "available", jetsam
+ * should consider them as such, so make them visible to jetsam via the
+ * "vm_page_secluded_count_over_target" counter and update it whenever we
+ * update vm_page_secluded_count or vm_page_secluded_target.
+ */
+extern
+unsigned int    vm_page_secluded_count_over_target;
+#define VM_PAGE_SECLUDED_COUNT_OVER_TARGET_UPDATE()                     \
+	MACRO_BEGIN                                                     \
+	if (vm_page_secluded_count > vm_page_secluded_target) {         \
+	        vm_page_secluded_count_over_target =                    \
+	                (vm_page_secluded_count - vm_page_secluded_target); \
+	} else {                                                        \
+	        vm_page_secluded_count_over_target = 0;                 \
+	}                                                               \
+	MACRO_END
+#define VM_PAGE_SECLUDED_COUNT_OVER_TARGET() vm_page_secluded_count_over_target
+#else /* CONFIG_SECLUDED_MEMORY */
+#define VM_PAGE_SECLUDED_COUNT_OVER_TARGET_UPDATE() \
+	MACRO_BEGIN                                 \
+	MACRO_END
+#define VM_PAGE_SECLUDED_COUNT_OVER_TARGET() 0
 #endif /* CONFIG_SECLUDED_MEMORY */
 extern
 unsigned int    vm_page_cleaned_count; /* How many pages are in the clean queue? */
@@ -1195,6 +1231,8 @@ extern
 unsigned int    vm_page_gobble_count;
 extern
 unsigned int    vm_page_stolen_count;   /* Count of stolen pages not acccounted in zones */
+extern
+unsigned int    vm_page_kern_lpage_count;   /* Count of large pages used in early boot */
 
 
 #if DEVELOPMENT || DEBUG
@@ -1453,6 +1491,7 @@ extern void memorystatus_pages_update(unsigned int pages_avail);
 	memorystatus_pages_update(              \
 	        vm_page_pageable_external_count + \
 	        vm_page_free_count +            \
+	        VM_PAGE_SECLUDED_COUNT_OVER_TARGET() + \
 	        (VM_DYNAMIC_PAGING_ENABLED() ? 0 : vm_page_purgeable_count) \
 	        ); \
 	} while(0)

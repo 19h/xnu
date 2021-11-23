@@ -245,7 +245,9 @@ extern int proc_selfpid(void);
 /* this routine returns the pid of the parent of the current process */
 extern int proc_selfppid(void);
 /* this routine returns the csflags of the current process */
-extern int proc_selfcsflags(void);
+extern uint64_t proc_selfcsflags(void);
+/* this routine populates the given flags param with the csflags of the given process. Returns 0 on success, -1 on error. */
+extern int proc_csflags(proc_t p, uint64_t* flags);
 /* this routine returns sends a signal signum to the process identified by the pid */
 extern void proc_signal(int pid, int signum);
 /* this routine checks whether any signal identified by the mask are pending in the  process identified by the pid. The check is  on all threads of the process. */
@@ -272,6 +274,12 @@ extern int proc_rele(proc_t p);
 extern int proc_pid(proc_t);
 /* returns the pid of the parent of a given process */
 extern int proc_ppid(proc_t);
+/* returns the original pid of the parent of a given process */
+extern int proc_original_ppid(proc_t);
+/* returns the platform (macos, ios, watchos, tvos, ...) of the given process */
+extern uint32_t proc_platform(proc_t);
+/* returns the sdk version used by the current process */
+extern uint32_t proc_sdk(proc_t);
 /* returns 1 if the process is marked for no remote hangs */
 extern int proc_noremotehang(proc_t);
 /* returns 1 if the process is marked for force quota */
@@ -299,6 +307,16 @@ extern int proc_issetugid(proc_t p);
 extern int proc_tbe(proc_t);
 
 /*!
+ *  @function proc_gettty
+ *  @abstract Copies the associated tty vnode for a given process if it exists. The caller needs to decrement the iocount of the vnode.
+ *  @return 0 on success. ENOENT if the process has no associated TTY. EINVAL if arguments are NULL or vnode_getwithvid fails.
+ */
+extern int proc_gettty(proc_t p, vnode_t *vp);
+
+/* this routine populates the associated tty device for a given process if it exists, returns 0 on success or else returns EINVAL */
+extern int proc_gettty_dev(proc_t p, dev_t *dev);
+
+/*!
  *  @function proc_selfpgrpid
  *  @abstract Get the process group id for the current process, as with proc_pgrpid().
  *  @return pgrpid of current process.
@@ -312,6 +330,14 @@ pid_t proc_selfpgrpid(void);
  *  @return pgrpid for "p".
  */
 pid_t proc_pgrpid(proc_t p);
+
+/*!
+ *  @function proc_sessionid
+ *  @abstract Get the process session id for the passed-in process.
+ *  @param p Process whose session id to grab.
+ *  @return session id for "p", or -1 on failure
+ */
+pid_t proc_sessionid(proc_t p);
 
 #ifdef KERNEL_PRIVATE
 // mark a process as being allowed to call vfs_markdependency()
@@ -357,17 +383,28 @@ extern int proc_pidbackgrounded(pid_t pid, uint32_t* state);
  */
 extern uint64_t proc_uniqueid(proc_t);
 
+/* unique 64bit id for process's original parent */
+extern uint64_t proc_puniqueid(proc_t);
+
 extern void proc_set_responsible_pid(proc_t target_proc, pid_t responsible_pid);
 
 /* return 1 if process is forcing case-sensitive HFS+ access, 0 for default */
 extern int proc_is_forcing_hfs_case_sensitivity(proc_t);
 
+/*!
+ *  @function    proc_exitstatus
+ *  @abstract    KPI to determine a process's exit status.
+ *  @discussion  This function is not safe to call if the process could be
+ *               concurrently stopped or started, but it can be called from a
+ *               mpo_proc_notify_exit callback.
+ *  @param p     The process to be queried.
+ *  @return      Value in the same format as wait()'s output parameter.
+ */
+extern int proc_exitstatus(proc_t p);
+
 #endif /* KERNEL_PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
-
-/* unique 64bit id for process's original parent */
-extern uint64_t proc_puniqueid(proc_t);
 
 extern void proc_getexecutableuuid(proc_t, unsigned char *, unsigned long);
 extern int proc_get_originatorbgstate(uint32_t *is_backgrounded);
@@ -387,9 +424,16 @@ extern uint64_t get_current_unique_pid(void);
 #endif /* XNU_KERNEL_PRIVATE*/
 
 #ifdef KERNEL_PRIVATE
+/* If buf argument is NULL, the necessary length to allocate will be set in buflen */
+extern int proc_selfexecutableargs(uint8_t *buf, size_t *buflen);
+extern off_t proc_getexecutableoffset(proc_t p);
 extern vnode_t proc_getexecutablevnode(proc_t); /* Returned with iocount, use vnode_put() to drop */
 extern int networking_memstatus_callout(proc_t p, uint32_t);
-#endif
+
+#define SYSCALL_MASK_UNIX 0
+extern size_t proc_get_syscall_filter_mask_size(int which);
+extern int proc_set_syscall_filter_mask(proc_t p, int which, unsigned char *maskptr, size_t masklen);
+#endif /* KERNEL_PRIVATE */
 
 __END_DECLS
 
@@ -422,6 +466,10 @@ int pid_shutdown_networking(int pid, int level);
 __END_DECLS
 
 #endif /* !KERNEL */
+
+/* Entitlement to allow non-root processes to suspend/resume any task */
+#define PROCESS_RESUME_SUSPEND_ENTITLEMENT "com.apple.private.process.suspend-resume.any"
+
 #endif /* PRIVATE */
 
 #endif  /* !_SYS_PROC_H_ */

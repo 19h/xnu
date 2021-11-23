@@ -49,7 +49,7 @@
  */
 #define WAITQ_ALL_PRIORITIES   (-1)
 #define WAITQ_PROMOTE_PRIORITY (-2)
-#define WAITQ_SELECT_MAX_PRI   (-3)
+#define WAITQ_PROMOTE_ON_WAKE  (-3)
 
 typedef enum e_waitq_lock_state {
 	WAITQ_KEEP_LOCKED    = 0x01,
@@ -101,6 +101,7 @@ typedef enum e_waitq_lock_state {
 
 enum waitq_type {
 	WQT_INVALID = 0,
+	WQT_TSPROXY = 0x1,
 	WQT_QUEUE   = 0x2,
 	WQT_SET     = 0x3,
 };
@@ -141,7 +142,7 @@ struct waitq {
 	    waitq_prepost:1,     /* waitq supports prepost? */
 	    waitq_irq:1,         /* waitq requires interrupts disabled */
 	    waitq_isvalid:1,     /* waitq structure is valid */
-	    waitq_turnstile_or_port:1,     /* waitq is embedded in a turnstile (if irq safe), or port (if not irq safe) */
+	    waitq_turnstile:1,   /* waitq is embedded in a turnstile */
 	    waitq_eventmask:_EVENT_MASK_BITS;
 	/* the wait queue set (set-of-sets) to which this queue belongs */
 #if __arm64__
@@ -153,8 +154,12 @@ struct waitq {
 	uint64_t waitq_set_id;
 	uint64_t waitq_prepost_id;
 	union {
-		queue_head_t            waitq_queue;            /* queue of elements */
-		struct priority_queue   waitq_prio_queue;       /* priority ordered queue of elements */
+		queue_head_t            waitq_queue;        /* queue of elements */
+		struct priority_queue   waitq_prio_queue;   /* priority ordered queue of elements */
+		struct {
+			struct turnstile   *waitq_ts;           /* turnstile for WQT_TSPROXY */
+			void               *waitq_tspriv;       /* private field for clients use */
+		};
 	};
 };
 
@@ -175,7 +180,7 @@ struct waitq_set {
 	};
 };
 
-#define WQSET_NOT_LINKED ((uint64_t)(~0))
+#define WQSET_NOT_LINKED       ((uint64_t)(~0))
 static_assert(sizeof(struct waitq_set) == WQS_OPAQUE_SIZE, "waitq_set structure size mismatch");
 static_assert(__alignof(struct waitq_set) == WQS_OPAQUE_ALIGN, "waitq_set structure alignment mismatch");
 
@@ -184,11 +189,11 @@ extern void waitq_bootstrap(void);
 #define waitq_is_queue(wq) \
 	((wq)->waitq_type == WQT_QUEUE)
 
-#define waitq_is_turnstile_queue(wq) \
-	(((wq)->waitq_irq) && (wq)->waitq_turnstile_or_port)
+#define waitq_is_turnstile_proxy(wq) \
+	((wq)->waitq_type == WQT_TSPROXY)
 
-#define waitq_is_port_queue(wq) \
-	(!((wq)->waitq_irq) && (wq)->waitq_turnstile_or_port)
+#define waitq_is_turnstile_queue(wq) \
+	(((wq)->waitq_irq) && (wq)->waitq_turnstile)
 
 #define waitq_is_set(wq) \
 	((wq)->waitq_type == WQT_SET && ((struct waitq_set *)(wq))->wqset_id != 0)
@@ -208,16 +213,6 @@ extern void waitq_bootstrap(void);
  *      waitq_set_deinit()
  */
 extern void waitq_invalidate_locked(struct waitq *wq);
-
-static inline boolean_t
-waitq_empty(struct waitq *wq)
-{
-	if (waitq_is_turnstile_queue(wq)) {
-		return priority_queue_empty(&(wq->waitq_prio_queue));
-	} else {
-		return queue_empty(&(wq->waitq_queue));
-	}
-}
 
 extern lck_grp_t waitq_lck_grp;
 
@@ -388,14 +383,17 @@ extern struct waitq *_global_eventq(char *event, size_t event_length);
 
 extern struct waitq *global_waitq(int index);
 
+typedef uint16_t waitq_set_prepost_hook_t;
+
 /*
  * set alloc/init/free
  */
-extern struct waitq_set *waitq_set_alloc(int policy, void *prepost_hook);
+extern struct waitq_set *waitq_set_alloc(int policy,
+    waitq_set_prepost_hook_t *prepost_hook);
 
 extern kern_return_t waitq_set_init(struct waitq_set *wqset,
     int policy, uint64_t *reserved_link,
-    void *prepost_hook);
+    waitq_set_prepost_hook_t *prepost_hook);
 
 extern void waitq_set_deinit(struct waitq_set *wqset);
 
@@ -462,8 +460,6 @@ extern int waitq_set_is_valid(struct waitq_set *wqset);
 extern int waitq_is_global(struct waitq *waitq);
 
 extern int waitq_irq_safe(struct waitq *waitq);
-
-extern struct waitq * waitq_get_safeq(struct waitq *waitq);
 
 #if CONFIG_WAITQ_STATS
 /*

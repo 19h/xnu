@@ -81,10 +81,10 @@ typedef struct _lck_mtx_ {
 				struct {
 					volatile uint32_t
 					    lck_mtx_waiters:16,
-					    lck_mtx_pri:8,
+					    lck_mtx_pri:8, // unused
 					    lck_mtx_ilocked:1,
 					    lck_mtx_mlocked:1,
-					    lck_mtx_promoted:1,
+					    lck_mtx_promoted:1, // unused
 					    lck_mtx_spin:1,
 					    lck_mtx_is_ext:1,
 					    lck_mtx_pad3:3;
@@ -107,7 +107,6 @@ typedef struct _lck_mtx_ {
 #define LCK_MTX_PRIORITY_MSK            0x00ff0000
 #define LCK_MTX_ILOCKED_MSK             0x01000000
 #define LCK_MTX_MLOCKED_MSK             0x02000000
-#define LCK_MTX_PROMOTED_MSK            0x04000000
 #define LCK_MTX_SPIN_MSK                0x08000000
 
 /* This pattern must subsume the interlocked, mlocked and spin bits */
@@ -116,15 +115,23 @@ typedef struct _lck_mtx_ {
 
 /* Adaptive spin before blocking */
 extern uint64_t         MutexSpin;
+extern uint64_t         low_MutexSpin;
+extern int64_t         high_MutexSpin;
 
 typedef enum lck_mtx_spinwait_ret_type {
 	LCK_MTX_SPINWAIT_ACQUIRED = 0,
-	LCK_MTX_SPINWAIT_SPUN = 1,
-	LCK_MTX_SPINWAIT_NO_SPIN = 2,
+
+	LCK_MTX_SPINWAIT_SPUN_HIGH_THR = 1,
+	LCK_MTX_SPINWAIT_SPUN_OWNER_NOT_CORE = 2,
+	LCK_MTX_SPINWAIT_SPUN_NO_WINDOW_CONTENTION = 3,
+	LCK_MTX_SPINWAIT_SPUN_SLIDING_THR = 4,
+
+	LCK_MTX_SPINWAIT_NO_SPIN = 5,
 } lck_mtx_spinwait_ret_type_t;
 
 extern lck_mtx_spinwait_ret_type_t              lck_mtx_lock_spinwait_x86(lck_mtx_t *mutex);
-extern void                                     lck_mtx_lock_wait_x86(lck_mtx_t *mutex);
+struct turnstile;
+extern void                                     lck_mtx_lock_wait_x86(lck_mtx_t *mutex, struct turnstile **ts);
 extern void                                     lck_mtx_lock_acquire_x86(lck_mtx_t *mutex);
 
 extern void                                     lck_mtx_lock_slow(lck_mtx_t *lock);

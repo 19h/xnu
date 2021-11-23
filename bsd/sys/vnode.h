@@ -109,8 +109,12 @@ enum vtagtype   {
 	/* 16 - 20 */
 	VT_HFS, VT_ZFS, VT_DEVFS, VT_WEBDAV, VT_UDF,
 	/* 21 - 25 */
-	VT_AFP, VT_CDDA, VT_CIFS, VT_OTHER, VT_APFS
+	VT_AFP, VT_CDDA, VT_CIFS, VT_OTHER, VT_APFS,
+	/* 26 */
+	VT_LOCKERFS,
 };
+
+#define HAVE_VT_LOCKERFS 1
 
 /*
  * flags for VNOP_BLOCKMAP
@@ -467,10 +471,16 @@ struct vnode_trigger_param {
  * VNT_NO_DIRECT_MOUNT:
  * A trigger vnode instance that doesn't directly trigger a mount,
  * instead it triggers the mounting of sub-trigger nodes.
+ *
+ * VNT_KERN_RESOLVE:
+ * A trigger vnode where all parameters have been set by the kernel,
+ * such as NFS mirror mounts.
  */
 #define VNT_AUTO_REARM          (1 << 0)
 #define VNT_NO_DIRECT_MOUNT     (1 << 1)
-#define VNT_VALID_MASK          (VNT_AUTO_REARM | VNT_NO_DIRECT_MOUNT)
+#define VNT_KERN_RESOLVE        (1 << 2)
+#define VNT_VALID_MASK          (VNT_AUTO_REARM | VNT_NO_DIRECT_MOUNT | \
+	                         VNT_KERN_RESOLVE)
 
 #endif /* KERNEL_PRIVATE */
 
@@ -549,6 +559,8 @@ struct vnode_trigger_param {
 #define VNODE_ATTR_va_fsid64            (1LL<<41)       /* 20000000000 */
 #define VNODE_ATTR_va_write_gencount    (1LL<<42)       /* 40000000000 */
 #define VNODE_ATTR_va_private_size      (1LL<<43)       /* 80000000000 */
+#define VNODE_ATTR_va_clone_id          (1LL<<44)       /* 100000000000 */
+#define VNODE_ATTR_va_extflags          (1LL<<45)       /* 200000000000 */
 
 #define VNODE_ATTR_BIT(n)       (VNODE_ATTR_ ## n)
 
@@ -598,7 +610,9 @@ struct vnode_trigger_param {
 	                        VNODE_ATTR_BIT(va_rsrc_alloc) |         \
 	                        VNODE_ATTR_BIT(va_fsid64) |             \
 	                        VNODE_ATTR_BIT(va_write_gencount) |     \
-	                        VNODE_ATTR_BIT(va_private_size))
+	                        VNODE_ATTR_BIT(va_private_size) |       \
+	                        VNODE_ATTR_BIT(va_clone_id) |           \
+	                        VNODE_ATTR_BIT(va_extflags))
 
 /*
  * Read-only attributes.
@@ -627,8 +641,11 @@ struct vnode_trigger_param {
 	                        VNODE_ATTR_BIT(va_rsrc_length) |        \
 	                        VNODE_ATTR_BIT(va_rsrc_alloc) |         \
 	                        VNODE_ATTR_BIT(va_fsid64) |             \
-	                        VNODE_ATTR_BIT(va_write_gencount) |             \
-	                        VNODE_ATTR_BIT(va_private_size))
+	                        VNODE_ATTR_BIT(va_write_gencount) |     \
+	                        VNODE_ATTR_BIT(va_private_size) |       \
+	                        VNODE_ATTR_BIT(va_clone_id) |           \
+	                        VNODE_ATTR_BIT(va_extflags))
+
 /*
  * Attributes that can be applied to a new file object.
  */
@@ -732,6 +749,8 @@ struct vnode_attr {
 	uint32_t va_write_gencount;     /* counter that increments each time the file changes */
 
 	uint64_t va_private_size; /* If the file were deleted, how many bytes would be freed immediately */
+	uint64_t va_clone_id;     /* If a file is cloned this is a unique id shared by all "perfect" clones */
+	uint64_t va_extflags;     /* extended file/directory flags */
 
 	/* add new fields here only */
 };
@@ -753,6 +772,8 @@ struct vnode_attr {
 #define VA_NOINHERIT            0x040000        /* Don't inherit ACLs from parent */
 #define VA_NOAUTH               0x080000
 #define VA_64BITOBJIDS          0x100000        /* fileid/linkid/parentid are 64 bit */
+#define VA_REALFSID             0x200000        /* Return real fsid */
+#define VA_USEFSID              0x400000        /* Use fsid from filesystem  */
 
 /*
  *  Modes.  Some values same as Ixxx entries from inode.h for now.
@@ -794,6 +815,7 @@ extern int              vttoif_tab[];
 #define VNODE_REMOVE_NODELETEBUSY                       0x0001 /* Don't delete busy files (Carbon) */
 #define VNODE_REMOVE_SKIP_NAMESPACE_EVENT       0x0002 /* Do not upcall to userland handlers */
 #define VNODE_REMOVE_NO_AUDIT_PATH              0x0004 /* Do not audit the path */
+#define VNODE_REMOVE_DATALESS_DIR               0x0008 /* Special handling for removing a dataless directory without materialization */
 
 /* VNOP_READDIR flags: */
 #define VNODE_READDIR_EXTENDED    0x0001   /* use extended directory entries */
@@ -825,7 +847,7 @@ struct vnodeopv_entry_desc {
 struct vnodeopv_desc {
 	/* ptr to the ptr to the vector where op should go */
 	int(***opv_desc_vector_p)(void *);
-	struct vnodeopv_entry_desc *opv_desc_ops;   /* null terminated list */
+	const struct vnodeopv_entry_desc *opv_desc_ops;   /* null terminated list */
 };
 
 /*!
@@ -974,6 +996,14 @@ enum vtype      vnode_vtype(vnode_t vp);
 uint32_t        vnode_vid(vnode_t vp);
 
 /*!
+ *  @function vnode_isonexternalstorage
+ *  @abstract Return whether or not the storage device backing a vnode is external or not.
+ *  @param vp The vnode whose physical location is to be determined.
+ *  @return TRUE if storage device is external, FALSE if otherwise.
+ */
+boolean_t vnode_isonexternalstorage(vnode_t vp);
+
+/*!
  *  @function vnode_mountedhere
  *  @abstract Returns a pointer to a mount placed on top of a vnode, should it exist.
  *  @param vp The vnode from whom to take the covering mount.
@@ -1111,7 +1141,26 @@ int     vnode_isnamedstream(vnode_t vp);
  *  @return 0 if the operation is successful, an error otherwise.
  */
 errno_t vnode_setasnamedstream(vnode_t vp, vnode_t svp);
-#endif
+
+/*!
+ *  @function vnode_setasfirmlink
+ *  @abstract Set a vnode to act as a firmlink i.e. point to a target vnode.
+ *  @param vp The vnode which is to be acted on as a firmlink.
+ *  @param target_vp The vnode which will be the target of the firmlink.
+ *  @return 0 if the operation is successful, an error otherwise.
+ */
+errno_t vnode_setasfirmlink(vnode_t vp, vnode_t target_vp);
+
+/*!
+ *  @function vnode_getfirmlink
+ *  @abstract If a vnode is a firmlink, get its target vnode.
+ *  @param vp The firmlink vnode.
+ *  @param target_vp The firmlink traget vnode. This vnode is returned with an iocount.
+ *  @return 0 if the operation is successful, an error otherwise.
+ */
+errno_t vnode_getfirmlink(vnode_t vp, vnode_t *target_vp);
+
+#endif /* KERNEL_PRIVATE */
 
 /*!
  *  @function vnode_ismountedon
@@ -1638,6 +1687,31 @@ int     vnode_isdyldsharedcache(vnode_t vp);
 
 
 /*!
+ *  @function vn_authorize_unlink
+ *  @abstract Authorize an unlink operation given the vfs_context_t
+ *  @discussion Check if the context assocated with vfs_context_t is allowed to unlink the vnode vp in directory dvp.
+ *  @param dvp Parent vnode of the file to be unlinked
+ *  @param vp The vnode to be unlinked
+ *  @param cnp A componentname containing the name of the file to be unlinked.  May be NULL.
+ *  @param reserved Pass NULL
+ *  @return returns zero if the operation is allowed, non-zero indicates the unlink is not authorized.
+ */
+int     vn_authorize_unlink(vnode_t dvp, vnode_t vp, struct componentname *cnp, vfs_context_t ctx, void *reserved);
+
+
+/*!
+ *  @function vn_authorize_rmdir
+ *  @abstract Authorize an rmdir operation given the vfs_context_t
+ *  @discussion Check if the context assocated with vfs_context_t is allowed to rmdir the vnode vp in directory dvp.
+ *  @param dvp Parent vnode of the directory to be rmdir'ed
+ *  @param vp The vnode to be rmdir'ed
+ *  @param cnp A componentname containing the name of the file to be rmdir'ed.  May be NULL.
+ *  @param reserved Pass NULL
+ *  @return returns zero if the operation is allowed, non-zero indicates the rmdir is not authorized.
+ */
+int     vn_authorize_rmdir(vnode_t dvp, vnode_t vp, struct componentname *cnp, vfs_context_t ctx, void *reserved);
+
+/*!
  *  @function vn_getpath_fsenter
  *  @abstract Attempt to get a vnode's path, willing to enter the filesystem.
  *  @discussion Paths to vnodes are not always straightforward: a file with multiple hard-links will have multiple pathnames,
@@ -1650,6 +1724,19 @@ int     vnode_isdyldsharedcache(vnode_t vp);
  *  @return 0 for success or an error.
  */
 int     vn_getpath_fsenter(struct vnode *vp, char *pathbuf, int *len);
+
+/*!
+ *  @function vn_getpath_no_firmlink
+ *  @abstract Attempt to get a vnode's path without a firm-link translation.
+ *  @discussion Paths to vnodes are not always straightforward: a file with multiple hard-links will have multiple pathnames,
+ *  and it is sometimes impossible to determine a vnode's full path. Like vn_getpath, it will not reenter the filesystem.
+ *  @param vp Vnode whose path to get
+ *  @param pathbuf Buffer in which to store path.
+ *  @param len Destination for length of resulting path string.  Result will include NULL-terminator in count--that is, "len"
+ *  will be strlen(pathbuf) + 1.
+ *  @return 0 for success or an error.
+ */
+int     vn_getpath_no_firmlink(struct vnode *vp, char *pathbuf, int *len);
 
 /*!
  *  @function vn_getpath_fsenter_with_parent
@@ -1666,6 +1753,28 @@ int     vn_getpath_fsenter(struct vnode *vp, char *pathbuf, int *len);
  */
 int     vn_getpath_fsenter_with_parent(struct vnode *dvp, struct vnode *vp, char *pathbuf, int *len);
 
+/*!
+ *  @function vn_getpath_ext
+ *  @abstract Attempt to get a vnode's path without rentering filesystem (unless passed an option to allow)
+ *  @discussion Paths to vnodes are not always straightforward: a file with multiple hard-links will have multiple pathnames,
+ *  and it is sometimes impossible to determine a vnode's full path.  vn_getpath_fsenter() may enter the filesystem
+ *  to try to construct a path, so filesystems should be wary of calling it.
+ *  @param vp Vnode whose path to get
+ *  @param dvp parent vnode of vnode whose path to get, can be NULL if not available.
+ *  @param pathbuf Buffer in which to store path.
+ *  @param len Destination for length of resulting path string.  Result will include NULL-terminator in count--that is, "len"
+ *  will be strlen(pathbuf) + 1.
+ *  @param flags flags for controlling behavior.
+ *  @return 0 for success or an error.
+ */
+int     vn_getpath_ext(struct vnode *vp, struct vnode *dvp, char *pathbuf, int *len, int flags);
+
+/* supported flags for vn_getpath_ext */
+#define VN_GETPATH_FSENTER              0x0001 /* Can re-enter filesystem */
+#define VN_GETPATH_NO_FIRMLINK          0x0002
+#define VN_GETPATH_VOLUME_RELATIVE      0x0004 /* also implies VN_GETPATH_NO_FIRMLINK */
+#define VN_GETPATH_NO_PROCROOT          0x0008 /* Give the non chrooted path for a process */
+
 #endif /* KERNEL_PRIVATE */
 
 #define VNODE_UPDATE_PARENT     0x01
@@ -1673,6 +1782,9 @@ int     vn_getpath_fsenter_with_parent(struct vnode *dvp, struct vnode *vp, char
 #define VNODE_UPDATE_NAME       0x02
 #define VNODE_UPDATE_CACHE      0x04
 #define VNODE_UPDATE_PURGE      0x08
+#ifdef BSD_KERNEL_PRIVATE
+#define VNODE_UPDATE_PURGEFIRMLINK      0x10
+#endif
 /*!
  *  @function vnode_update_identity
  *  @abstract Update vnode data associated with the vfs cache.
@@ -1833,12 +1945,26 @@ int     vfs_get_notify_attributes(struct vnode_attr *vap);
  */
 errno_t vnode_lookup(const char *path, int flags, vnode_t *vpp, vfs_context_t ctx);
 
+#ifdef KERNEL_PRIVATE
+/*!
+ *  @function vnode_lookup starting from a directory vnode (only if path is relative)
+ *  @abstract Convert a path into a vnode.
+ *  @discussion This routine is a thin wrapper around xnu-internal lookup routines; if successful,
+ *  it returns with an iocount held on the resulting vnode which must be dropped with vnode_put().
+ *  @param path Path to look up.
+ *  @param flags VNODE_LOOKUP_NOFOLLOW: do not follow symbolic links.  VNODE_LOOKUP_NOCROSSMOUNT: do not cross mount points.
+ *  @param start_dvp vnode of directory to start lookup from. This parameter is ignored if path is absolute. start_dvp should
+ *         have an iocount on it.
+ *  @return Results 0 for success or an error code.
+ */
+errno_t vnode_lookupat(const char *path, int flags, vnode_t *vpp, vfs_context_t ctx, vnode_t start_dvp);
+#endif
+
 /*!
  *  @function vnode_open
  *  @abstract Open a file identified by a path--roughly speaking an in-kernel open(2).
- *  @discussion If vnode_open() succeeds, it returns with both an iocount and a usecount on the returned vnode.  These must
- *  be released eventually; the iocount should be released with vnode_put() as soon as any initial operations
- *  on the vnode are over, whereas the usecount should be released via vnode_close().
+ *  @discussion If vnode_open() succeeds, it returns with both an iocount and a usecount on the
+ *  returned vnode. Both will be release once vnode_close is called.
  *  @param path Path to look up.
  *  @param fmode e.g. O_NONBLOCK, O_APPEND; see bsd/sys/fcntl.h.
  *  @param cmode Permissions with which to create file if it does not exist.
@@ -2132,9 +2258,9 @@ int vnode_getfromfd(vfs_context_t ctx, int fd, vnode_t *vpp);
 #ifdef BSD_KERNEL_PRIVATE
 /* Not in export list so can be private */
 struct stat;
-int     vn_stat(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64,
+int     vn_stat(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64, int needsrealdev,
     vfs_context_t ctx);
-int     vn_stat_noauth(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64,
+int     vn_stat_noauth(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64, int needsrealdev,
     vfs_context_t ctx, struct ucred *file_cred);
 int     vaccess(mode_t file_mode, uid_t uid, gid_t gid,
     mode_t acc_mode, kauth_cred_t cred);
@@ -2231,6 +2357,22 @@ errno_t vfs_setup_vattr_from_attrlist(struct attrlist *alp, struct vnode_attr *v
  */
 errno_t vfs_attr_pack(vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options, struct vnode_attr *vap, void *fndesc, vfs_context_t ctx);
 
+/*!
+ *  @function vfs_attr_pack_ex
+ *  @abstract Pack a vnode_attr structure into a buffer in the same format as getattrlist(2).
+ *  @Used by a VNOP_GETATTRLISTBULK implementation to pack data provided into a vnode_attr structure into a buffer the way getattrlist(2) does.
+ *  @param mp the mount structure for the filesystem the packing operation is happening on.
+ *  @param vp If available, the vnode for which the attributes are being given, NULL if vnode is not available (which will usually be the case for a VNOP_GETATTRLISTBULK implementation.
+ *  @param uio - a uio_t initialised with one iovec..
+ *  @param alp - Pointer to an attrlist structure.
+ *  @param options - options for call (same as options for getattrlistbulk(2)).
+ *  @param vap Pointer to a filled in vnode_attr structure. Data from the vnode_attr structure will be used to copy and lay out the data in the required format for getatrlistbulk(2) by this function.
+ *  @param fndesc Currently unused
+ *  @param ctx vfs context of caller.
+ *  @return error.
+ */
+errno_t vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options, struct vnode_attr *vap, void *fndesc, vfs_context_t ctx);
+
 #ifdef KERNEL_PRIVATE
 
 // Returns a value suitable, safe and consistent for tracing and logging
@@ -2250,6 +2392,7 @@ int     vfs_context_issuser(vfs_context_t);
 int vfs_context_iskernel(vfs_context_t);
 vfs_context_t vfs_context_kernel(void);         /* get from 1st kernel thread */
 vnode_t vfs_context_cwd(vfs_context_t);
+vnode_t vfs_context_get_cwd(vfs_context_t); /* get cwd with iocount */
 int vnode_isnoflush(vnode_t);
 void vnode_setnoflush(vnode_t);
 void vnode_clearnoflush(vnode_t);
@@ -2258,6 +2401,8 @@ void vnode_clearnoflush(vnode_t);
 #define BUILDPATH_CHECKACCESS     0x2 /* Check if parents have search rights */
 #define BUILDPATH_CHECK_MOVED     0x4 /* Return EAGAIN if the parent hierarchy is modified */
 #define BUILDPATH_VOLUME_RELATIVE 0x8 /* Return path relative to the nearest mount point */
+#define BUILDPATH_NO_FIRMLINK     0x10 /* Return non-firmlinked path */
+#define BUILDPATH_NO_PROCROOT     0x20 /* Return path relative to system root, not the process root */
 
 int     build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx);
 

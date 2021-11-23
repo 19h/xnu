@@ -44,6 +44,7 @@
 #include <net/network_agent.h>
 #include <net/if_var.h>
 #include <net/necp.h>
+#include <os/log.h>
 
 u_int32_t netagent_debug = LOG_NOTICE; // 0=None, 1=Basic
 
@@ -58,14 +59,24 @@ static int netagent_active_count = 0;
 SYSCTL_INT(_net_netagent, OID_AUTO, active_count, CTLFLAG_RD | CTLFLAG_LOCKED,
     &netagent_active_count, 0, "");
 
-#define NETAGENTLOG(level, format, ...) do {                                                                                    \
-	if (level <= netagent_debug)                                    \
-	        log((level > LOG_NOTICE ? LOG_NOTICE : level), "%s: " format "\n", __FUNCTION__, __VA_ARGS__);  \
+#define NETAGENTLOG(level, format, ...) do {                                             \
+    if (level <= netagent_debug) {                                                       \
+	if (level == LOG_ERR) {                                                          \
+	    os_log_error(OS_LOG_DEFAULT, "%s: " format "\n", __FUNCTION__, __VA_ARGS__); \
+	} else {                                                                         \
+	    os_log(OS_LOG_DEFAULT, "%s: " format "\n", __FUNCTION__, __VA_ARGS__);       \
+	}                                                                                \
+    }                                                                                    \
 } while (0)
 
-#define NETAGENTLOG0(level, msg) do {                                                                                   \
-	if (level <= netagent_debug)                                    \
-	        log((level > LOG_NOTICE ? LOG_NOTICE : level), "%s: %s\n", __FUNCTION__, msg);  \
+#define NETAGENTLOG0(level, msg) do {                                                    \
+    if (level <= netagent_debug) {                                                       \
+	        if (level == LOG_ERR) {                                                          \
+	    os_log_error(OS_LOG_DEFAULT, "%s: %s\n", __FUNCTION__, msg);                 \
+	} else {                                                                         \
+	    os_log(OS_LOG_DEFAULT, "%s: %s\n", __FUNCTION__, msg);                       \
+	}                                                                                \
+    }                                                                                    \
 } while (0)
 
 struct netagent_client {
@@ -285,10 +296,10 @@ netagent_ctl_disconnect(kern_ctl_ref kctlref, u_int32_t unit, void *unitinfo)
 
 // Kernel events
 static void
-netagent_post_event(uuid_t agent_uuid, u_int32_t event_code, bool update_necp)
+netagent_post_event(uuid_t agent_uuid, u_int32_t event_code, bool update_necp, bool should_update_immediately)
 {
 	if (update_necp) {
-		necp_update_all_clients();
+		necp_update_all_clients_immediately_if_needed(should_update_immediately);
 	}
 
 	struct kev_msg ev_msg;
@@ -678,7 +689,7 @@ netagent_unregister_session_wrapper(struct netagent_session *session)
 
 	if (unregistered) {
 		ifnet_clear_netagent(unregistered_uuid);
-		netagent_post_event(unregistered_uuid, KEV_NETAGENT_UNREGISTERED, TRUE);
+		netagent_post_event(unregistered_uuid, KEV_NETAGENT_UNREGISTERED, TRUE, false);
 	}
 }
 
@@ -721,6 +732,11 @@ netagent_handle_register_inner(struct netagent_session *session, struct netagent
 {
 	lck_rw_lock_exclusive(&netagent_lock);
 
+	if (session->wrapper != NULL) {
+		lck_rw_done(&netagent_lock);
+		return EINVAL;
+	}
+
 	new_wrapper->control_unit = session->control_unit;
 	new_wrapper->event_handler = session->event_handler;
 	new_wrapper->event_context = session->event_context;
@@ -746,6 +762,7 @@ netagent_register(netagent_session_t _session, struct netagent *agent)
 {
 	int data_size = 0;
 	struct netagent_wrapper *new_wrapper = NULL;
+	uuid_t registered_uuid;
 
 	struct netagent_session *session = (struct netagent_session *)_session;
 	if (session == NULL) {
@@ -777,7 +794,9 @@ netagent_register(netagent_session_t _session, struct netagent *agent)
 	}
 
 	memset(new_wrapper, 0, sizeof(*new_wrapper) + data_size);
-	memcpy(&new_wrapper->netagent, agent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(&new_wrapper->netagent, agent, sizeof(struct netagent) + data_size);
+
+	uuid_copy(registered_uuid, new_wrapper->netagent.netagent_uuid);
 
 	int error = netagent_handle_register_inner(session, new_wrapper);
 	if (error != 0) {
@@ -786,7 +805,7 @@ netagent_register(netagent_session_t _session, struct netagent *agent)
 	}
 
 	NETAGENTLOG0(LOG_DEBUG, "Registered new agent");
-	netagent_post_event(new_wrapper->netagent.netagent_uuid, KEV_NETAGENT_REGISTERED, TRUE);
+	netagent_post_event(registered_uuid, KEV_NETAGENT_REGISTERED, TRUE, false);
 
 	return 0;
 }
@@ -799,6 +818,7 @@ netagent_handle_register_setopt(struct netagent_session *session, u_int8_t *payl
 	struct netagent_wrapper *new_wrapper = NULL;
 	u_int32_t response_error = 0;
 	struct netagent *register_netagent = (struct netagent *)(void *)payload;
+	uuid_t registered_uuid;
 
 	if (session == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Failed to find session");
@@ -846,7 +866,9 @@ netagent_handle_register_setopt(struct netagent_session *session, u_int8_t *payl
 	}
 
 	memset(new_wrapper, 0, sizeof(*new_wrapper) + data_size);
-	memcpy(&new_wrapper->netagent, register_netagent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(&new_wrapper->netagent, register_netagent, sizeof(struct netagent) + data_size);
+
+	uuid_copy(registered_uuid, new_wrapper->netagent.netagent_uuid);
 
 	response_error = netagent_handle_register_inner(session, new_wrapper);
 	if (response_error != 0) {
@@ -855,7 +877,7 @@ netagent_handle_register_setopt(struct netagent_session *session, u_int8_t *payl
 	}
 
 	NETAGENTLOG0(LOG_DEBUG, "Registered new agent");
-	netagent_post_event(new_wrapper->netagent.netagent_uuid, KEV_NETAGENT_REGISTERED, TRUE);
+	netagent_post_event(registered_uuid, KEV_NETAGENT_REGISTERED, TRUE, false);
 
 done:
 	return response_error;
@@ -869,8 +891,7 @@ netagent_handle_register_message(struct netagent_session *session, u_int32_t mes
 	int data_size = 0;
 	struct netagent_wrapper *new_wrapper = NULL;
 	u_int32_t response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
-	uuid_t netagent_uuid;
-	uuid_clear(netagent_uuid);
+	uuid_t registered_uuid;
 
 	if (session == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Failed to find session");
@@ -917,11 +938,19 @@ netagent_handle_register_message(struct netagent_session *session, u_int32_t mes
 		goto fail;
 	}
 
-	(void)netagent_handle_register_inner(session, new_wrapper);
+	uuid_copy(registered_uuid, new_wrapper->netagent.netagent_uuid);
+
+	error = netagent_handle_register_inner(session, new_wrapper);
+	if (error) {
+		NETAGENTLOG(LOG_ERR, "Failed to register agent: %d", error);
+		FREE(new_wrapper, M_NETAGENT);
+		response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
+		goto fail;
+	}
 
 	NETAGENTLOG0(LOG_DEBUG, "Registered new agent");
 	netagent_send_success_response(session, NETAGENT_MESSAGE_TYPE_REGISTER, message_id);
-	netagent_post_event(new_wrapper->netagent.netagent_uuid, KEV_NETAGENT_REGISTERED, TRUE);
+	netagent_post_event(registered_uuid, KEV_NETAGENT_REGISTERED, TRUE, false);
 	return;
 fail:
 	netagent_send_error_response(session, NETAGENT_MESSAGE_TYPE_REGISTER, message_id, response_error);
@@ -1091,6 +1120,8 @@ netagent_update(netagent_session_t _session, struct netagent *agent)
 	u_int8_t agent_changed;
 	int data_size = 0;
 	struct netagent_wrapper *new_wrapper = NULL;
+	bool should_update_immediately;
+	uuid_t updated_uuid;
 
 	struct netagent_session *session = (struct netagent_session *)_session;
 	if (session == NULL) {
@@ -1121,11 +1152,14 @@ netagent_update(netagent_session_t _session, struct netagent *agent)
 	}
 
 	memset(new_wrapper, 0, sizeof(*new_wrapper) + data_size);
-	memcpy(&new_wrapper->netagent, agent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(&new_wrapper->netagent, agent, sizeof(struct netagent) + data_size);
+
+	uuid_copy(updated_uuid, new_wrapper->netagent.netagent_uuid);
+	should_update_immediately = (NETAGENT_FLAG_UPDATE_IMMEDIATELY == (new_wrapper->netagent.netagent_flags & NETAGENT_FLAG_UPDATE_IMMEDIATELY));
 
 	int error = netagent_handle_update_inner(session, new_wrapper, data_size, &agent_changed, kNetagentErrorDomainPOSIX);
 	if (error == 0) {
-		netagent_post_event(session->wrapper->netagent.netagent_uuid, KEV_NETAGENT_UPDATED, agent_changed);
+		netagent_post_event(updated_uuid, KEV_NETAGENT_UPDATED, agent_changed, should_update_immediately);
 		if (agent_changed == FALSE) {
 			// The session wrapper does not need the "new_wrapper" as nothing changed
 			FREE(new_wrapper, M_NETAGENT);
@@ -1146,6 +1180,8 @@ netagent_handle_update_setopt(struct netagent_session *session, u_int8_t *payloa
 	errno_t response_error = 0;
 	struct netagent *update_netagent = (struct netagent *)(void *)payload;
 	u_int8_t agent_changed;
+	bool should_update_immediately;
+	uuid_t updated_uuid;
 
 	if (session == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Failed to find session");
@@ -1193,11 +1229,14 @@ netagent_handle_update_setopt(struct netagent_session *session, u_int8_t *payloa
 	}
 
 	memset(new_wrapper, 0, sizeof(*new_wrapper) + data_size);
-	memcpy(&new_wrapper->netagent, update_netagent, sizeof(struct netagent) + data_size);
+	__nochk_memcpy(&new_wrapper->netagent, update_netagent, sizeof(struct netagent) + data_size);
+
+	uuid_copy(updated_uuid, new_wrapper->netagent.netagent_uuid);
+	should_update_immediately = (NETAGENT_FLAG_UPDATE_IMMEDIATELY == (new_wrapper->netagent.netagent_flags & NETAGENT_FLAG_UPDATE_IMMEDIATELY));
 
 	response_error = netagent_handle_update_inner(session, new_wrapper, data_size, &agent_changed, kNetagentErrorDomainPOSIX);
 	if (response_error == 0) {
-		netagent_post_event(session->wrapper->netagent.netagent_uuid, KEV_NETAGENT_UPDATED, agent_changed);
+		netagent_post_event(updated_uuid, KEV_NETAGENT_UPDATED, agent_changed, should_update_immediately);
 		if (agent_changed == FALSE) {
 			// The session wrapper does not need the "new_wrapper" as nothing changed
 			FREE(new_wrapper, M_NETAGENT);
@@ -1219,6 +1258,8 @@ netagent_handle_update_message(struct netagent_session *session, u_int32_t messa
 	struct netagent_wrapper *new_wrapper = NULL;
 	u_int32_t response_error = NETAGENT_MESSAGE_ERROR_INTERNAL;
 	u_int8_t agent_changed;
+	uuid_t updated_uuid;
+	bool should_update_immediately;
 
 	if (session == NULL) {
 		NETAGENTLOG0(LOG_ERR, "Failed to find session");
@@ -1264,6 +1305,9 @@ netagent_handle_update_message(struct netagent_session *session, u_int32_t messa
 		goto fail;
 	}
 
+	uuid_copy(updated_uuid, new_wrapper->netagent.netagent_uuid);
+	should_update_immediately = (NETAGENT_FLAG_UPDATE_IMMEDIATELY == (new_wrapper->netagent.netagent_flags & NETAGENT_FLAG_UPDATE_IMMEDIATELY));
+
 	response_error = netagent_handle_update_inner(session, new_wrapper, data_size, &agent_changed, kNetagentErrorDomainUserDefined);
 	if (response_error != 0) {
 		FREE(new_wrapper, M_NETAGENT);
@@ -1271,7 +1315,7 @@ netagent_handle_update_message(struct netagent_session *session, u_int32_t messa
 	}
 
 	netagent_send_success_response(session, NETAGENT_MESSAGE_TYPE_UPDATE, message_id);
-	netagent_post_event(session->wrapper->netagent.netagent_uuid, KEV_NETAGENT_UPDATED, agent_changed);
+	netagent_post_event(updated_uuid, KEV_NETAGENT_UPDATED, agent_changed, should_update_immediately);
 
 	if (agent_changed == FALSE) {
 		// The session wrapper does not need the "new_wrapper" as nothing changed
@@ -1624,7 +1668,7 @@ netagent_post_updated_interfaces(uuid_t uuid)
 	lck_rw_done(&netagent_lock);
 
 	if (wrapper != NULL) {
-		netagent_post_event(uuid, KEV_NETAGENT_UPDATED_INTERFACES, TRUE);
+		netagent_post_event(uuid, KEV_NETAGENT_UPDATED_INTERFACES, TRUE, false);
 	} else {
 		NETAGENTLOG0(LOG_DEBUG, "Interface event with no associated agent");
 	}
@@ -1802,6 +1846,24 @@ netagent_get_flags(uuid_t uuid)
 	return flags;
 }
 
+errno_t
+netagent_set_flags(uuid_t uuid, u_int32_t flags)
+{
+	errno_t error = 0;
+	lck_rw_lock_exclusive(&netagent_lock);
+	struct netagent_wrapper *wrapper = netagent_find_agent_with_uuid(uuid);
+	if (wrapper != NULL) {
+		wrapper->netagent.netagent_flags = flags;
+	} else {
+		NETAGENTLOG0(LOG_DEBUG,
+		    "Attempt to set flags for invalid netagent");
+		error = ENOENT;
+	}
+	lck_rw_done(&netagent_lock);
+
+	return error;
+}
+
 u_int32_t
 netagent_get_generation(uuid_t uuid)
 {
@@ -1881,7 +1943,7 @@ netagent_client_message_with_params(uuid_t agent_uuid,
     pid_t pid,
     void *handle,
     u_int8_t message_type,
-    struct necp_client_nexus_parameters *parameters,
+    struct necp_client_agent_parameters *parameters,
     void **assigned_results,
     size_t *assigned_results_length)
 {
@@ -1916,8 +1978,8 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 			pid_t report_pid = 0;
 			uuid_t report_proc_uuid = {};
 			if (parameters != NULL) {
-				report_pid = parameters->epid;
-				uuid_copy(report_proc_uuid, parameters->euuid);
+				report_pid = parameters->u.nexus_request.epid;
+				uuid_copy(report_proc_uuid, parameters->u.nexus_request.euuid);
 			} else {
 				struct proc *p = current_proc();
 				if (p != NULL) {
@@ -1931,7 +1993,13 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 	} else if (message_type == NETAGENT_MESSAGE_TYPE_REQUEST_NEXUS ||
 	    message_type == NETAGENT_MESSAGE_TYPE_CLOSE_NEXUS ||
 	    message_type == NETAGENT_MESSAGE_TYPE_ABORT_NEXUS) {
-		if ((wrapper->netagent.netagent_flags & NETAGENT_FLAG_NEXUS_PROVIDER) == 0) {
+		bool is_nexus_agent = ((wrapper->netagent.netagent_flags &
+		    (NETAGENT_FLAG_NEXUS_PROVIDER |
+		    NETAGENT_FLAG_NEXUS_LISTENER |
+		    NETAGENT_FLAG_CUSTOM_IP_NEXUS |
+		    NETAGENT_FLAG_CUSTOM_ETHER_NEXUS |
+		    NETAGENT_FLAG_INTERPOSE_NEXUS)) != 0);
+		if (!is_nexus_agent) {
 			NETAGENTLOG0(LOG_ERR, "Requested netagent for nexus instance is not a nexus provider");
 			// Agent is not a nexus provider
 			error = EINVAL;
@@ -1979,8 +2047,8 @@ netagent_client_message_with_params(uuid_t agent_uuid,
 				} else {
 					uuid_copy(new_pending_client->client_id, necp_client_uuid);
 					if (parameters != NULL) {
-						new_pending_client->client_pid = parameters->epid;
-						uuid_copy(new_pending_client->client_proc_uuid, parameters->euuid);
+						new_pending_client->client_pid = parameters->u.nexus_request.epid;
+						uuid_copy(new_pending_client->client_proc_uuid, parameters->u.nexus_request.euuid);
 					} else {
 						struct proc *p = current_proc();
 						if (p != NULL) {
@@ -2082,8 +2150,8 @@ netagent_trigger(struct proc *p, struct netagent_trigger_args *uap, int32_t *ret
 
 	if (uap->agent_uuid) {
 		if (uap->agent_uuidlen != sizeof(uuid_t)) {
-			NETAGENTLOG(LOG_ERR, "Incorrect length (got %llu, expected %lu)",
-			    uap->agent_uuidlen, sizeof(uuid_t));
+			NETAGENTLOG(LOG_ERR, "Incorrect length (got %zu, expected %lu)",
+			    (size_t)uap->agent_uuidlen, sizeof(uuid_t));
 			return ERANGE;
 		}
 

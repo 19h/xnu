@@ -104,8 +104,10 @@ reboot(struct proc *p, struct reboot_args *uap, __unused int32_t *retval)
 
 	if ((error = suser(kauth_cred_get(), &p->p_acflag))) {
 #if (DEVELOPMENT || DEBUG)
-		/* allow non-root user to call panic on dev/debug kernels */
-		if (!(uap->opt & RB_PANIC)) {
+		if (uap->opt & RB_PANIC) {
+			/* clear 'error' to allow non-root users to call panic on dev/debug kernels */
+			error = 0;
+		} else {
 			return error;
 		}
 #else
@@ -113,13 +115,12 @@ reboot(struct proc *p, struct reboot_args *uap, __unused int32_t *retval)
 #endif
 	}
 
-	if (uap->opt & RB_COMMAND) {
-		return ENOSYS;
-	}
-
 	if (uap->opt & RB_PANIC && uap->msg != USER_ADDR_NULL) {
-		if (copyinstr(uap->msg, (void *)message, sizeof(message), (size_t *)&dummy)) {
+		int copy_error = copyinstr(uap->msg, (void *)message, sizeof(message), (size_t *)&dummy);
+		if (copy_error != 0 && copy_error != ENAMETOOLONG) {
 			strncpy(message, "user space RB_PANIC message copyin failed", sizeof(message) - 1);
+		} else {
+			message[sizeof(message) - 1] = '\0';
 		}
 	}
 

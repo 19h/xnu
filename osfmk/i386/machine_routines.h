@@ -372,16 +372,13 @@ pmap_verify_noncacheable(uintptr_t vaddr);
 #ifdef  XNU_KERNEL_PRIVATE
 
 boolean_t ml_fpu_avx_enabled(void);
-#if !defined(RC_HIDE_XNU_J137)
 boolean_t ml_fpu_avx512_enabled(void);
-#endif
 
 void interrupt_latency_tracker_setup(void);
 void interrupt_reset_latency_stats(void);
 void interrupt_populate_latency_stats(char *, unsigned);
 void ml_get_power_state(boolean_t *, boolean_t *);
 
-void timer_queue_expire_local(void*);
 void timer_queue_expire_rescan(void*);
 void ml_timer_evaluate(void);
 boolean_t ml_timer_forced_evaluation(void);

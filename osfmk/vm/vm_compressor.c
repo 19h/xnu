@@ -44,13 +44,22 @@
 #include <kern/thread_group.h>
 #include <san/kasan.h>
 
-#if !CONFIG_EMBEDDED
+#if defined(__x86_64__)
 #include <i386/misc_protos.h>
+#endif
+#if defined(__arm64__)
+#include <arm/machine_routines.h>
 #endif
 
 #include <IOKit/IOHibernatePrivate.h>
 
 extern boolean_t vm_darkwake_mode;
+
+#if DEVELOPMENT || DEBUG
+int do_cseg_wedge_thread(void);
+int do_cseg_unwedge_thread(void);
+static event_t debug_cseg_wait_event = NULL;
+#endif /* DEVELOPMENT || DEBUG */
 
 #if POPCOUNT_THE_COMPRESSED_DATA
 boolean_t popcount_c_segs = TRUE;
@@ -641,7 +650,7 @@ vm_compressor_init(void)
 	compressor_pool_max_size = C_SEG_MAX_LIMIT;
 	compressor_pool_max_size *= C_SEG_BUFSIZE;
 
-#if defined(__x86_64__)
+#if !CONFIG_EMBEDDED
 
 	if (vm_compression_limit == 0) {
 		if (max_mem <= (4ULL * 1024ULL * 1024ULL * 1024ULL)) {
@@ -675,7 +684,29 @@ vm_compressor_init(void)
 		compressor_pool_size = ((kernel_map->max_offset - kernel_map->min_offset) - kernel_map->size) - VM_RESERVE_SIZE;
 	}
 	compressor_pool_multiplier = 1;
+
+#elif defined(__arm64__) && defined(XNU_TARGET_OS_WATCH)
+
+	/*
+	 * On M9 watches the compressor can become big and can lead to
+	 * churn in workingset resulting in audio drops. Setting a cap
+	 * on the compressor size favors reclaiming unused memory
+	 * sitting in idle band via jetsams
+	 */
+
+#define COMPRESSOR_CAP_PERCENTAGE        30ULL
+
+	if (compressor_pool_max_size > max_mem) {
+		compressor_pool_max_size = max_mem;
+	}
+
+	if (vm_compression_limit == 0) {
+		compressor_pool_size = (max_mem * COMPRESSOR_CAP_PERCENTAGE) / 100ULL;
+	}
+	compressor_pool_multiplier = 1;
+
 #else
+
 	if (compressor_pool_max_size > max_mem) {
 		compressor_pool_max_size = max_mem;
 	}
@@ -873,7 +904,7 @@ c_seg_validate(c_segment_t c_seg, boolean_t must_be_compact)
 		if (c_size) {
 			uintptr_t csvaddr = (uintptr_t) &c_seg->c_store.c_buffer[cs->c_offset];
 			if (cs->c_pop_cdata != (csvpop = vmc_pop(csvaddr, c_size))) {
-				panic("Compressed data popcount doesn't match original, bit distance: %d %p (phys: %p) %p %p 0x%llx 0x%x 0x%x 0x%x", (csvpop - cs->c_pop_cdata), (void *)csvaddr, (void *) kvtophys(csvaddr), c_seg, cs, cs->c_offset, c_size, csvpop, cs->c_pop_cdata);
+				panic("Compressed data popcount doesn't match original, bit distance: %d %p (phys: %p) %p %p 0x%llx 0x%x 0x%x 0x%x", (csvpop - cs->c_pop_cdata), (void *)csvaddr, (void *) kvtophys(csvaddr), c_seg, cs, (uint64_t)cs->c_offset, c_size, csvpop, cs->c_pop_cdata);
 			}
 		}
 #endif
@@ -1071,11 +1102,48 @@ c_seg_do_minor_compaction_and_unlock(c_segment_t c_seg, boolean_t clear_busy, bo
 	return c_seg_freed;
 }
 
+void
+kdp_compressor_busy_find_owner(event64_t wait_event, thread_waitinfo_t *waitinfo)
+{
+	c_segment_t c_seg = (c_segment_t) wait_event;
+
+	waitinfo->owner = thread_tid(c_seg->c_busy_for_thread);
+	waitinfo->context = VM_KERNEL_UNSLIDE_OR_PERM(c_seg);
+}
+
+#if DEVELOPMENT || DEBUG
+int
+do_cseg_wedge_thread(void)
+{
+	struct c_segment c_seg;
+	c_seg.c_busy_for_thread = current_thread();
+
+	debug_cseg_wait_event = (event_t) &c_seg;
+
+	thread_set_pending_block_hint(current_thread(), kThreadWaitCompressor);
+	assert_wait((event_t) (&c_seg), THREAD_INTERRUPTIBLE);
+
+	thread_block(THREAD_CONTINUE_NULL);
+
+	return 0;
+}
+
+int
+do_cseg_unwedge_thread(void)
+{
+	thread_wakeup(debug_cseg_wait_event);
+	debug_cseg_wait_event = NULL;
+
+	return 0;
+}
+#endif /* DEVELOPMENT || DEBUG */
 
 void
 c_seg_wait_on_busy(c_segment_t c_seg)
 {
 	c_seg->c_wanted = 1;
+
+	thread_set_pending_block_hint(current_thread(), kThreadWaitCompressor);
 	assert_wait((event_t) (c_seg), THREAD_UNINT);
 
 	lck_mtx_unlock_always(&c_seg->c_lock);
@@ -1088,12 +1156,14 @@ c_seg_switch_state(c_segment_t c_seg, int new_state, boolean_t insert_head)
 {
 	int     old_state = c_seg->c_state;
 
-#if __i386__ || __x86_64__
+#if !CONFIG_EMBEDDED
+#if     DEVELOPMENT || DEBUG
 	if (new_state != C_IS_FILLING) {
 		LCK_MTX_ASSERT(&c_seg->c_lock, LCK_MTX_ASSERT_OWNED);
 	}
 	LCK_MTX_ASSERT(c_list_lock, LCK_MTX_ASSERT_OWNED);
 #endif
+#endif /* !CONFIG_EMBEDDED */
 	switch (old_state) {
 	case C_IS_EMPTY:
 		assert(new_state == C_IS_FILLING || new_state == C_IS_FREE);
@@ -3048,16 +3118,6 @@ c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 
 	unused_bytes = trunc_page_32(C_SEG_OFFSET_TO_BYTES(c_seg->c_populated_offset - c_seg->c_nextoffset));
 
-#ifndef _OPEN_SOURCE
-	/* TODO: The HW codec can generate, lazily, a '2nd page not mapped'
-	 * exception. So on such a platform, or platforms where we're confident
-	 * the codec does not require a buffer page to absorb trailing writes,
-	 * we can create an unmapped hole at the tail of the segment, rather
-	 * than a populated mapping. This will also guarantee that the codec
-	 * does not overwrite valid data past the edge of the segment and
-	 * thus eliminate the depopulation overhead.
-	 */
-#endif
 	if (unused_bytes) {
 		offset_to_depopulate = C_SEG_BYTES_TO_OFFSET(round_page_32(C_SEG_OFFSET_TO_BYTES(c_seg->c_nextoffset)));
 
@@ -3561,8 +3621,16 @@ sv_compression:
 static inline void
 sv_decompress(int32_t *ddst, int32_t pattern)
 {
-#if __x86_64__
+//	assert(__builtin_constant_p(PAGE_SIZE) != 0);
+#if defined(__x86_64__)
 	memset_word(ddst, pattern, PAGE_SIZE / sizeof(int32_t));
+#elif defined(__arm64__)
+	assert((PAGE_SIZE % 128) == 0);
+	if (pattern == 0) {
+		fill32_dczva((addr64_t)ddst, PAGE_SIZE);
+	} else {
+		fill32_nt((addr64_t)ddst, PAGE_SIZE, pattern);
+	}
 #else
 	size_t          i;
 
@@ -3570,9 +3638,10 @@ sv_decompress(int32_t *ddst, int32_t pattern)
 	 * compiler to emit NEON stores, cf.
 	 * <rdar://problem/25839866> Loop autovectorization
 	 * anomalies.
-	 * We use separate loops for each PAGE_SIZE
+	 */
+	/* * We use separate loops for each PAGE_SIZE
 	 * to allow the autovectorizer to engage, as PAGE_SIZE
-	 * is currently not a constant.
+	 * may not be a constant.
 	 */
 
 	__unreachable_ok_push
@@ -3758,7 +3827,7 @@ bypass_busy_check:
 		unsigned csvpop;
 		uintptr_t csvaddr = (uintptr_t) &c_seg->c_store.c_buffer[cs->c_offset];
 		if (cs->c_pop_cdata != (csvpop = vmc_pop(csvaddr, c_size))) {
-			panic("Compressed data popcount doesn't match original, bit distance: %d %p (phys: %p) %p %p 0x%llx 0x%x 0x%x 0x%x", (csvpop - cs->c_pop_cdata), (void *)csvaddr, (void *) kvtophys(csvaddr), c_seg, cs, cs->c_offset, c_size, csvpop, cs->c_pop_cdata);
+			panic("Compressed data popcount doesn't match original, bit distance: %d %p (phys: %p) %p %p 0x%x 0x%x 0x%x 0x%x", (csvpop - cs->c_pop_cdata), (void *)csvaddr, (void *) kvtophys(csvaddr), c_seg, cs, cs->c_offset, c_size, csvpop, cs->c_pop_cdata);
 		}
 #endif
 
@@ -3987,17 +4056,7 @@ vm_compressor_get(ppnum_t pn, int *slot, int flags)
 		 */
 		dptr = (int32_t *)(uintptr_t)dst;
 		data = c_segment_sv_hash_table[slot_ptr->s_cindx].he_data;
-#if __x86_64__
-		memset_word(dptr, data, PAGE_SIZE / sizeof(int32_t));
-#else
-		{
-			int             i;
-
-			for (i = 0; i < (int)(PAGE_SIZE / sizeof(int32_t)); i++) {
-				*dptr++ = data;
-			}
-		}
-#endif
+		sv_decompress(dptr, data);
 		if (!(flags & C_KEEP)) {
 			c_segment_sv_hash_drop_ref(slot_ptr->s_cindx);
 

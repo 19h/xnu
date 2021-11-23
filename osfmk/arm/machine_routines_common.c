@@ -40,6 +40,7 @@
 #include <kern/thread_group.h>
 #include <kern/policy_internal.h>
 #include <machine/config.h>
+#include <machine/atomic.h>
 #include <pexpert/pexpert.h>
 
 #if MONOTONIC
@@ -54,7 +55,12 @@ extern boolean_t interrupt_masked_debug;
 extern uint64_t interrupt_masked_timeout;
 #endif
 
+#if !HAS_CONTINUOUS_HWCLOCK
 extern uint64_t mach_absolutetime_asleep;
+#else
+extern uint64_t wake_abstime;
+static uint64_t wake_conttime = UINT64_MAX;
+#endif
 
 static void
 sched_perfcontrol_oncore_default(perfcontrol_state_t new_thread_state __unused, going_on_core_t on __unused)
@@ -262,13 +268,13 @@ perfcontrol_callout_counters_end(uint64_t *start_counters,
 {
 	uint64_t end_counters[MT_CORE_NFIXED];
 	mt_fixed_counts(end_counters);
-	atomic_fetch_add_explicit(&perfcontrol_callout_stats[type][PERFCONTROL_STAT_CYCLES],
-	    end_counters[MT_CORE_CYCLES] - start_counters[MT_CORE_CYCLES], memory_order_relaxed);
+	os_atomic_add(&perfcontrol_callout_stats[type][PERFCONTROL_STAT_CYCLES],
+	    end_counters[MT_CORE_CYCLES] - start_counters[MT_CORE_CYCLES], relaxed);
 #ifdef MT_CORE_INSTRS
-	atomic_fetch_add_explicit(&perfcontrol_callout_stats[type][PERFCONTROL_STAT_INSTRS],
-	    end_counters[MT_CORE_INSTRS] - start_counters[MT_CORE_INSTRS], memory_order_relaxed);
+	os_atomic_add(&perfcontrol_callout_stats[type][PERFCONTROL_STAT_INSTRS],
+	    end_counters[MT_CORE_INSTRS] - start_counters[MT_CORE_INSTRS], relaxed);
 #endif /* defined(MT_CORE_INSTRS) */
-	atomic_fetch_add_explicit(&perfcontrol_callout_count[type], 1, memory_order_relaxed);
+	os_atomic_inc(&perfcontrol_callout_count[type], relaxed);
 }
 #endif /* MONOTONIC */
 
@@ -279,7 +285,8 @@ perfcontrol_callout_stat_avg(perfcontrol_callout_type_t type,
 	if (!perfcontrol_callout_stats_enabled) {
 		return 0;
 	}
-	return perfcontrol_callout_stats[type][stat] / perfcontrol_callout_count[type];
+	return os_atomic_load_wide(&perfcontrol_callout_stats[type][stat], relaxed) /
+	       os_atomic_load_wide(&perfcontrol_callout_count[type], relaxed);
 }
 
 void
@@ -480,13 +487,16 @@ machine_perfcontrol_deadline_passed(uint64_t deadline)
 /*
  * ml_spin_debug_reset()
  * Reset the timestamp on a thread that has been unscheduled
- * to avoid false alarms.    Alarm will go off if interrupts are held
+ * to avoid false alarms. Alarm will go off if interrupts are held
  * disabled for too long, starting from now.
+ *
+ * Call ml_get_timebase() directly to prevent extra overhead on newer
+ * platforms that's enabled in DEVELOPMENT kernel configurations.
  */
 void
 ml_spin_debug_reset(thread_t thread)
 {
-	thread->machine.intmask_timestamp = mach_absolute_time();
+	thread->machine.intmask_timestamp = ml_get_timebase();
 }
 
 /*
@@ -519,7 +529,7 @@ ml_check_interrupts_disabled_duration(thread_t thread)
 
 	start = thread->machine.intmask_timestamp;
 	if (start != 0) {
-		now = mach_absolute_time();
+		now = ml_get_timebase();
 
 		if ((now - start) > interrupt_masked_timeout * debug_cpu_performance_degradation_factor) {
 			mach_timebase_info_data_t timebase;
@@ -554,6 +564,7 @@ ml_set_interrupts_enabled(boolean_t enable)
 	state = __builtin_arm_rsr("DAIF");
 #endif
 	if (enable && (state & INTERRUPT_MASK)) {
+		assert(getCpuDatap()->cpu_int_state == NULL); // Make sure we're not enabling interrupts from primary interrupt context
 #if INTERRUPT_MASKED_DEBUG
 		if (interrupt_masked_debug) {
 			// Interrupts are currently masked, we will enable them (after finishing this check)
@@ -588,7 +599,7 @@ ml_set_interrupts_enabled(boolean_t enable)
 #if INTERRUPT_MASKED_DEBUG
 		if (interrupt_masked_debug) {
 			// Interrupts were enabled, we just masked them
-			current_thread()->machine.intmask_timestamp = mach_absolute_time();
+			current_thread()->machine.intmask_timestamp = ml_get_timebase();
 		}
 #endif
 	}
@@ -680,21 +691,49 @@ ml_get_abstime_offset(void)
 uint64_t
 ml_get_conttime_offset(void)
 {
+#if HAS_CONTINUOUS_HWCLOCK
+	return 0;
+#else
 	return rtclock_base_abstime + mach_absolutetime_asleep;
+#endif
 }
 
 uint64_t
 ml_get_time_since_reset(void)
 {
+#if HAS_CONTINUOUS_HWCLOCK
+	if (wake_conttime == UINT64_MAX) {
+		return UINT64_MAX;
+	} else {
+		return mach_continuous_time() - wake_conttime;
+	}
+#else
 	/* The timebase resets across S2R, so just return the raw value. */
 	return ml_get_hwclock();
+#endif
+}
+
+void
+ml_set_reset_time(__unused uint64_t wake_time)
+{
+#if HAS_CONTINUOUS_HWCLOCK
+	wake_conttime = wake_time;
+#endif
 }
 
 uint64_t
 ml_get_conttime_wake_time(void)
 {
+#if HAS_CONTINUOUS_HWCLOCK
+	/*
+	 * For now, we will reconstitute the timebase value from
+	 * cpu_timebase_init and use it as the wake time.
+	 */
+	return wake_abstime - ml_get_abstime_offset();
+#else /* HAS_CONTINOUS_HWCLOCK */
 	/* The wake time is simply our continuous time offset. */
 	return ml_get_conttime_offset();
+#endif /* HAS_CONTINOUS_HWCLOCK */
 }
 
 /*

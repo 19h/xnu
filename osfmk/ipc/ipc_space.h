@@ -119,8 +119,9 @@ struct ipc_space {
 	ipc_entry_num_t is_table_hashed;/* count of hashed elements */
 	ipc_entry_num_t is_table_free;  /* count of free elements */
 	ipc_entry_t is_table;           /* an array of entries */
-	task_t is_task;                 /* associated task */
 	struct ipc_table_size *is_table_next; /* info for larger table */
+	task_t is_task;                 /* associated task */
+	ipc_label_t is_label;           /* [private] mandatory access label */
 	ipc_entry_num_t is_low_mod;     /* lowest modified entry during growth */
 	ipc_entry_num_t is_high_mod;    /* highest modified entry during growth */
 	struct bool_gen bool_gen;       /* state for boolean RNG */
@@ -185,7 +186,6 @@ extern lck_attr_t       ipc_lck_attr;
 	                                                &ipc_lck_grp)
 
 #define is_write_lock(is)       lck_spin_lock_grp(&(is)->is_lock_data, &ipc_lck_grp)
-#define is_write_lock_try(is)   lck_spin_try_lock_grp(&(is)->is_lock_data, &ipc_lck_grp)
 #define is_write_unlock(is)     lck_spin_unlock(&(is)->is_lock_data)
 #define is_write_sleep(is)      lck_spin_sleep_grp(&(is)->is_lock_data,     \
 	                                                LCK_SLEEP_DEFAULT,                                      \
@@ -226,7 +226,18 @@ extern kern_return_t ipc_space_create_special(
 /* Create a new IPC space */
 extern kern_return_t ipc_space_create(
 	ipc_table_size_t        initial,
+	ipc_label_t             label,
 	ipc_space_t             *spacep);
+
+/* Change the label on an existing space */
+extern kern_return_t ipc_space_label(
+	ipc_space_t space,
+	ipc_label_t label);
+
+/* Add a label to an existing space */
+extern kern_return_t ipc_space_add_label(
+	ipc_space_t space,
+	ipc_label_t label);
 
 /* Mark a space as dead and cleans up the entries*/
 extern void ipc_space_terminate(
@@ -245,6 +256,14 @@ extern void ipc_space_rand_freelist(
 
 /* Generate a new gencount rollover point from a space's entropy pool */
 extern ipc_entry_bits_t ipc_space_get_rollpoint(ipc_space_t space);
+
+/* Allocate a new port/set/dead-name in a space */
+extern kern_return_t mach_port_allocate_internal(
+	ipc_space_t       space,
+	mach_port_right_t right,
+	mach_port_qos_t   *qosp,
+	mach_port_name_t  *namep);
+
 #endif /* MACH_KERNEL_PRIVATE */
 #endif /* __APPLE_API_PRIVATE */
 

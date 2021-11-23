@@ -76,11 +76,13 @@
 #include <kern/misc_protos.h>
 #include <vm/cpm.h>
 #include <kern/ledger.h>
+#include <kern/bits.h>
 
 #include <string.h>
 
 #include <libkern/OSDebug.h>
 #include <libkern/crypto/sha2.h>
+#include <libkern/section_keywords.h>
 #include <sys/kdebug.h>
 
 #include <san/kasan.h>
@@ -89,8 +91,8 @@
  *	Variables exported by this module.
  */
 
-vm_map_t        kernel_map;
-vm_map_t        kernel_pageable_map;
+SECURITY_READ_ONLY_LATE(vm_map_t) kernel_map;
+vm_map_t         kernel_pageable_map;
 
 extern boolean_t vm_kernel_ready;
 
@@ -370,8 +372,6 @@ kernel_memory_allocate(
 
 	if (!(flags & (KMA_VAONLY | KMA_PAGEABLE))) {
 		for (i = 0; i < wired_page_count; i++) {
-			uint64_t        unavailable;
-
 			for (;;) {
 				if (flags & KMA_LOMEM) {
 					mem = vm_page_grablo();
@@ -391,8 +391,11 @@ kernel_memory_allocate(
 					kr = KERN_RESOURCE_SHORTAGE;
 					goto out;
 				}
-				unavailable = (vm_page_wire_count + vm_page_free_target) * PAGE_SIZE;
 
+				/* VM privileged threads should have waited in vm_page_grab() and not get here. */
+				assert(!(current_thread()->options & TH_OPT_VMPRIV));
+
+				uint64_t unavailable = (vm_page_wire_count + vm_page_free_target) * PAGE_SIZE;
 				if (unavailable > max_mem || map_size > (max_mem - unavailable)) {
 					kr = KERN_RESOURCE_SHORTAGE;
 					goto out;
@@ -1345,6 +1348,59 @@ kmem_suballoc(
 	*new_map = map;
 	return KERN_SUCCESS;
 }
+/*
+ * The default percentage of memory that can be mlocked is scaled based on the total
+ * amount of memory in the system. These percentages are caclulated
+ * offline and stored in this table. We index this table by
+ * log2(max_mem) - VM_USER_WIREABLE_MIN_CONFIG. We clamp this index in the range
+ * [0, sizeof(wire_limit_percents) / sizeof(vm_map_size_t))
+ *
+ * Note that these values were picked for mac.
+ * If we ever have very large memory config arm devices, we may want to revisit
+ * since the kernel overhead is smaller there due to the larger page size.
+ */
+
+/* Start scaling iff we're managing > 2^32 = 4GB of RAM. */
+#define VM_USER_WIREABLE_MIN_CONFIG 32
+static vm_map_size_t wire_limit_percents[] =
+{ 70, 73, 76, 79, 82, 85, 88, 91, 94, 97};
+
+/*
+ * Sets the default global user wire limit which limits the amount of
+ * memory that can be locked via mlock() based on the above algorithm..
+ * This can be overridden via a sysctl.
+ */
+static void
+kmem_set_user_wire_limits(void)
+{
+	uint64_t available_mem_log;
+	uint64_t max_wire_percent;
+	size_t wire_limit_percents_length = sizeof(wire_limit_percents) /
+	    sizeof(vm_map_size_t);
+	vm_map_size_t limit;
+	available_mem_log = bit_floor(max_mem);
+
+	if (available_mem_log < VM_USER_WIREABLE_MIN_CONFIG) {
+		available_mem_log = 0;
+	} else {
+		available_mem_log -= VM_USER_WIREABLE_MIN_CONFIG;
+	}
+	if (available_mem_log >= wire_limit_percents_length) {
+		available_mem_log = wire_limit_percents_length - 1;
+	}
+	max_wire_percent = wire_limit_percents[available_mem_log];
+
+	limit = max_mem * max_wire_percent / 100;
+	/* Cap the number of non lockable bytes at VM_NOT_USER_WIREABLE_MAX */
+	if (max_mem - limit > VM_NOT_USER_WIREABLE_MAX) {
+		limit = max_mem - VM_NOT_USER_WIREABLE_MAX;
+	}
+
+	vm_global_user_wire_limit = limit;
+	/* the default per task limit is the same as the global limit */
+	vm_per_task_user_wire_limit = limit;
+}
+
 
 /*
  *	kmem_init:
@@ -1441,20 +1497,8 @@ kmem_init(
 	}
 #endif
 
-	/*
-	 * Set the default global user wire limit which limits the amount of
-	 * memory that can be locked via mlock().  We set this to the total
-	 * amount of memory that are potentially usable by a user app (max_mem)
-	 * minus a certain amount.  This can be overridden via a sysctl.
-	 */
-	vm_global_no_user_wire_amount = MIN(max_mem * 20 / 100,
-	    VM_NOT_USER_WIREABLE);
-	vm_global_user_wire_limit = max_mem - vm_global_no_user_wire_amount;
-
-	/* the default per user limit is the same as the global limit */
-	vm_user_wire_limit = vm_global_user_wire_limit;
+	kmem_set_user_wire_limits();
 }
-
 
 /*
  *	Routine:	copyinmap

@@ -77,14 +77,17 @@
 #include <mach/kern_return.h>
 
 #include <kern/kern_types.h>
+#include <kern/arcade.h>
 #include <kern/kalloc.h>
 #include <kern/simple_lock.h>
 #include <kern/mach_param.h>
 #include <kern/ipc_host.h>
+#include <kern/ipc_kobject.h>
 #include <kern/ipc_mig.h>
 #include <kern/host_notify.h>
 #include <kern/mk_timer.h>
 #include <kern/misc_protos.h>
+#include <kern/suid_cred.h>
 #include <kern/sync_lock.h>
 #include <kern/sync_sema.h>
 #include <kern/ux_handler.h>
@@ -125,6 +128,8 @@ vm_size_t ipc_kmsg_max_body_space = ((IPC_KMSG_MAX_SPACE * 3) / 4 - MAX_TRAILER_
 int ipc_space_max;
 int ipc_port_max;
 int ipc_pset_max;
+int prioritize_launch = 1;
+int enforce_strict_reply = 0;
 
 
 lck_grp_t               ipc_lck_grp;
@@ -143,6 +148,8 @@ void
 ipc_bootstrap(void)
 {
 	kern_return_t kr;
+	int prioritize_launch_bootarg;
+	int strict_reply_bootarg;
 
 	lck_grp_attr_setdefault(&ipc_lck_grp_attr);
 	lck_grp_init(&ipc_lck_grp, "ipc", &ipc_lck_grp_attr);
@@ -171,6 +178,7 @@ ipc_bootstrap(void)
 	/* cant charge callers for port allocations (references passed) */
 	zone_change(ipc_object_zones[IOT_PORT], Z_CALLERACCT, FALSE);
 	zone_change(ipc_object_zones[IOT_PORT], Z_NOENCRYPT, TRUE);
+	zone_change(ipc_object_zones[IOT_PORT], Z_CLEARMEMORY, TRUE);
 
 	ipc_object_zones[IOT_PORT_SET] =
 	    zinit(sizeof(struct ipc_pset),
@@ -178,6 +186,7 @@ ipc_bootstrap(void)
 	    sizeof(struct ipc_pset),
 	    "ipc port sets");
 	zone_change(ipc_object_zones[IOT_PORT_SET], Z_NOENCRYPT, TRUE);
+	zone_change(ipc_object_zones[IOT_PORT_SET], Z_CLEARMEMORY, TRUE);
 
 	/*
 	 * Create the basic ipc_kmsg_t zone (the one we also cache)
@@ -205,7 +214,7 @@ ipc_bootstrap(void)
 #if     MACH_ASSERT
 	ipc_port_debug_init();
 #endif
-	mig_init();
+	ipc_kobject_init();
 	ipc_table_init();
 	ipc_voucher_init();
 
@@ -216,6 +225,19 @@ ipc_bootstrap(void)
 	semaphore_init();
 	mk_timer_init();
 	host_notify_init();
+
+#if CONFIG_ARCADE
+	arcade_init();
+#endif
+
+	suid_cred_init();
+
+	if (PE_parse_boot_argn("prioritize_launch", &prioritize_launch_bootarg, sizeof(prioritize_launch_bootarg))) {
+		prioritize_launch = !!prioritize_launch_bootarg;
+	}
+	if (PE_parse_boot_argn("ipc_strict_reply", &strict_reply_bootarg, sizeof(strict_reply_bootarg))) {
+		enforce_strict_reply = !!strict_reply_bootarg;
+	}
 }
 
 /*

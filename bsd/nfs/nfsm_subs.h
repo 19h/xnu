@@ -73,6 +73,8 @@
 
 #ifdef __APPLE_API_PRIVATE
 
+#include <nfs/nfs_conf.h>
+
 int nfsm_rpchead(struct nfsreq *, mbuf_t, u_int64_t *, mbuf_t *);
 int nfsm_rpchead2(struct nfsmount *, int, int, int, int, int, kauth_cred_t, struct nfsreq *, mbuf_t, u_int64_t *, mbuf_t *);
 
@@ -82,7 +84,7 @@ int nfsm_chain_add_opaque_nopad_f(struct nfsm_chain *, const u_char *, uint32_t)
 int nfsm_chain_add_uio(struct nfsm_chain *, uio_t, uint32_t);
 int nfsm_chain_add_fattr4_f(struct nfsm_chain *, struct vnode_attr *, struct nfsmount *);
 int nfsm_chain_add_v2sattr_f(struct nfsm_chain *, struct vnode_attr *, uint32_t);
-int nfsm_chain_add_v3sattr_f(struct nfsm_chain *, struct vnode_attr *);
+int nfsm_chain_add_v3sattr_f(struct nfsmount *, struct nfsm_chain *, struct vnode_attr *);
 int nfsm_chain_add_string_nfc(struct nfsm_chain *, const uint8_t *, uint32_t);
 
 int nfsm_chain_advance(struct nfsm_chain *, uint32_t);
@@ -91,12 +93,12 @@ int nfsm_chain_reverse(struct nfsm_chain *, uint32_t);
 int nfsm_chain_get_opaque_pointer_f(struct nfsm_chain *, uint32_t, u_char **);
 int nfsm_chain_get_opaque_f(struct nfsm_chain *, uint32_t, u_char *);
 int nfsm_chain_get_uio(struct nfsm_chain *, uint32_t, uio_t);
-int nfsm_chain_get_fh_attr(struct nfsm_chain *, nfsnode_t,
+int nfsm_chain_get_fh_attr(struct nfsmount *, struct nfsm_chain *, nfsnode_t,
     vfs_context_t, int, uint64_t *, fhandle_t *, struct nfs_vattr *);
 int nfsm_chain_get_wcc_data_f(struct nfsm_chain *, nfsnode_t, struct timespec *, int *, u_int64_t *);
 int nfsm_chain_get_secinfo(struct nfsm_chain *, uint32_t *, int *);
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 void nfsm_adj(mbuf_t, int, int);
 int nfsm_mbuf_get_list(size_t, mbuf_t *, int *);
 
@@ -106,7 +108,7 @@ int nfsm_chain_add_wcc_data_f(struct nfsrv_descript *, struct nfsm_chain *, int,
 int nfsm_chain_get_path_namei(struct nfsm_chain *, uint32_t, struct nameidata *);
 int nfsm_chain_get_sattr(struct nfsrv_descript *, struct nfsm_chain *, struct vnode_attr *);
 int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
 /* check name length */
 #define nfsm_name_len_check(E, ND, LEN) \
@@ -415,10 +417,10 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	} while (0)
 
 /* Add an NFSv3 "sattr" structure to an mbuf chain */
-#define nfsm_chain_add_v3sattr(E, NMC, VAP) \
+#define nfsm_chain_add_v3sattr(NMP, E, NMC, VAP) \
 	do { \
 	        if (E) break; \
-	        (E) = nfsm_chain_add_v3sattr_f((NMC), (VAP)); \
+	        (E) = nfsm_chain_add_v3sattr_f((NMP), (NMC), (VAP)); \
 	} while (0)
 
 /* Add an NFSv4 "fattr" structure to an mbuf chain */
@@ -664,13 +666,13 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	} while (0)
 
 /* get postop attributes from an mbuf chain */
-#define nfsm_chain_postop_attr_get(E, NMC, F, VAP) \
+#define nfsm_chain_postop_attr_get(NMP, E, NMC, F, VAP) \
 	do { \
 	        (F) = 0; \
 	        if ((E) || !(NMC)->nmc_mhead) break; \
 	        nfsm_chain_get_32((E), (NMC), (F)); \
 	        if ((E) || !(F)) break; \
-	        if (((E) = nfs_parsefattr((NMC), NFS_VER3, (VAP)))) \
+	        if (((E) = nfs_parsefattr((NMP), (NMC), NFS_VER3, (VAP)))) \
 	                (F) = 0; \
 	} while (0)
 
@@ -679,7 +681,7 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 #define nfsm_chain_postop_attr_update_flag(E, NMC, NP, F, X) \
 	do { \
 	        struct nfs_vattr ttvattr; \
-	        nfsm_chain_postop_attr_get((E), (NMC), (F), &ttvattr); \
+	        nfsm_chain_postop_attr_get(NFSTONMP(NP), (E), (NMC), (F), &ttvattr); \
 	        if ((E) || !(F)) break; \
 	        if (((E) = nfs_loadattrcache((NP), &ttvattr, (X), 1))) { \
 	                (F) = 0; \
@@ -703,15 +705,28 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        (E) = nfsm_chain_get_wcc_data_f((NMC), (NP), (PREMTIME), (NEWPOSTATTR), (X)); \
 	} while (0)
 
+#if CONFIG_NFS4
+/* separate v4 variant for loading attrs that only runs when NFSv4 is set */
+#define __nfsm_chain_loadattr_v4(E, NMC, VERS, X, VATTR) \
+	do { \
+	        (E) = nfs4_parsefattr((NMC), NULL, (VATTR), NULL, NULL, NULL); \
+	} while (0)
+#else
+#define __nfsm_chain_loadattr_v4(E, NMC, VERS, X, VATTR) \
+	do { \
+	        break; \
+	} while (0)
+#endif
+
 /* update a node's attribute cache with attributes from an mbuf chain */
 #define nfsm_chain_loadattr(E, NMC, NP, VERS, X) \
 	do { \
 	        struct nfs_vattr ttvattr; \
 	        if (E) break; \
 	        if ((VERS) == NFS_VER4) { \
-	                (E) = nfs4_parsefattr((NMC), NULL, &ttvattr, NULL, NULL, NULL); \
+	                __nfsm_chain_loadattr_v4((E), (NMC), (VERS), (X), &ttvattr); \
 	        } else { \
-	                (E) = nfs_parsefattr((NMC), (VERS), &ttvattr); \
+	                (E) = nfs_parsefattr(NFSTONMP(NP), (NMC), (VERS), &ttvattr); \
 	        } \
 	        if (!(E) && (NP)) \
 	                (E) = nfs_loadattrcache((NP), &ttvattr, (X), 0); \

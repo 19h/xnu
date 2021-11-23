@@ -86,6 +86,7 @@
 #include <ipc/ipc_right.h>
 
 #include <security/mac_mach_internal.h>
+#include <device/device_types.h>
 #endif
 
 /*
@@ -256,7 +257,7 @@ mach_port_space_info(
 		iin->iin_type = IE_BITS_TYPE(bits);
 		if ((entry->ie_bits & MACH_PORT_TYPE_PORT_RIGHTS) != MACH_PORT_TYPE_NONE &&
 		    entry->ie_request != IE_REQ_NONE) {
-			__IGNORE_WCASTALIGN(ipc_port_t port = (ipc_port_t) entry->ie_object);
+			ipc_port_t port = ip_object_to_port(entry->ie_object);
 
 			assert(IP_VALID(port));
 			ip_lock(port);
@@ -452,21 +453,23 @@ mach_port_dnrequest_info(
 
 #if !MACH_IPC_DEBUG
 kern_return_t
-mach_port_kobject(
+mach_port_kobject_description(
 	__unused ipc_space_t            space,
 	__unused mach_port_name_t       name,
 	__unused natural_t              *typep,
-	__unused mach_vm_address_t      *addrp)
+	__unused mach_vm_address_t      *addrp,
+	__unused kobject_description_t  desc)
 {
 	return KERN_FAILURE;
 }
 #else
 kern_return_t
-mach_port_kobject(
+mach_port_kobject_description(
 	ipc_space_t                     space,
 	mach_port_name_t                name,
 	natural_t                       *typep,
-	mach_vm_address_t               *addrp)
+	mach_vm_address_t               *addrp,
+	kobject_description_t           desc)
 {
 	ipc_entry_t entry;
 	ipc_port_t port;
@@ -488,7 +491,7 @@ mach_port_kobject(
 		return KERN_INVALID_RIGHT;
 	}
 
-	__IGNORE_WCASTALIGN(port = (ipc_port_t) entry->ie_object);
+	port = ip_object_to_port(entry->ie_object);
 	assert(port != IP_NULL);
 
 	ip_lock(port);
@@ -500,19 +503,53 @@ mach_port_kobject(
 	}
 
 	*typep = (unsigned int) ip_kotype(port);
-	kaddr = (mach_vm_address_t)port->ip_kobject;
+	kaddr = (mach_vm_address_t)ip_get_kobject(port);
+	*addrp = 0;
+#if (DEVELOPMENT || DEBUG)
+	if (kaddr && ip_is_kobject(port)) {
+		*addrp = VM_KERNEL_UNSLIDE_OR_PERM(kaddr);
+	}
+#endif
+
+	io_object_t obj = NULL;
+	natural_t   kotype = ip_kotype(port);
+	if (desc) {
+		*desc = '\0';
+		switch (kotype) {
+		case IKOT_IOKIT_OBJECT:
+		case IKOT_IOKIT_CONNECT:
+		case IKOT_IOKIT_IDENT:
+		case IKOT_UEXT_OBJECT:
+			obj = (io_object_t) kaddr;
+			iokit_add_reference(obj, IKOT_IOKIT_OBJECT);
+			break;
+
+		default:
+			break;
+		}
+	}
+
 	ip_unlock(port);
 
-#if (DEVELOPMENT || DEBUG)
-	if (0 != kaddr && is_ipc_kobject(*typep)) {
-		*addrp = VM_KERNEL_UNSLIDE_OR_PERM(kaddr);
-	} else
-#endif
-	*addrp = 0;
+	if (obj) {
+		iokit_port_object_description(obj, desc);
+		iokit_remove_reference(obj);
+	}
 
 	return KERN_SUCCESS;
 }
 #endif /* MACH_IPC_DEBUG */
+
+kern_return_t
+mach_port_kobject(
+	ipc_space_t                     space,
+	mach_port_name_t                name,
+	natural_t                       *typep,
+	mach_vm_address_t               *addrp)
+{
+	return mach_port_kobject_description(space, name, typep, addrp, NULL);
+}
+
 /*
  *	Routine:	mach_port_kernel_object [Legacy kernel call]
  *	Purpose:

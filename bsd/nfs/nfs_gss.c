@@ -26,6 +26,9 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <nfs/nfs_conf.h>
+#if CONFIG_NFS
+
 /*************
  * These functions implement RPCSEC_GSS security for the NFS client and server.
  * The code is specific to the use of Kerberos v5 and the use of DES MAC MD5
@@ -120,24 +123,24 @@
 #define NFS_GSS_ISDBG  (NFS_DEBUG_FACILITY &  NFS_FAC_GSS)
 
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 u_long nfs_gss_svc_ctx_hash;
 struct nfs_gss_svc_ctx_hashhead *nfs_gss_svc_ctx_hashtbl;
 lck_mtx_t *nfs_gss_svc_ctx_mutex;
 lck_grp_t *nfs_gss_svc_grp;
 uint32_t nfsrv_gss_context_ttl = GSS_CTX_EXPIRE;
 #define GSS_SVC_CTX_TTL ((uint64_t)max(2*GSS_CTX_PEND, nfsrv_gss_context_ttl) * NSEC_PER_SEC)
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 lck_grp_t *nfs_gss_clnt_grp;
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
 #define KRB5_MAX_MIC_SIZE 128
 uint8_t krb5_mech_oid[11] = { 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02 };
 static uint8_t xdrpad[] = { 0x00, 0x00, 0x00, 0x00};
 
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 static int      nfs_gss_clnt_ctx_find(struct nfsreq *);
 static int      nfs_gss_clnt_ctx_init(struct nfsreq *, struct nfs_gss_clnt_ctx *);
 static int      nfs_gss_clnt_ctx_init_retry(struct nfsreq *, struct nfs_gss_clnt_ctx *);
@@ -149,15 +152,18 @@ static void     nfs_gss_clnt_ctx_clean(struct nfs_gss_clnt_ctx *);
 static int      nfs_gss_clnt_ctx_copy(struct nfs_gss_clnt_ctx *, struct nfs_gss_clnt_ctx **);
 static void     nfs_gss_clnt_ctx_destroy(struct nfs_gss_clnt_ctx *);
 static void     nfs_gss_clnt_log_error(struct nfsreq *, struct nfs_gss_clnt_ctx *, uint32_t, uint32_t);
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 static struct nfs_gss_svc_ctx *nfs_gss_svc_ctx_find(uint32_t);
 static void     nfs_gss_svc_ctx_insert(struct nfs_gss_svc_ctx *);
 static void     nfs_gss_svc_ctx_timer(void *, void *);
 static int      nfs_gss_svc_gssd_upcall(struct nfs_gss_svc_ctx *);
 static int      nfs_gss_svc_seqnum_valid(struct nfs_gss_svc_ctx *, uint32_t);
-#endif /* NFSSERVER */
+
+/* This is only used by server code */
+static void     nfs_gss_nfsm_chain(struct nfsm_chain *, mbuf_t);
+#endif /* CONFIG_NFS_SERVER */
 
 static void     host_release_special_port(mach_port_t);
 static mach_port_t host_copy_special_port(mach_port_t);
@@ -166,14 +172,13 @@ static int      nfs_gss_mach_vmcopyout(vm_map_copy_t, uint32_t, u_char *);
 
 static int      nfs_gss_mchain_length(mbuf_t);
 static int      nfs_gss_append_chain(struct nfsm_chain *, mbuf_t);
-static void     nfs_gss_nfsm_chain(struct nfsm_chain *, mbuf_t);
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 thread_call_t nfs_gss_svc_ctx_timer_call;
 int nfs_gss_timer_on = 0;
 uint32_t nfs_gss_ctx_count = 0;
 const uint32_t nfs_gss_ctx_max = GSS_SVC_MAXCONTEXTS;
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
 /*
  * Initialization when NFS starts
@@ -181,18 +186,18 @@ const uint32_t nfs_gss_ctx_max = GSS_SVC_MAXCONTEXTS;
 void
 nfs_gss_init(void)
 {
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 	nfs_gss_clnt_grp = lck_grp_alloc_init("rpcsec_gss_clnt", LCK_GRP_ATTR_NULL);
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 	nfs_gss_svc_grp  = lck_grp_alloc_init("rpcsec_gss_svc", LCK_GRP_ATTR_NULL);
 
 	nfs_gss_svc_ctx_hashtbl = hashinit(SVC_CTX_HASHSZ, M_TEMP, &nfs_gss_svc_ctx_hash);
 	nfs_gss_svc_ctx_mutex = lck_mtx_alloc_init(nfs_gss_svc_grp, LCK_ATTR_NULL);
 
 	nfs_gss_svc_ctx_timer_call = thread_call_allocate(nfs_gss_svc_ctx_timer, NULL);
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 }
 
 /*
@@ -387,7 +392,7 @@ rpc_gss_priv_data_create(gss_ctx_id_t ctx, mbuf_t *mb_head, uint32_t seqnum, uin
 	return error;
 }
 
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 
 /*
  * Restore the argument or result from an rpc_gss_integ_data mbuf chain
@@ -2816,14 +2821,14 @@ out:
 	nfs_gss_clnt_ctx_unref(&req);
 	return error;
 }
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
 /*************
  *
  * Server functions
  */
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 
 /*
  * Find a server context based on a handle value received
@@ -3840,7 +3845,7 @@ nfs_gss_svc_cleanup(void)
 	lck_mtx_unlock(nfs_gss_svc_ctx_mutex);
 }
 
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
 
 /*************
@@ -3896,6 +3901,12 @@ nfs_gss_mach_alloc_buffer(u_char *buf, uint32_t buflen, vm_map_copy_t *addr)
 
 	tbuflen = vm_map_round_page(buflen,
 	    vm_map_page_mask(ipc_kernel_map));
+
+	if (tbuflen < buflen) {
+		printf("nfs_gss_mach_alloc_buffer: vm_map_round_page failed\n");
+		return;
+	}
+
 	kr = vm_allocate_kernel(ipc_kernel_map, &kmem_buf, tbuflen, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_FILE);
 	if (kr != 0) {
 		printf("nfs_gss_mach_alloc_buffer: vm_allocate failed\n");
@@ -4005,6 +4016,7 @@ nfs_gss_append_chain(struct nfsm_chain *nmc, mbuf_t mc)
 	return 0;
 }
 
+#if CONFIG_NFS_SERVER /* Only used by CONFIG_NFS_SERVER */
 /*
  * Convert an mbuf chain to an NFS mbuf chain
  */
@@ -4025,7 +4037,7 @@ nfs_gss_nfsm_chain(struct nfsm_chain *nmc, mbuf_t mc)
 	nmc->nmc_left = mbuf_trailingspace(tail);
 	nmc->nmc_flags = 0;
 }
-
+#endif /* CONFIG_NFS_SERVER */
 
 
 #if 0
@@ -4052,3 +4064,5 @@ hexdump(const char *msg, void *data, size_t len)
 	}
 }
 #endif
+
+#endif /* CONFIG_NFS */

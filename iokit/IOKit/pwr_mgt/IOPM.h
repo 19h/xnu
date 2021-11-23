@@ -102,6 +102,10 @@ enum {
 	kIOPMPowerOn                    = 0x00000002,
 	kIOPMDeviceUsable               = 0x00008000,
 	kIOPMLowPower                   = 0x00010000,
+#if PRIVATE
+	kIOPMAOTPower                   = 0x00020000,
+	kIOPMAOTCapability              = kIOPMAOTPower,
+#endif /* PRIVATE */
 	kIOPMPreventIdleSleep           = 0x00000040,
 	kIOPMSleepCapability            = 0x00000004,
 	kIOPMRestartCapability          = 0x00000080,
@@ -321,6 +325,12 @@ enum {
 	 */
 	kIOPMDriverAssertionCPUBit                      = 0x01,
 
+	/*! kIOPMDriverAssertionPreventSystemIdleSleepBit
+	 * When set, the system should not idle sleep. This does not prevent
+	 * demand sleep.
+	 */
+	kIOPMDriverAssertionPreventSystemIdleSleepBit   = 0x02,
+
 	/*! kIOPMDriverAssertionUSBExternalDeviceBit
 	 * When set, driver is informing PM that an external USB device is attached.
 	 */
@@ -473,7 +483,7 @@ enum {
  * Argument accompanying the kIOPMMessageSleepWakeUUIDChange notification when
  * the current UUID has been removed.
  */
-#define kIOPMMessageSleepWakeUUIDCleared                ((void *)0)
+#define kIOPMMessageSleepWakeUUIDCleared                ((void *)NULL)
 
 /*! kIOPMMessageDriverAssertionsChanged
  *  Sent when kernel PM driver assertions have changed.
@@ -510,7 +520,10 @@ enum {
 	kIOPMProcessorSpeedChange     = (1 << 8),// change the processor speed
 	kIOPMOverTemp                 = (1 << 9),// system dangerously hot
 	kIOPMClamshellOpened          = (1 << 10),// clamshell was opened
-	kIOPMDWOverTemp               = (1 << 11)// DarkWake thermal limits exceeded.
+	kIOPMDWOverTemp               = (1 << 11),// DarkWake thermal limits exceeded.
+	kIOPMPowerButtonUp            = (1 << 12),// Power button up
+	kIOPMProModeEngaged           = (1 << 13),// Fans entered 'ProMode'
+	kIOPMProModeDisengaged        = (1 << 14) // Fans exited 'ProMode'
 };
 
 
@@ -589,7 +602,7 @@ enum {
 #define kIOPMPSLegacyBatteryInfoKey                 "LegacyBatteryInfo"
 #define kIOPMPSBatteryHealthKey                     "BatteryHealth"
 #define kIOPMPSHealthConfidenceKey                  "HealthConfidence"
-#define kIOPMPSCapacityEstimatedKey                     "CapacityEstimated"
+#define kIOPMPSCapacityEstimatedKey                 "CapacityEstimated"
 #define kIOPMPSBatteryChargeStatusKey               "ChargeStatus"
 #define kIOPMPSBatteryTemperatureKey                "Temperature"
 #define kIOPMPSAdapterDetailsKey                    "AdapterDetails"
@@ -627,13 +640,13 @@ enum {
 #define kIOPMPSAdapterDetailsRevisionKey            "AdapterRevision"
 #define kIOPMPSAdapterDetailsSerialNumberKey        "SerialNumber"
 #define kIOPMPSAdapterDetailsFamilyKey              "FamilyCode"
-#define kIOPMPSAdapterDetailsAmperageKey            "Amperage"
+#define kIOPMPSAdapterDetailsAmperageKey            "Current"
 #define kIOPMPSAdapterDetailsDescriptionKey         "Description"
 #define kIOPMPSAdapterDetailsPMUConfigurationKey    "PMUConfiguration"
-#define kIOPMPSAdapterDetailsVoltage            "AdapterVoltage"
-#define kIOPMPSAdapterDetailsSourceIDKey                    "SourceID"
-#define kIOPMPSAdapterDetailsErrorFlagsKey                  "ErrorFlags"
-#define kIOPMPSAdapterDetailsSharedSourceKey            "SharedSource"
+#define kIOPMPSAdapterDetailsVoltage                "Voltage"
+#define kIOPMPSAdapterDetailsSourceIDKey            "Source"
+#define kIOPMPSAdapterDetailsErrorFlagsKey          "ErrorFlags"
+#define kIOPMPSAdapterDetailsSharedSourceKey        "SharedSource"
 #define kIOPMPSAdapterDetailsCloakedKey             "CloakedSource"
 
 // values for kIOPSPowerAdapterFamilyKey
@@ -775,6 +788,8 @@ enum {
 #define kIOPMSettingTimeZoneOffsetKey               "TimeZoneOffsetSeconds"
 #define kIOPMSettingMobileMotionModuleKey           "MobileMotionModule"
 #define kIOPMSettingGraphicsSwitchKey               "GPUSwitch"
+#define kIOPMSettingProModeControl                  "ProModeControl"
+#define kIOPMSettingProModeDefer                    "ProModeDefer"
 
 // Setting controlling drivers can register to receive scheduled wake data
 // Either in "CF seconds" type, or structured calendar data in a formatted

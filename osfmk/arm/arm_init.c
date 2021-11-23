@@ -85,6 +85,7 @@ extern void sleep_token_buffer_init(void);
 extern vm_offset_t intstack_top;
 #if __arm64__
 extern vm_offset_t excepstack_top;
+extern uint64_t events_per_sec;
 #else
 extern vm_offset_t fiqstack_top;
 #endif
@@ -100,6 +101,16 @@ int             debug_task;
 boolean_t up_style_idle_exit = 0;
 
 
+#if HAS_NEX_PG
+uint32_t nex_pg = 1;
+extern void set_nex_pg(void);
+#endif
+
+#if HAS_BP_RET
+/* Enable both branch target retention (0x2) and branch direction retention (0x1) across sleep */
+uint32_t bp_ret = 3;
+extern void set_bp_ret(void);
+#endif
 
 #if INTERRUPT_MASKED_DEBUG
 boolean_t interrupt_masked_debug = 1;
@@ -135,6 +146,9 @@ unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
  * JOP rebasing
  */
 
+#if defined(HAS_APPLE_PAC)
+#include <ptrauth.h>
+#endif /* defined(HAS_APPLE_PAC) */
 
 // Note, the following should come from a header from dyld
 static void
@@ -145,6 +159,11 @@ rebase_chain(uintptr_t chainStartAddress, uint64_t stepMultiplier, uintptr_t bas
 	do {
 		uint64_t value = *(uint64_t*)address;
 
+#if HAS_APPLE_PAC
+		uint16_t diversity = (uint16_t)(value >> 32);
+		bool hasAddressDiversity = (value & (1ULL << 48)) != 0;
+		ptrauth_key key = (ptrauth_key)((value >> 49) & 0x3);
+#endif
 		bool isAuthenticated = (value & (1ULL << 63)) != 0;
 		bool isRebase = (value & (1ULL << 62)) == 0;
 		if (isRebase) {
@@ -153,6 +172,33 @@ rebase_chain(uintptr_t chainStartAddress, uint64_t stepMultiplier, uintptr_t bas
 				uint64_t newValue = (value & 0xFFFFFFFF) + slide;
 				// Add in the offset from the mach_header
 				newValue += baseAddress;
+#if HAS_APPLE_PAC
+				// We have bits to merge in to the discriminator
+				uintptr_t discriminator = diversity;
+				if (hasAddressDiversity) {
+					// First calculate a new discriminator using the address of where we are trying to store the value
+					// Only blend if we have a discriminator
+					if (discriminator) {
+						discriminator = __builtin_ptrauth_blend_discriminator((void*)address, discriminator);
+					} else {
+						discriminator = address;
+					}
+				}
+				switch (key) {
+				case ptrauth_key_asia:
+					newValue = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)newValue, ptrauth_key_asia, discriminator);
+					break;
+				case ptrauth_key_asib:
+					newValue = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)newValue, ptrauth_key_asib, discriminator);
+					break;
+				case ptrauth_key_asda:
+					newValue = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)newValue, ptrauth_key_asda, discriminator);
+					break;
+				case ptrauth_key_asdb:
+					newValue = (uintptr_t)__builtin_ptrauth_sign_unauthenticated((void*)newValue, ptrauth_key_asdb, discriminator);
+					break;
+				}
+#endif
 				*(uint64_t*)address = newValue;
 			} else {
 				// Regular pointer which needs to fit in 51-bits of value.
@@ -190,6 +236,7 @@ rebase_threaded_starts(uint32_t *threadArrayStart, uint32_t *threadArrayEnd,
 	return true;
 }
 
+
 /*
  *		Routine:		arm_init
  *		Function:
@@ -222,11 +269,28 @@ arm_init(
 	BootArgs = args = &const_boot_args;
 
 	cpu_data_init(&BootCpuData);
+#if defined(HAS_APPLE_PAC)
+	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
+	BootCpuData.rop_key = KERNEL_ROP_ID;
+#endif /* defined(HAS_APPLE_PAC) */
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
 
 #if __arm64__
 
+
+#if defined(HAS_APPLE_PAC)
+	boolean_t user_jop = TRUE;
+	PE_parse_boot_argn("user_jop", &user_jop, sizeof(user_jop));
+	if (!user_jop) {
+		args->bootFlags |= kBootFlagsDisableUserJOP;
+	}
+	boolean_t user_ts_jop = TRUE;
+	PE_parse_boot_argn("user_ts_jop", &user_ts_jop, sizeof(user_ts_jop));
+	if (!user_ts_jop) {
+		args->bootFlags |= kBootFlagsDisableUserThreadStateJOP;
+	}
+#endif /* defined(HAS_APPLE_PAC) */
 
 	{
 		unsigned int    tmp_16k = 0;
@@ -311,8 +375,10 @@ arm_init(
 	    + ((uintptr_t)&BootCpuData
 	    - (uintptr_t)(args->virtBase)));
 
-	thread_bootstrap();
-	thread = current_thread();
+	thread = thread_bootstrap();
+	thread->machine.CpuDatap = &BootCpuData;
+	machine_set_current_thread(thread);
+
 	/*
 	 * Preemption is enabled for this thread so that it can lock mutexes without
 	 * tripping the preemption check. In reality scheduling is not enabled until
@@ -320,7 +386,6 @@ arm_init(
 	 * preemption level is not really meaningful for the bootstrap thread.
 	 */
 	thread->machine.preemption_count = 0;
-	thread->machine.CpuDatap = &BootCpuData;
 #if     __arm__ && __ARM_USER_PROTECT__
 	{
 		unsigned int ttbr0_val, ttbr1_val, ttbcr_val;
@@ -339,11 +404,16 @@ arm_init(
 
 	rtclock_early_init();
 
+	lck_mod_init();
+
+	/*
+	 * Initialize the timer callout world
+	 */
+	timer_call_init();
+
 	kernel_early_bootstrap();
 
 	cpu_init();
-
-	EntropyData.index_ptr = EntropyData.buffer;
 
 	processor_bootstrap();
 	my_master_proc = master_processor;
@@ -366,14 +436,22 @@ arm_init(
 	/* Disable if WDT is disabled or no_interrupt_mask_debug in boot-args */
 	if (PE_parse_boot_argn("no_interrupt_masked_debug", &interrupt_masked_debug,
 	    sizeof(interrupt_masked_debug)) || (PE_parse_boot_argn("wdt", &wdt_boot_arg,
-	    sizeof(wdt_boot_arg)) && (wdt_boot_arg == -1))) {
+	    sizeof(wdt_boot_arg)) && (wdt_boot_arg == -1)) || kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_OVRD)) {
 		interrupt_masked_debug = 0;
 	}
 
 	PE_parse_boot_argn("interrupt_masked_debug_timeout", &interrupt_masked_timeout, sizeof(interrupt_masked_timeout));
 #endif
 
+#if HAS_NEX_PG
+	PE_parse_boot_argn("nexpg", &nex_pg, sizeof(nex_pg));
+	set_nex_pg(); // Apply NEX powergating settings to boot CPU
+#endif
 
+#if HAS_BP_RET
+	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
+	set_bp_ret(); // Apply branch predictor retention settings to boot CPU
+#endif
 
 	PE_parse_boot_argn("immediate_NMI", &force_immediate_debug_halt, sizeof(force_immediate_debug_halt));
 
@@ -450,7 +528,26 @@ arm_init(
 #endif
 
 	PE_init_platform(TRUE, &BootCpuData);
+
+#if __arm64__
+	if (PE_parse_boot_argn("wfe_events_sec", &events_per_sec, sizeof(events_per_sec))) {
+		if (events_per_sec <= 0) {
+			events_per_sec = 1;
+		} else if (events_per_sec > USEC_PER_SEC) {
+			events_per_sec = USEC_PER_SEC;
+		}
+	} else {
+#if defined(ARM_BOARD_WFE_TIMEOUT_NS)
+		events_per_sec = NSEC_PER_SEC / ARM_BOARD_WFE_TIMEOUT_NS;
+#else /* !defined(ARM_BOARD_WFE_TIMEOUT_NS) */
+		/* Default to 1usec (or as close as we can get) */
+		events_per_sec = USEC_PER_SEC;
+#endif /* !defined(ARM_BOARD_WFE_TIMEOUT_NS) */
+	}
+#endif
+
 	cpu_timebase_init(TRUE);
+	PE_init_cpu();
 	fiq_context_bootstrap(TRUE);
 
 
@@ -482,6 +579,7 @@ arm_init_cpu(
 #if __ARM_PAN_AVAILABLE__
 	__builtin_arm_wsr("pan", 1);
 #endif
+
 
 	cpu_data_ptr->cpu_flags &= ~SleepState;
 #if     __ARM_SMP__ && defined(ARMA7)
@@ -528,6 +626,7 @@ arm_init_cpu(
 		PE_init_platform(TRUE, NULL);
 		commpage_update_timebase();
 	}
+	PE_init_cpu();
 
 	fiq_context_init(TRUE);
 	cpu_data_ptr->rtcPop = EndOfAllTime;
@@ -548,6 +647,14 @@ arm_init_cpu(
 	mt_wake_per_core();
 #endif /* MONOTONIC && defined(__arm64__) */
 
+#if defined(KERNEL_INTEGRITY_CTRR)
+	if (cpu_data_ptr->cluster_master) {
+		lck_spin_lock(&ctrr_cpu_start_lck);
+		ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id] = 1;
+		thread_wakeup(&ctrr_cluster_locked[cpu_data_ptr->cpu_cluster_id]);
+		lck_spin_unlock(&ctrr_cpu_start_lck);
+	}
+#endif
 
 	slave_main(NULL);
 }

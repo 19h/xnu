@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2019 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -47,6 +47,10 @@
 
 class IOService;
 
+extern const OSSymbol * gIOModuleIdentifierKey;
+extern const OSSymbol * gIOModuleIdentifierKernelKey;
+
+
 /*!
  *   @class IOCatalogue
  *   @abstract In-kernel database for IOKit driver personalities.
@@ -54,7 +58,7 @@ class IOService;
  */
 class IOCatalogue : public OSObject
 {
-	OSDeclareDefaultStructors(IOCatalogue)
+	OSDeclareDefaultStructors(IOCatalogue);
 
 private:
 	IORWLock *               lock;
@@ -127,34 +131,19 @@ public:
 
 /*!
  *   @function isModuleLoaded
- *   @abstract Reports if a kernel module has been loaded.
- *   @param moduleName  Name of the module.
- *   @result Returns true if the associated kernel module has been loaded into the kernel.
- */
-	bool isModuleLoaded( OSString * moduleName ) const;
-
-/*!
- *   @function isModuleLoaded
- *   @abstract Reports if a kernel module has been loaded.
- *   @param moduleName  Name of the module.
- *   @result Returns true if the associated kernel module has been loaded into the kernel.
- */
-	bool isModuleLoaded( const char * moduleName ) const;
-
-/*!
- *   @function isModuleLoaded
  *   @abstract Reports if a kernel module has been loaded for a particular personality.
  *   @param driver  A driver personality's property list.
+ *   @param kextRef A reference to the kext getting loaded.
  *   @result Returns true if the associated kernel module has been loaded into the kernel for a particular driver personality on which it depends.
  */
-	bool isModuleLoaded( OSDictionary * driver ) const;
+	bool isModuleLoaded( OSDictionary * driver, OSObject ** kextRef ) const;
 
 /*!
  *   @function moduleHasLoaded
  *   @abstract Callback function called after a IOKit dependent kernel module is loaded.
  *   @param name  Name of the kernel module.
  */
-	void moduleHasLoaded( OSString * name );
+	void moduleHasLoaded( const OSSymbol * name );
 
 /*!
  *   @function moduleHasLoaded
@@ -185,13 +174,21 @@ public:
  *   @param unload Flag to cause the actual unloading of the module.
  */
 	IOReturn terminateDriversForModule( const char * moduleName, bool unload = true);
+#if XNU_KERNEL_PRIVATE
+	IOReturn terminateDrivers(OSDictionary * matching, io_name_t className);
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*!
  *   @function startMatching
- *   @abstract Starts an IOService matching thread where matching keys and values are provided by the matching dictionary.
- *   @param matching  A dictionary whose keys and values are used for matching personalities in the database.  For example, a matching dictionary containing a 'IOProviderClass' key with the value 'IOPCIDevice' will start matching for all personalities which have the key 'IOProviderClass' equal to 'IOPCIDevice'.
+ *   @abstract Restarts IOService matching.
+ *   @param identifier  All IOService objects with this bundle indentifier are rematched.
  */
+	bool startMatching( const OSSymbol * identifier );
+
+	// deprecated, for bin compat
+#if defined(__i386__) || defined(__x86_64__)
 	bool startMatching( OSDictionary * matching );
+#endif
 
 /*!
  *   @function reset
@@ -233,7 +230,6 @@ private:
 	IOReturn unloadModule( OSString * moduleName ) const;
 
 	IOReturn _removeDrivers(OSDictionary * matching);
-	IOReturn _terminateDrivers(OSDictionary * matching);
 };
 
 extern const OSSymbol * gIOClassKey;

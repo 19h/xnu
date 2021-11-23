@@ -105,7 +105,7 @@ convert_port_to_clock(
 		if (ip_active(port) &&
 		    ((ip_kotype(port) == IKOT_CLOCK) ||
 		    (ip_kotype(port) == IKOT_CLOCK_CTRL))) {
-			clock = (clock_t) port->ip_kobject;
+			clock = (clock_t)ip_get_kobject(port);
 		}
 		ip_unlock(port);
 	}
@@ -131,7 +131,7 @@ convert_port_to_clock_ctrl(
 		ip_lock(port);
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_CLOCK_CTRL)) {
-			clock = (clock_t) port->ip_kobject;
+			clock = (clock_t) ip_get_kobject(port);
 		}
 		ip_unlock(port);
 	}
@@ -194,8 +194,8 @@ port_name_to_clock(
 	if (ipc_port_translate_send(space, clock_name, &port) != KERN_SUCCESS) {
 		return clock;
 	}
-	if (ip_active(port) && (ip_kotype(port) == IKOT_CLOCK)) {
-		clock = (clock_t) port->ip_kobject;
+	if (ip_kotype(port) == IKOT_CLOCK) {
+		clock = (clock_t) ip_get_kobject(port);
 	}
 	ip_unlock(port);
 	return clock;

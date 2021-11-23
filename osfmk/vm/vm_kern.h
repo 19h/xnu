@@ -108,7 +108,7 @@ extern kern_return_t kmem_alloc(
 	vm_map_t    map,
 	vm_offset_t *addrp,
 	vm_size_t   size,
-	vm_tag_t    tag);
+	vm_tag_t    tag) __XNU_INTERNAL(kmem_alloc);
 
 extern kern_return_t kmem_alloc_contig(
 	vm_map_t        map,
@@ -131,7 +131,7 @@ extern kern_return_t    kmem_alloc_pageable(
 	vm_map_t        map,
 	vm_offset_t     *addrp,
 	vm_size_t       size,
-	vm_tag_t        tag);
+	vm_tag_t        tag) __XNU_INTERNAL(kmem_alloc_pageable);
 
 extern kern_return_t    kmem_alloc_aligned(
 	vm_map_t        map,
@@ -166,7 +166,7 @@ extern kern_return_t    kmem_alloc_kobject(
 	vm_map_t        map,
 	vm_offset_t     *addrp,
 	vm_size_t       size,
-	vm_tag_t        tag);
+	vm_tag_t        tag) __XNU_INTERNAL(kmem_alloc_kobject);
 
 extern kern_return_t kernel_memory_populate(
 	vm_map_t        map,
@@ -277,7 +277,6 @@ extern vm_tag_t                 kern_allocation_name_get_vm_tag(kern_allocation_
 extern void             kmem_init(
 	vm_offset_t     start,
 	vm_offset_t     end);
-
 
 extern kern_return_t    copyinmap(
 	vm_map_t        map,
@@ -434,7 +433,12 @@ extern vm_map_t ipc_kernel_map;
 #ifdef KERNEL
 
 __BEGIN_DECLS
+#if MACH_KERNEL_PRIVATE
+extern vm_offset_t vm_kernel_addrhash(vm_offset_t addr)
+__XNU_INTERNAL(vm_kernel_addrhash);
+#else
 extern vm_offset_t vm_kernel_addrhash(vm_offset_t addr);
+#endif
 __END_DECLS
 
 extern void vm_kernel_addrhide(

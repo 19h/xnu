@@ -208,12 +208,14 @@ ipc_voucher_init(void)
 	    sizeof(struct ipc_voucher),
 	    "ipc vouchers");
 	zone_change(ipc_voucher_zone, Z_NOENCRYPT, TRUE);
+	zone_change(ipc_voucher_zone, Z_CLEARMEMORY, TRUE);
 
 	ipc_voucher_attr_control_zone = zinit(sizeof(struct ipc_voucher_attr_control),
 	    attr_manager_max * sizeof(struct ipc_voucher_attr_control),
 	    sizeof(struct ipc_voucher_attr_control),
 	    "ipc voucher attr controls");
 	zone_change(ipc_voucher_attr_control_zone, Z_NOENCRYPT, TRUE);
+	zone_change(ipc_voucher_attr_control_zone, Z_CLEARMEMORY, TRUE);
 
 	/* initialize voucher hash */
 	ivht_lock_init();
@@ -318,7 +320,7 @@ iv_dealloc(ipc_voucher_t iv, boolean_t unhash)
 	 * is gone.  We can just discard it now.
 	 */
 	if (IP_VALID(port)) {
-		assert(ip_active(port));
+		require_ip_active(port);
 		assert(port->ip_srights == 0);
 
 		ipc_port_dealloc_kernel(port);
@@ -375,7 +377,12 @@ unsafe_convert_port_to_voucher(
 	ipc_port_t      port)
 {
 	if (IP_VALID(port)) {
-		uintptr_t voucher = (uintptr_t) port->ip_kobject;
+		/* vouchers never labeled (they get transformed before use) */
+		if (ip_is_kolabeled(port)) {
+			return (uintptr_t)IV_NULL;
+		}
+
+		uintptr_t voucher = (uintptr_t)port->ip_kobject;
 
 		/*
 		 * No need to lock because we have a reference on the
@@ -404,7 +411,8 @@ convert_port_to_voucher(
 	ipc_port_t      port)
 {
 	if (IP_VALID(port)) {
-		ipc_voucher_t voucher = (ipc_voucher_t) port->ip_kobject;
+		zone_require(port, ipc_object_zones[IOT_PORT]);
+		ipc_voucher_t voucher = (ipc_voucher_t) ip_get_kobject(port);
 
 		/*
 		 * No need to lock because we have a reference on the
@@ -415,8 +423,9 @@ convert_port_to_voucher(
 			return IV_NULL;
 		}
 
-		assert(ip_active(port));
+		require_ip_active(port);
 
+		zone_require(voucher, ipc_voucher_zone);
 		ipc_voucher_reference(voucher);
 		return voucher;
 	}
@@ -477,26 +486,20 @@ ipc_voucher_release(ipc_voucher_t voucher)
  * Purpose:
  *	Called whenever the Mach port system detects no-senders
  *	on the voucher port.
- *
- *	Each time the send-right count goes positive, a no-senders
- *	notification is armed (and a voucher reference is donated).
- *	So, each notification that comes in must release a voucher
- *	reference.  If more send rights have been added since it
- *	fired (asynchronously), they will be protected by a different
- *	reference hold.
  */
 void
 ipc_voucher_notify(mach_msg_header_t *msg)
 {
 	mach_no_senders_notification_t *notification = (void *)msg;
 	ipc_port_t port = notification->not_header.msgh_remote_port;
-	ipc_voucher_t iv;
+	ipc_voucher_t voucher = (ipc_voucher_t)ip_get_kobject(port);
 
-	assert(ip_active(port));
+	require_ip_active(port);
 	assert(IKOT_VOUCHER == ip_kotype(port));
-	iv = (ipc_voucher_t)port->ip_kobject;
 
-	ipc_voucher_release(iv);
+	/* consume the reference donated by convert_voucher_to_port */
+	zone_require(voucher, ipc_voucher_zone);
+	ipc_voucher_release(voucher);
 }
 
 /*
@@ -505,48 +508,22 @@ ipc_voucher_notify(mach_msg_header_t *msg)
 ipc_port_t
 convert_voucher_to_port(ipc_voucher_t voucher)
 {
-	ipc_port_t      port, send;
-
 	if (IV_NULL == voucher) {
 		return IP_NULL;
 	}
 
+	zone_require(voucher, ipc_voucher_zone);
 	assert(os_ref_get_count(&voucher->iv_refs) > 0);
 
-	/* create a port if needed */
-	port = voucher->iv_port;
-	if (!IP_VALID(port)) {
-		port = ipc_port_alloc_kernel();
-		assert(IP_VALID(port));
-		ipc_kobject_set_atomically(port, (ipc_kobject_t) voucher, IKOT_VOUCHER);
-
-		/* If we lose the race, deallocate and pick up the other guy's port */
-		if (!OSCompareAndSwapPtr(IP_NULL, port, &voucher->iv_port)) {
-			ipc_port_dealloc_kernel(port);
-			port = voucher->iv_port;
-			assert(ip_kotype(port) == IKOT_VOUCHER);
-			assert(port->ip_kobject == (ipc_kobject_t)voucher);
-		}
-	}
-
-	ip_lock(port);
-	assert(ip_active(port));
-	send = ipc_port_make_send_locked(port);
-
-	if (1 == port->ip_srights) {
-		ipc_port_t old_notify;
-
-		/* transfer our ref to the port, and arm the no-senders notification */
-		assert(IP_NULL == port->ip_nsrequest);
-		ipc_port_nsrequest(port, port->ip_mscount, ipc_port_make_sonce_locked(port), &old_notify);
-		/* port unlocked */
-		assert(IP_NULL == old_notify);
-	} else {
-		/* piggyback on the existing port reference, so consume ours */
-		ip_unlock(port);
+	/*
+	 * make a send right and donate our reference for ipc_voucher_notify
+	 * if this is the first send right
+	 */
+	if (!ipc_kobject_make_send_lazy_alloc_port(&voucher->iv_port,
+	    (ipc_kobject_t)voucher, IKOT_VOUCHER)) {
 		ipc_voucher_release(voucher);
 	}
-	return send;
+	return voucher->iv_port;
 }
 
 #define ivace_reset_data(ivace_elem, next_index) {       \
@@ -650,7 +627,7 @@ ivac_dealloc(ipc_voucher_attr_control_t ivac)
 	 * is gone.  We can just discard it now.
 	 */
 	if (IP_VALID(port)) {
-		assert(ip_active(port));
+		require_ip_active(port);
 		assert(port->ip_srights == 0);
 
 		ipc_port_dealloc_kernel(port);
@@ -699,7 +676,8 @@ convert_port_to_voucher_attr_control(
 	ipc_port_t      port)
 {
 	if (IP_VALID(port)) {
-		ipc_voucher_attr_control_t ivac = (ipc_voucher_attr_control_t) port->ip_kobject;
+		zone_require(port, ipc_object_zones[IOT_PORT]);
+		ipc_voucher_attr_control_t ivac = (ipc_voucher_attr_control_t) ip_get_kobject(port);
 
 		/*
 		 * No need to lock because we have a reference on the
@@ -710,15 +688,21 @@ convert_port_to_voucher_attr_control(
 		if (ip_kotype(port) != IKOT_VOUCHER_ATTR_CONTROL) {
 			return IVAC_NULL;
 		}
+		require_ip_active(port);
 
-		assert(ip_active(port));
-
+		zone_require(ivac, ipc_voucher_attr_control_zone);
 		ivac_reference(ivac);
 		return ivac;
 	}
 	return IVAC_NULL;
 }
 
+/*
+ * Routine:	ipc_voucher_notify
+ * Purpose:
+ *	Called whenever the Mach port system detects no-senders
+ *	on the voucher attr control port.
+ */
 void
 ipc_voucher_attr_control_notify(mach_msg_header_t *msg)
 {
@@ -726,19 +710,13 @@ ipc_voucher_attr_control_notify(mach_msg_header_t *msg)
 	ipc_port_t port = notification->not_header.msgh_remote_port;
 	ipc_voucher_attr_control_t ivac;
 
+	require_ip_active(port);
 	assert(IKOT_VOUCHER_ATTR_CONTROL == ip_kotype(port));
-	ip_lock(port);
-	assert(ip_active(port));
 
-	/* if no new send rights, drop a control reference */
-	if (port->ip_mscount == notification->not_count) {
-		ivac = (ipc_voucher_attr_control_t)port->ip_kobject;
-		ip_unlock(port);
-
-		ivac_release(ivac);
-	} else {
-		ip_unlock(port);
-	}
+	/* release the reference donated by convert_voucher_attr_control_to_port */
+	ivac = (ipc_voucher_attr_control_t)ip_get_kobject(port);
+	zone_require(ivac, ipc_voucher_attr_control_zone);
+	ivac_release(ivac);
 }
 
 /*
@@ -747,48 +725,21 @@ ipc_voucher_attr_control_notify(mach_msg_header_t *msg)
 ipc_port_t
 convert_voucher_attr_control_to_port(ipc_voucher_attr_control_t control)
 {
-	ipc_port_t      port, send;
-
 	if (IVAC_NULL == control) {
 		return IP_NULL;
 	}
 
-	/* create a port if needed */
-	port = control->ivac_port;
-	if (!IP_VALID(port)) {
-		port = ipc_port_alloc_kernel();
-		assert(IP_VALID(port));
-		if (OSCompareAndSwapPtr(IP_NULL, port, &control->ivac_port)) {
-			ip_lock(port);
-			ipc_kobject_set_atomically(port, (ipc_kobject_t) control, IKOT_VOUCHER_ATTR_CONTROL);
-		} else {
-			ipc_port_dealloc_kernel(port);
-			port = control->ivac_port;
-			ip_lock(port);
-			assert(ip_kotype(port) == IKOT_VOUCHER_ATTR_CONTROL);
-			assert(port->ip_kobject == (ipc_kobject_t)control);
-		}
-	} else {
-		ip_lock(port);
-	}
+	zone_require(control, ipc_voucher_attr_control_zone);
 
-	assert(ip_active(port));
-	send = ipc_port_make_send_locked(port);
-
-	if (1 == port->ip_srights) {
-		ipc_port_t old_notify;
-
-		/* transfer our ref to the port, and arm the no-senders notification */
-		assert(IP_NULL == port->ip_nsrequest);
-		ipc_port_nsrequest(port, port->ip_mscount, ipc_port_make_sonce_locked(port), &old_notify);
-		assert(IP_NULL == old_notify);
-		/* ipc_port_nsrequest unlocks the port */
-	} else {
-		/* piggyback on the existing port reference, so consume ours */
-		ip_unlock(port);
+	/*
+	 * make a send right and donate our reference for
+	 * ipc_voucher_attr_control_notify if this is the first send right
+	 */
+	if (!ipc_kobject_make_send_lazy_alloc_port(&control->ivac_port,
+	    (ipc_kobject_t)control, IKOT_VOUCHER_ATTR_CONTROL)) {
 		ivac_release(control);
 	}
-	return send;
+	return control->ivac_port;
 }
 
 /*
@@ -1213,7 +1164,7 @@ ivgt_lookup(iv_index_t key_index,
 }
 
 /*
- *	Routine:        ipc_replace_voucher_value
+ *	Routine:	ipc_replace_voucher_value
  *	Purpose:
  *		Replace the <voucher, key> value with the results of
  *		running the supplied command through the resource
@@ -1307,7 +1258,7 @@ ipc_replace_voucher_value(
 }
 
 /*
- *	Routine:        ipc_directly_replace_voucher_value
+ *	Routine:	ipc_directly_replace_voucher_value
  *	Purpose:
  *		Replace the <voucher, key> value with the value-handle
  *		supplied directly by the attribute manager.
@@ -1513,8 +1464,7 @@ ipc_execute_voucher_recipe_command(
 
 			new_value = *(mach_voucher_attr_value_handle_t *)(void *)content;
 			kr = ipc_directly_replace_voucher_value(voucher,
-			    key,
-			    new_value);
+			    key, new_value);
 			if (KERN_SUCCESS != kr) {
 				return kr;
 			}
@@ -1592,7 +1542,7 @@ ipc_execute_voucher_recipe_command(
 }
 
 /*
- *	Routine:        iv_checksum
+ *	Routine:	iv_checksum
  *	Purpose:
  *		Compute the voucher sum.  This is more position-
  *		relevant than many other checksums - important for
@@ -1622,7 +1572,7 @@ iv_checksum(ipc_voucher_t voucher, boolean_t *emptyp)
 }
 
 /*
- *	Routine:        iv_dedup
+ *	Routine:	iv_dedup
  *	Purpose:
  *		See if the set of values represented by this new voucher
  *		already exist in another voucher.  If so return a reference
@@ -1787,7 +1737,7 @@ iv_dedup(ipc_voucher_t new_iv)
 }
 
 /*
- *	Routine:        ipc_create_mach_voucher
+ *	Routine:	ipc_create_mach_voucher
  *	Purpose:
  *		Create a new mach voucher and initialize it with the
  *		value(s) created by having the appropriate resource
@@ -1858,7 +1808,7 @@ ipc_create_mach_voucher(
 }
 
 /*
- *	Routine:        ipc_voucher_attr_control_create_mach_voucher
+ *	Routine:	ipc_voucher_attr_control_create_mach_voucher
  *	Purpose:
  *		Create a new mach voucher and initialize it with the
  *		value(s) created by having the appropriate resource
@@ -1945,7 +1895,7 @@ ipc_voucher_attr_control_create_mach_voucher(
 }
 
 /*
- *      ipc_register_well_known_mach_voucher_attr_manager
+ *	ipc_register_well_known_mach_voucher_attr_manager
  *
  *	Register the resource manager responsible for a given key value.
  */
@@ -2007,7 +1957,7 @@ ipc_register_well_known_mach_voucher_attr_manager(
 }
 
 /*
- *      Routine:	mach_voucher_extract_attr_content
+ *	Routine:	mach_voucher_extract_attr_content
  *	Purpose:
  *		Extract the content for a given <voucher, key> pair.
  *
@@ -2070,14 +2020,12 @@ mach_voucher_extract_attr_content(
 	/* callout to manager */
 
 	kr = (manager->ivam_extract_content)(manager, key,
-	    vals, vals_count,
-	    &command,
-	    content, in_out_size);
+	    vals, vals_count, &command, content, in_out_size);
 	return kr;
 }
 
 /*
- *      Routine:	mach_voucher_extract_attr_recipe
+ *	Routine:	mach_voucher_extract_attr_recipe
  *	Purpose:
  *		Extract a recipe for a given <voucher, key> pair.
  *
@@ -2163,7 +2111,7 @@ mach_voucher_extract_attr_recipe(
 
 
 /*
- *	Routine:        mach_voucher_extract_all_attr_recipes
+ *	Routine:	mach_voucher_extract_all_attr_recipes
  *	Purpose:
  *		Extract all the (non-default) contents for a given voucher,
  *		building up a recipe that could be provided to a future
@@ -2253,7 +2201,7 @@ mach_voucher_extract_all_attr_recipes(
 }
 
 /*
- *	Routine:        mach_voucher_debug_info
+ *	Routine:	mach_voucher_debug_info
  *	Purpose:
  *		Extract all the (non-default) contents for a given mach port name,
  *		building up a recipe that could be provided to a future
@@ -2284,6 +2232,10 @@ mach_voucher_debug_info(
 	kern_return_t kr;
 	ipc_port_t port = MACH_PORT_NULL;
 
+	if (space == IS_NULL) {
+		return KERN_INVALID_TASK;
+	}
+
 	if (!MACH_PORT_VALID(voucher_name)) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -2307,7 +2259,7 @@ mach_voucher_debug_info(
 #endif
 
 /*
- *      Routine:	mach_voucher_attr_command
+ *	Routine:	mach_voucher_attr_command
  *	Purpose:
  *		Invoke an attribute-specific command through this voucher.
  *
@@ -2380,7 +2332,7 @@ mach_voucher_attr_command(
 }
 
 /*
- *      Routine:	mach_voucher_attr_control_get_values
+ *	Routine:	mach_voucher_attr_control_get_values
  *	Purpose:
  *		For a given voucher, get the value handle associated with the
  *		specified attribute manager.
@@ -2416,7 +2368,7 @@ mach_voucher_attr_control_get_values(
 }
 
 /*
- *      Routine:	mach_voucher_attr_control_create_mach_voucher
+ *	Routine:	mach_voucher_attr_control_create_mach_voucher
  *	Purpose:
  *		Create a new mach voucher and initialize it by processing the
  *		supplied recipe(s).
@@ -2510,7 +2462,7 @@ mach_voucher_attr_control_create_mach_voucher(
 }
 
 /*
- *      Routine:	host_create_mach_voucher
+ *	Routine:	host_create_mach_voucher
  *	Purpose:
  *		Create a new mach voucher and initialize it by processing the
  *		supplied recipe(s).
@@ -2598,10 +2550,10 @@ host_create_mach_voucher(
 }
 
 /*
- *      Routine:	host_register_well_known_mach_voucher_attr_manager
+ *	Routine:	host_register_well_known_mach_voucher_attr_manager
  *	Purpose:
  *		Register the user-level resource manager responsible for a given
- *              key value.
+ *		key value.
  *	Conditions:
  *		The manager port passed in has to be converted/wrapped
  *		in an ipc_voucher_attr_manager_t structure and then call the
@@ -2650,7 +2602,7 @@ host_register_well_known_mach_voucher_attr_manager(
 }
 
 /*
- *      Routine:	host_register_mach_voucher_attr_manager
+ *	Routine:	host_register_mach_voucher_attr_manager
  *	Purpose:
  *		Register the user-space resource manager and return a
  *		dynamically allocated key.
@@ -2695,7 +2647,7 @@ ipc_get_pthpriority_from_kmsg_voucher(
 		return KERN_FAILURE;
 	}
 
-	pthread_priority_voucher = (ipc_voucher_t)kmsg->ikm_voucher->ip_kobject;
+	pthread_priority_voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
 	kr = mach_voucher_extract_attr_recipe(pthread_priority_voucher,
 	    MACH_VOUCHER_ATTR_KEY_PTHPRIORITY,
 	    content_data,
@@ -2740,7 +2692,7 @@ ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg)
 	}
 
 	/* setup recipe for preprocessing of all the attributes. */
-	pre_processed_voucher = (ipc_voucher_t)kmsg->ikm_voucher->ip_kobject;
+	pre_processed_voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
 
 	kr = ipc_voucher_prepare_processing_recipe(pre_processed_voucher,
 	    (mach_voucher_attr_raw_recipe_array_t)recipes,
@@ -2789,7 +2741,7 @@ ipc_voucher_receive_postprocessing(
 	}
 
 	/* setup recipe for auto redeem of all the attributes. */
-	sent_voucher = (ipc_voucher_t)kmsg->ikm_voucher->ip_kobject;
+	sent_voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
 
 	kr = ipc_voucher_prepare_processing_recipe(sent_voucher,
 	    (mach_voucher_attr_raw_recipe_array_t)recipes,
@@ -3025,7 +2977,7 @@ static void
 user_data_release(
 	ipc_voucher_attr_manager_t              manager);
 
-struct ipc_voucher_attr_manager user_data_manager = {
+const struct ipc_voucher_attr_manager user_data_manager = {
 	.ivam_release_value =   user_data_release_value,
 	.ivam_get_value =       user_data_get_value,
 	.ivam_extract_content = user_data_extract_content,
@@ -3048,7 +3000,7 @@ ipc_voucher_attr_control_t test_control;
 #endif
 
 /*
- *	Routine:        user_data_release_value
+ *	Routine:	user_data_release_value
  *	Purpose:
  *		Release a made reference on a specific value managed by
  *		this voucher attribute manager.
@@ -3086,7 +3038,7 @@ user_data_release_value(
 }
 
 /*
- *	Routine:        user_data_checksum
+ *	Routine:	user_data_checksum
  *	Purpose:
  *		Provide a rudimentary checksum for the data presented
  *		to these voucher attribute managers.
@@ -3107,7 +3059,7 @@ user_data_checksum(
 }
 
 /*
- *	Routine:        user_data_dedup
+ *	Routine:	user_data_dedup
  *	Purpose:
  *		See if the content represented by this request already exists
  *		in another user data element.  If so return a made reference

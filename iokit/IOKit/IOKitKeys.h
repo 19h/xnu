@@ -69,6 +69,12 @@
 #define kIOProbeScoreKey                "IOProbeScore"
 #define kIOKitDebugKey                  "IOKitDebug"
 
+// Properties to be supported as API
+#define kIOSupportedPropertiesKey       "IOSupportedProperties"
+// Properties writable by dexts
+#define kIOUserServicePropertiesKey     "IOUserServiceProperties"
+
+
 // IOService matching property names
 #define kIOProviderClassKey             "IOProviderClass"
 #define kIONameMatchKey                 "IONameMatch"
@@ -86,6 +92,35 @@
 #define kIOMatchCategoryKey             "IOMatchCategory"
 #define kIODefaultMatchCategoryKey      "IODefaultMatchCategory"
 
+#define kIOMatchedPersonalityKey        "IOMatchedPersonality"
+#define kIORematchPersonalityKey        "IORematchPersonality"
+#define kIORematchCountKey              "IORematchCount"
+#define kIODEXTMatchCountKey            "IODEXTMatchCount"
+
+// Entitlements to check against dext process
+// Property is an array, one or more of which may match, of:
+//   an array of entitlement strings, all must be present
+// Any array can be a single string.
+#define kIOServiceDEXTEntitlementsKey   "IOServiceDEXTEntitlements"
+
+// Entitlement required to open dext connection
+#define kIODriverKitEntitlementKey      "com.apple.developer.driverkit"
+
+// Entitlements required to open dext IOUserClient
+// Property is an array of strings containing CFBundleIdentifiers of service being opened
+#define kIODriverKitUserClientEntitlementsKey "com.apple.developer.driverkit.userclient-access"
+
+// Other DriverKit entitlements
+#define kIODriverKitUSBTransportEntitlementKey "com.apple.developer.driverkit.transport.usb"
+#define kIODriverKitHIDTransportEntitlementKey "com.apple.developer.driverkit.transport.hid"
+#define kIODriverKitHIDFamilyDeviceEntitlementKey "com.apple.developer.driverkit.family.hid.device"
+#define kIODriverKitHIDFamilyEventServiceEntitlementKey "com.apple.developer.driverkit.family.hid.eventservice"
+#define kIODriverKitTransportBuiltinEntitlementKey "com.apple.developer.driverkit.builtin"
+
+
+// When possible, defer matching of this driver until kextd has started.
+#define kIOMatchDeferKey                                "IOMatchDefer"
+
 // IOService default user client class, for loadable user clients
 #define kIOUserClientClassKey           "IOUserClientClass"
 
@@ -95,8 +130,16 @@
 #define kIOUserClientCrossEndianKey             "IOUserClientCrossEndian"
 #define kIOUserClientCrossEndianCompatibleKey   "IOUserClientCrossEndianCompatible"
 #define kIOUserClientSharedInstanceKey          "IOUserClientSharedInstance"
+#if KERNEL_PRIVATE
+#define kIOUserClientMessageAppSuspendedKey     "IOUserClientMessageAppSuspended"
+#endif
 // diagnostic string describing the creating task
 #define kIOUserClientCreatorKey         "IOUserClientCreator"
+// the expected cdhash value of the userspace driver executable
+#define kIOUserServerCDHashKey          "IOUserServerCDHash"
+
+#define kIOUserUserClientKey                    "IOUserUserClient"
+
 
 // IOService notification types
 #define kIOPublishNotification          "IOServicePublish"
@@ -160,6 +203,7 @@
 #define kIOPlatformUUIDKey      "IOPlatformUUID"        // (OSString)
 
 // IODTNVRAM property keys
+#define kIONVRAMBootArgsKey             "boot-args"
 #define kIONVRAMDeletePropertyKey       "IONVRAM-DELETE-PROPERTY"
 #define kIONVRAMSyncNowPropertyKey      "IONVRAM-SYNCNOW-PROPERTY"
 #define kIONVRAMActivateCSRConfigPropertyKey    "IONVRAM-ARMCSR-PROPERTY"

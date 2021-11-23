@@ -85,8 +85,6 @@ static int i386_set_ldt_impl(uint32_t *retval, uint64_t start_sel, uint64_t desc
 static int i386_get_ldt_impl(uint32_t *retval, uint64_t start_sel, uint64_t descs,
     uint64_t num_sels);
 
-extern int allow_64bit_proc_LDT_ops;
-
 /*
  * Add the descriptors to the LDT, starting with
  * the descriptor for 'first_selector'.
@@ -441,10 +439,6 @@ i386_set_ldt64(
 	uint64_t                descs,  /* out */
 	uint64_t                num_sels)
 {
-	if (!allow_64bit_proc_LDT_ops) {
-		return EINVAL;
-	}
-
 	return i386_set_ldt_impl(retval, start_sel, descs, num_sels);
 }
 
@@ -468,9 +462,5 @@ i386_get_ldt64(
 	uint64_t                descs,  /* out */
 	uint64_t                num_sels)
 {
-	if (!allow_64bit_proc_LDT_ops) {
-		return EINVAL;
-	}
-
 	return i386_get_ldt_impl(retval, start_sel, descs, num_sels);
 }

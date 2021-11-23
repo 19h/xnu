@@ -70,7 +70,6 @@
 #include <kern/startup.h>
 #include <kern/clock.h>
 #include <kern/pms.h>
-#include <kern/xpr.h>
 #include <kern/cpu_data.h>
 #include <kern/processor.h>
 #include <sys/kdebug.h>
@@ -142,7 +141,12 @@ pml4_entry_t            *IdlePML4;
 int                     kernPhysPML4Index;
 int                     kernPhysPML4EntryCount;
 
-int                     allow_64bit_proc_LDT_ops;
+/*
+ * These are 4K mapping page table pages from KPTphys[] that we wound
+ * up not using. They get ml_static_mfree()'d once the VM is initialized.
+ */
+ppnum_t                 released_PT_ppn = 0;
+uint32_t                released_PT_cnt = 0;
 
 char *physfree;
 void idt64_remap(void);
@@ -255,7 +259,7 @@ physmap_init_L3(int startIndex, uint64_t highest_phys, uint64_t *physStart, pt_e
 }
 
 static void
-physmap_init(uint8_t phys_random_L3)
+physmap_init(uint8_t phys_random_L3, uint64_t *new_physmap_base, uint64_t *new_physmap_max)
 {
 	pt_entry_t *l3pte;
 	int pml4_index, i;
@@ -337,14 +341,14 @@ physmap_init(uint8_t phys_random_L3)
 		    | INTEL_PTE_WRITE;
 	}
 
-	physmap_base = KVADDR(kernPhysPML4Index, phys_random_L3, 0, 0);
+	*new_physmap_base = KVADDR(kernPhysPML4Index, phys_random_L3, 0, 0);
 	/*
 	 * physAddr contains the last-mapped physical address, so that's what we
 	 * add to physmap_base to derive the ending VA for the physmap.
 	 */
-	physmap_max = physmap_base + physAddr;
+	*new_physmap_max = *new_physmap_base + physAddr;
 
-	DBG("Physical address map base: 0x%qx\n", physmap_base);
+	DBG("Physical address map base: 0x%qx\n", *new_physmap_base);
 	for (i = kernPhysPML4Index; i < (kernPhysPML4Index + kernPhysPML4EntryCount); i++) {
 		DBG("Physical map idlepml4[%d]: 0x%llx\n", i, IdlePML4[i]);
 	}
@@ -356,6 +360,7 @@ static void
 Idle_PTs_init(void)
 {
 	uint64_t        rand64;
+	uint64_t        new_physmap_base, new_physmap_max;
 
 	/* Allocate the "idle" kernel page tables: */
 	KPTphys  = ALLOCPAGES(NKPT);            /* level 1 */
@@ -387,14 +392,126 @@ Idle_PTs_init(void)
 	 * two 8-bit entropy values needed for address randomization.
 	 */
 	rand64 = early_random();
-	physmap_init(rand64 & 0xFF);
+	physmap_init(rand64 & 0xFF, &new_physmap_base, &new_physmap_max);
 	doublemap_init((rand64 >> 8) & 0xFF);
 	idt64_remap();
 
 	postcode(VSTART_SET_CR3);
 
-	// Switch to the page tables..
+	/*
+	 * Switch to the page tables. We set physmap_base and physmap_max just
+	 * before switching to the new page tables to avoid someone calling
+	 * kprintf() or otherwise using physical memory in between.
+	 * This is needed because kprintf() writes to physical memory using
+	 * ml_phys_read_data and PHYSMAP_PTOV, which requires physmap_base to be
+	 * set correctly.
+	 */
+	physmap_base = new_physmap_base;
+	physmap_max = new_physmap_max;
 	set_cr3_raw((uintptr_t)ID_MAP_VTOP(IdlePML4));
+}
+
+/*
+ * Release any still unused, preallocated boot kernel page tables.
+ * start..end is the VA range currently unused.
+ */
+void
+Idle_PTs_release(vm_offset_t start, vm_offset_t end)
+{
+	uint32_t i;
+	uint32_t index_start;
+	uint32_t index_limit;
+	ppnum_t pn_first;
+	ppnum_t pn;
+	uint32_t cnt;
+
+	/*
+	 * Align start to the next large page boundary
+	 */
+	start = ((start + I386_LPGMASK) & ~I386_LPGMASK);
+
+	/*
+	 * convert start into an index in KPTphys[]
+	 */
+	index_start = (uint32_t)((start - KERNEL_BASE) >> PAGE_SHIFT);
+
+	/*
+	 * Find the ending index in KPTphys[]
+	 */
+	index_limit = (uint32_t)((end - KERNEL_BASE) >> PAGE_SHIFT);
+
+	if (index_limit > NKPT * PTE_PER_PAGE) {
+		index_limit = NKPT * PTE_PER_PAGE;
+	}
+
+	/*
+	 * Make sure all the 4K page tables are empty.
+	 * If not, panic a development/debug kernel.
+	 * On a production kernel, since this would stop us from booting,
+	 * just abort the operation.
+	 */
+	for (i = index_start; i < index_limit; ++i) {
+		assert(KPTphys[i] == 0);
+		if (KPTphys[i] != 0) {
+			return;
+		}
+	}
+
+	/*
+	 * Now figure out the indices into the 2nd level page tables, IdlePTD[].
+	 */
+	index_start >>= PTPGSHIFT;
+	index_limit >>= PTPGSHIFT;
+	if (index_limit > NPGPTD * PTE_PER_PAGE) {
+		index_limit = NPGPTD * PTE_PER_PAGE;
+	}
+
+	if (index_limit <= index_start) {
+		return;
+	}
+
+
+	/*
+	 * Now check the pages referenced from Level 2 tables.
+	 * They should be contiguous, assert fail if not on development/debug.
+	 * In production, just fail the removal to allow the system to boot.
+	 */
+	pn_first = 0;
+	cnt = 0;
+	for (i = index_start; i < index_limit; ++i) {
+		assert(IdlePTD[i] != 0);
+		if (IdlePTD[i] == 0) {
+			return;
+		}
+
+		pn = (ppnum_t)((PG_FRAME & IdlePTD[i]) >> PTSHIFT);
+		if (cnt == 0) {
+			pn_first = pn;
+		} else {
+			assert(pn == pn_first + cnt);
+			if (pn != pn_first + cnt) {
+				return;
+			}
+		}
+		++cnt;
+	}
+
+	/*
+	 * Good to go, clear the level 2 entries and invalidate the TLB
+	 */
+	for (i = index_start; i < index_limit; ++i) {
+		IdlePTD[i] = 0;
+	}
+	set_cr3_raw(get_cr3_raw());
+
+	/*
+	 * Remember these PFNs to be released later in pmap_lowmem_finalize()
+	 */
+	released_PT_ppn = pn_first;
+	released_PT_cnt = cnt;
+#if DEVELOPMENT || DEBUG
+	printf("Idle_PTs_release %d pages from PFN 0x%x\n", released_PT_cnt, released_PT_ppn);
+#endif
 }
 
 extern void vstart_trap_handler;
@@ -462,6 +579,10 @@ vstart(vm_offset_t boot_args_start)
 	boolean_t       is_boot_cpu = !(boot_args_start == 0);
 	int             cpu = 0;
 	uint32_t        lphysfree;
+#if DEBUG
+	uint64_t        gsbase;
+#endif
+
 
 	postcode(VSTART_ENTRY);
 
@@ -485,9 +606,8 @@ vstart(vm_offset_t boot_args_start)
 		lphysfree = kernelBootArgs->kaddr + kernelBootArgs->ksize;
 		physfree = (void *)(uintptr_t)((lphysfree + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
 
-#if DEVELOPMENT || DEBUG
 		pal_serial_init();
-#endif
+
 		DBG("revision      0x%x\n", kernelBootArgs->Revision);
 		DBG("version       0x%x\n", kernelBootArgs->Version);
 		DBG("command line  %s\n", kernelBootArgs->CommandLine);
@@ -551,8 +671,11 @@ vstart(vm_offset_t boot_args_start)
 		set_cr3_raw((uintptr_t)ID_MAP_VTOP(IdlePML4));
 		/* Find our logical cpu number */
 		cpu = lapic_to_cpu[(LAPIC_READ(ID) >> LAPIC_ID_SHIFT) & LAPIC_ID_MASK];
-		DBG("CPU: %d, GSBASE initial value: 0x%llx\n", cpu, rdmsr64(MSR_IA32_GS_BASE));
+#if DEBUG
+		gsbase = rdmsr64(MSR_IA32_GS_BASE);
+#endif
 		cpu_desc_load(cpu_datap(cpu));
+		DBG("CPU: %d, GSBASE initial value: 0x%llx\n", cpu, gsbase);
 	}
 
 	early_boot = 0;
@@ -595,11 +718,20 @@ i386_init(void)
 #endif
 
 	master_cpu = 0;
+
+	lck_mod_init();
+
+	printf_init();                  /* Init this in case we need debugger */
+
+	/*
+	 * Initialize the timer callout world
+	 */
+	timer_call_init();
+
 	cpu_init();
 
 	postcode(CPU_INIT_D);
 
-	printf_init();                  /* Init this in case we need debugger */
 	panic_init();                   /* Init this in case we need debugger */
 
 	/* setup debugging output if one has been chosen */
@@ -611,11 +743,6 @@ i386_init(void)
 
 	if (!PE_parse_boot_argn("diag", &dgWork.dgFlags, sizeof(dgWork.dgFlags))) {
 		dgWork.dgFlags = 0;
-	}
-
-	if (!PE_parse_boot_argn("ldt64", &allow_64bit_proc_LDT_ops,
-	    sizeof(allow_64bit_proc_LDT_ops))) {
-		allow_64bit_proc_LDT_ops = 0;
 	}
 
 	serialmode = 0;
@@ -696,8 +823,14 @@ i386_init(void)
 
 	kernel_debug_string_early("power_management_init");
 	power_management_init();
+
+#if MONOTONIC
+	mt_cpu_up(cpu_datap(0));
+#endif /* MONOTONIC */
+
 	processor_bootstrap();
-	thread_bootstrap();
+	thread_t thread = thread_bootstrap();
+	machine_set_current_thread(thread);
 
 	pstate_trace();
 	kernel_debug_string_early("machine_startup");
@@ -705,7 +838,7 @@ i386_init(void)
 	pstate_trace();
 }
 
-static void
+static void __dead2
 do_init_slave(boolean_t fast_restart)
 {
 	void    *init_param     = FULL_SLAVE_INIT;
@@ -740,9 +873,6 @@ do_init_slave(boolean_t fast_restart)
 #endif
 		/* update CPU microcode */
 		ucode_update_wake();
-
-		/* Do CPU workarounds after the microcode update */
-		cpuid_do_was();
 	} else {
 		init_param = FAST_SLAVE_INIT;
 	}
@@ -761,6 +891,12 @@ do_init_slave(boolean_t fast_restart)
 	cpu_thread_init();      /* not strictly necessary */
 
 	cpu_init();     /* Sets cpu_running which starter cpu waits for */
+
+
+#if MONOTONIC
+	mt_cpu_up(current_cpu_datap());
+#endif /* MONOTONIC */
+
 	slave_main(init_param);
 
 	panic("do_init_slave() returned from slave_main()");
@@ -861,7 +997,8 @@ doublemap_init(uint8_t randL3)
 	 */
 
 	dblmap_dist = dblmap_base - hdescb;
-	idt64_hndl_table0[1] = DBLMAP(idt64_hndl_table0[1]);
+	idt64_hndl_table0[1] = DBLMAP(idt64_hndl_table0[1]);    /* 64-bit exit trampoline */
+	idt64_hndl_table0[3] = DBLMAP(idt64_hndl_table0[3]);    /* 32-bit exit trampoline */
 	idt64_hndl_table0[6] = (uint64_t)(uintptr_t)&kernel_stack_mask;
 
 	extern cpu_data_t cpshadows[], scdatas[];

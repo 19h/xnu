@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -67,7 +67,6 @@
  */
 
 #include <debug.h>
-#include <xpr_debug.h>
 #include <mach_kdp.h>
 
 #include <mach/boolean.h>
@@ -86,6 +85,7 @@
 #include <kern/ledger.h>
 #include <kern/machine.h>
 #include <kern/processor.h>
+#include <kern/restartable.h>
 #include <kern/sched_prim.h>
 #include <kern/turnstile.h>
 #if CONFIG_SCHED_SFI
@@ -98,7 +98,6 @@
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
 #endif
-#include <kern/xpr.h>
 #include <kern/zalloc.h>
 #include <kern/locks.h>
 #include <kern/debug.h>
@@ -215,15 +214,9 @@ extern int serverperfmode;
 unsigned int new_nkdbufs = 0;
 unsigned int wake_nkdbufs = 0;
 unsigned int write_trace_on_panic = 0;
-static char trace_typefilter[64] = { 0 };
 unsigned int trace_wrap = 0;
 boolean_t trace_serial = FALSE;
 boolean_t early_boot_complete = FALSE;
-
-/* physically contiguous carveouts */
-SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout = 0;
-SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout_pa = 0;
-SECURITY_READ_ONLY_LATE(size_t) phys_carveout_size = 0;
 
 /* mach leak logging */
 int log_leaks = 0;
@@ -250,13 +243,6 @@ kernel_early_bootstrap(void)
 		serverperfmode = 1;
 	}
 
-	lck_mod_init();
-
-	/*
-	 * Initialize the timer callout world
-	 */
-	timer_call_init();
-
 #if CONFIG_SCHED_SFI
 	/*
 	 * Configure SFI classes
@@ -282,7 +268,6 @@ kernel_bootstrap(void)
 	PE_parse_boot_argn("trace", &new_nkdbufs, sizeof(new_nkdbufs));
 	PE_parse_boot_argn("trace_wake", &wake_nkdbufs, sizeof(wake_nkdbufs));
 	PE_parse_boot_argn("trace_panic", &write_trace_on_panic, sizeof(write_trace_on_panic));
-	PE_parse_boot_arg_str("trace_typefilter", trace_typefilter, sizeof(trace_typefilter));
 	PE_parse_boot_argn("trace_wrap", &trace_wrap, sizeof(trace_wrap));
 
 	scale_setup();
@@ -367,6 +352,9 @@ kernel_bootstrap(void)
 	kernel_bootstrap_log("machine_init");
 	machine_init();
 
+	kernel_bootstrap_log("thread_machine_init_template");
+	thread_machine_init_template();
+
 	kernel_bootstrap_log("clock_init");
 	clock_init();
 
@@ -386,6 +374,9 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("thread_init");
 	thread_init();
+
+	kernel_bootstrap_log("restartable_init");
+	restartable_init();
 
 	kernel_bootstrap_log("workq_init");
 	workq_init();
@@ -414,6 +405,14 @@ kernel_bootstrap(void)
 	/* initialize host_statistics */
 	host_statistics_init();
 
+	/* initialize exceptions */
+	exception_init();
+
+#if CONFIG_SCHED_SFI
+	kernel_bootstrap_log("sfi_init");
+	sfi_init();
+#endif
+
 	/*
 	 *	Create a kernel thread to execute the kernel bootstrap.
 	 */
@@ -431,6 +430,7 @@ kernel_bootstrap(void)
 	/* TODO: do a proper thread_start() (without the thread_setrun()) */
 	thread->state = TH_RUN;
 	thread->last_made_runnable_time = mach_absolute_time();
+	thread_set_thread_name(thread, "kernel_bootstrap_thread");
 
 	thread_deallocate(thread);
 
@@ -522,28 +522,12 @@ kernel_bootstrap_thread(void)
 #if (defined(__i386__) || defined(__x86_64__)) && NCOPY_WINDOWS > 0
 	/*
 	 * Create and initialize the physical copy window for processor 0
-	 * This is required before starting kicking off  IOKit.
+	 * This is required before starting kicking off IOKit.
 	 */
 	cpu_physwindow_init(0);
 #endif
 
-	if (PE_i_can_has_debugger(NULL)) {
-		unsigned int phys_carveout_mb = 0;
-		if (PE_parse_boot_argn("phys_carveout_mb", &phys_carveout_mb,
-		    sizeof(phys_carveout_mb)) && phys_carveout_mb > 0) {
-			phys_carveout_size = phys_carveout_mb * 1024 * 1024;
-			kern_return_t kr = kmem_alloc_contig(kernel_map,
-			    (vm_offset_t *)&phys_carveout, phys_carveout_size,
-			    VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_NOPAGEWAIT,
-			    VM_KERN_MEMORY_DIAG);
-			if (kr != KERN_SUCCESS) {
-				kprintf("failed to allocate %uMB for phys_carveout_mb: %u\n",
-				    phys_carveout_mb, (unsigned int)kr);
-			} else {
-				phys_carveout_pa = kvtophys((vm_offset_t)phys_carveout);
-			}
-		}
-	}
+	phys_carveout_init();
 
 #if MACH_KDP
 	kernel_bootstrap_log("kdp_init");
@@ -578,6 +562,9 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_thread_log("ktrace_init");
 	ktrace_init();
 
+	char trace_typefilter[256] = {};
+	PE_parse_boot_arg_str("trace_typefilter", trace_typefilter,
+	    sizeof(trace_typefilter));
 	kdebug_init(new_nkdbufs, trace_typefilter, trace_wrap);
 
 #ifdef  MACH_BSD
@@ -657,11 +644,6 @@ kernel_bootstrap_thread(void)
 	arm_vm_prot_finalize(PE_state.bootArgs);
 #endif
 
-#if CONFIG_SCHED_SFI
-	kernel_bootstrap_log("sfi_init");
-	sfi_init();
-#endif
-
 	/*
 	 * Initialize the globals used for permuting kernel
 	 * addresses that may be exported to userland as tokens
@@ -700,6 +682,10 @@ kernel_bootstrap_thread(void)
 	bsd_init();
 #endif
 
+#if defined (__x86_64__)
+	x86_64_protect_data_const();
+#endif
+
 
 	/*
 	 * Get rid of pages used for early boot tracing.
@@ -730,6 +716,8 @@ kernel_bootstrap_thread(void)
  *	slave_main:
  *
  *	Load the first thread to start a processor.
+ *	This path will also be used by the master processor
+ *	after being offlined.
  */
 void
 slave_main(void *machine_param)
@@ -741,13 +729,19 @@ slave_main(void *machine_param)
 	 *	Use the idle processor thread if there
 	 *	is no dedicated start up thread.
 	 */
-	if (processor->next_thread == THREAD_NULL) {
+	if (processor->processor_offlined == true) {
+		/* Return to the saved processor_offline context */
+		assert(processor->startup_thread == THREAD_NULL);
+
 		thread = processor->idle_thread;
-		thread->continuation = (thread_continue_t)processor_start_thread;
 		thread->parameter = machine_param;
+	} else if (processor->startup_thread) {
+		thread = processor->startup_thread;
+		processor->startup_thread = THREAD_NULL;
 	} else {
-		thread = processor->next_thread;
-		processor->next_thread = THREAD_NULL;
+		thread = processor->idle_thread;
+		thread->continuation = processor_start_thread;
+		thread->parameter = machine_param;
 	}
 
 	load_context(thread);
@@ -762,7 +756,8 @@ slave_main(void *machine_param)
  *	Called at splsched.
  */
 void
-processor_start_thread(void *machine_param)
+processor_start_thread(void *machine_param,
+    __unused wait_result_t result)
 {
 	processor_t             processor = current_processor();
 	thread_t                self = current_thread();
@@ -774,7 +769,7 @@ processor_start_thread(void *machine_param)
 	 *	reenter the idle loop, else terminate.
 	 */
 	if (self == processor->idle_thread) {
-		thread_block((thread_continue_t)idle_thread);
+		thread_block(idle_thread);
 	}
 
 	thread_terminate(self);
@@ -785,6 +780,8 @@ processor_start_thread(void *machine_param)
  *	load_context:
  *
  *	Start the first thread on a processor.
+ *	This may be the first thread ever run on a processor, or
+ *	it could be a processor that was previously offlined.
  */
 static void __attribute__((noreturn))
 load_context(
@@ -799,7 +796,6 @@ load_context(
 	machine_set_current_thread(thread);
 
 	load_context_kprintf("processor_up\n");
-	processor_up(processor);
 
 	PMAP_ACTIVATE_KERNEL(processor->cpu_id);
 
@@ -822,7 +818,7 @@ load_context(
 	 * running for load calculations.
 	 */
 	if (!(thread->state & TH_IDLE)) {
-		sched_run_incr(thread);
+		SCHED(run_count_incr)(thread);
 	}
 
 	processor->active_thread = thread;
@@ -833,6 +829,8 @@ load_context(
 	processor->starting_pri = thread->sched_pri;
 	processor->deadline = UINT64_MAX;
 	thread->last_processor = processor;
+
+	processor_up(processor);
 
 	processor->last_dispatch = mach_absolute_time();
 	timer_start(&thread->system_timer, processor->last_dispatch);

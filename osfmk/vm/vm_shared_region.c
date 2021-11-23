@@ -122,6 +122,9 @@
  */
 #define PROCESS_SHARED_CACHE_LAYOUT 0x00
 
+#if defined(HAS_APPLE_PAC)
+#include <ptrauth.h>
+#endif /* HAS_APPLE_PAC */
 
 /* "dyld" uses this to figure out what the kernel supports */
 int shared_region_version = 3;
@@ -181,10 +184,10 @@ kern_return_t vm_shared_region_slide_mapping(
 	memory_object_control_t); /* forward */
 
 static int __commpage_setup = 0;
-#if defined(__i386__) || defined(__x86_64__)
+#if !CONFIG_EMBEDDED
 static int __system_power_source = 1;   /* init to extrnal power source */
 static void post_sys_powersource_internal(int i, int internal);
-#endif /* __i386__ || __x86_64__ */
+#endif
 
 
 /*
@@ -325,7 +328,7 @@ vm_shared_region_vm_map(
 	assert(shared_region->sr_ref_count > 1);
 
 	sr_handle = shared_region->sr_mem_entry;
-	sr_mem_entry = (vm_named_entry_t) sr_handle->ip_kobject;
+	sr_mem_entry = (vm_named_entry_t) ip_get_kobject(sr_handle);
 	sr_map = sr_mem_entry->backing.map;
 	assert(sr_mem_entry->is_sub_map);
 
@@ -729,7 +732,6 @@ vm_shared_region_create(
 		switch (cputype) {
 #if defined(__arm__) || defined(__arm64__)
 		case CPU_TYPE_ARM:
-		case CPU_TYPE_ARM64:
 			base_address = SHARED_REGION_BASE_ARM;
 			size = SHARED_REGION_SIZE_ARM;
 			pmap_nesting_start = SHARED_REGION_NESTING_BASE_ARM;
@@ -775,7 +777,7 @@ vm_shared_region_create(
 	{
 		struct pmap *pmap_nested;
 
-		pmap_nested = pmap_create(NULL, 0, is_64bit);
+		pmap_nested = pmap_create_options(NULL, 0, is_64bit ? PMAP_CREATE_64BIT : 0);
 		if (pmap_nested != PMAP_NULL) {
 			pmap_set_nested(pmap_nested);
 			sub_map = vm_map_create(pmap_nested, 0, size, TRUE);
@@ -786,7 +788,7 @@ vm_shared_region_create(
 				vm_map_set_page_shift(sub_map,
 				    SIXTEENK_PAGE_SHIFT);
 			}
-#elif (__ARM_ARCH_7K__ >= 2) && defined(PLATFORM_WatchOS)
+#elif (__ARM_ARCH_7K__ >= 2)
 			/* enforce 16KB alignment for watch targets with new ABI */
 			vm_map_set_page_shift(sub_map, SIXTEENK_PAGE_SHIFT);
 #endif /* __arm64__ */
@@ -796,7 +798,7 @@ vm_shared_region_create(
 	}
 #else
 	/* create a VM sub map and its pmap */
-	sub_map = vm_map_create(pmap_create(NULL, 0, is_64bit),
+	sub_map = vm_map_create(pmap_create_options(NULL, 0, is_64bit),
 	    0, size,
 	    TRUE);
 #endif
@@ -848,6 +850,9 @@ vm_shared_region_create(
 	si->start = 0;
 	si->end = 0;
 	si->slide = 0;
+#if defined(HAS_APPLE_PAC)
+	si->si_ptrauth = FALSE; /* no pointer authentication by default */
+#endif /* HAS_APPLE_PAC */
 	si->slide_object = NULL;
 	si->slide_info_size = 0;
 	si->slide_info_entry = NULL;
@@ -907,7 +912,7 @@ vm_shared_region_destroy(
 	assert(!shared_region->sr_persists);
 	assert(!shared_region->sr_slid);
 
-	mem_entry = (vm_named_entry_t) shared_region->sr_mem_entry->ip_kobject;
+	mem_entry = (vm_named_entry_t) ip_get_kobject(shared_region->sr_mem_entry);
 	assert(mem_entry->is_sub_map);
 	assert(!mem_entry->internal);
 	assert(!mem_entry->is_copy);
@@ -1061,7 +1066,7 @@ vm_shared_region_undo_mappings(
 
 		/* no need to lock because this data is never modified... */
 		sr_handle = shared_region->sr_mem_entry;
-		sr_mem_entry = (vm_named_entry_t) sr_handle->ip_kobject;
+		sr_mem_entry = (vm_named_entry_t) ip_get_kobject(sr_handle);
 		sr_map = sr_mem_entry->backing.map;
 		sr_base_address = shared_region->sr_base_address;
 	}
@@ -1153,6 +1158,7 @@ vm_shared_region_map_file(
 	vm_map_kernel_flags_t   vmk_flags;
 	mach_vm_offset_t        sfm_min_address = ~0;
 	mach_vm_offset_t        sfm_max_address = 0;
+	mach_vm_offset_t        sfm_end;
 	struct _dyld_cache_header sr_cache_header;
 
 #if __arm64__
@@ -1202,7 +1208,7 @@ vm_shared_region_map_file(
 
 	/* no need to lock because this data is never modified... */
 	sr_handle = shared_region->sr_mem_entry;
-	sr_mem_entry = (vm_named_entry_t) sr_handle->ip_kobject;
+	sr_mem_entry = (vm_named_entry_t) ip_get_kobject(sr_handle);
 	sr_map = sr_mem_entry->backing.map;
 	sr_base_address = shared_region->sr_base_address;
 
@@ -1234,8 +1240,17 @@ vm_shared_region_map_file(
 			sfm_min_address = mappings[i].sfm_address;
 		}
 
-		if ((mappings[i].sfm_address + mappings[i].sfm_size) > sfm_max_address) {
-			sfm_max_address = mappings[i].sfm_address + mappings[i].sfm_size;
+		if (os_add_overflow(mappings[i].sfm_address,
+		    mappings[i].sfm_size,
+		    &sfm_end) ||
+		    (vm_map_round_page(sfm_end, VM_MAP_PAGE_MASK(sr_map)) <
+		    mappings[i].sfm_address)) {
+			/* overflow */
+			kr = KERN_INVALID_ARGUMENT;
+			break;
+		}
+		if (sfm_end > sfm_max_address) {
+			sfm_max_address = sfm_end;
 		}
 
 		if (mappings[i].sfm_init_prot & VM_PROT_ZF) {
@@ -1274,6 +1289,8 @@ vm_shared_region_map_file(
 
 		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 		vmk_flags.vmkf_already = TRUE;
+		/* no copy-on-read for mapped binaries */
+		vmk_flags.vmkf_no_copy_on_read = 1;
 
 		/* establish that mapping, OK if it's "already" there */
 		if (map_port == MACH_PORT_NULL) {
@@ -1335,6 +1352,12 @@ vm_shared_region_map_file(
 				first_mapping = target_address;
 			}
 
+#if defined(HAS_APPLE_PAC)
+			/*
+			 * Set "sr_slid_mapping"
+			 * it is used to get the userland address for address authentication.
+			 */
+#endif
 			if ((slid_mapping == (mach_vm_offset_t) -1) &&
 			    (mapping_to_slide == &mappings[i])) {
 				slid_mapping = target_address;
@@ -1385,24 +1408,28 @@ vm_shared_region_map_file(
 				mappings[i].sfm_size = 0;
 				kr = KERN_SUCCESS;
 			} else {
-				/* this mapping failed ! */
-				SHARED_REGION_TRACE_ERROR(
-					("shared_region: mapping[%d]: "
-					"address:0x%016llx size:0x%016llx "
-					"offset:0x%016llx "
-					"maxprot:0x%x prot:0x%x failed 0x%x\n",
-					i,
-					(long long)mappings[i].sfm_address,
-					(long long)mappings[i].sfm_size,
-					(long long)mappings[i].sfm_file_offset,
-					mappings[i].sfm_max_prot,
-					mappings[i].sfm_init_prot,
-					kr));
-
-				vm_shared_region_undo_mappings(sr_map, sr_base_address, mappings, i);
 				break;
 			}
 		}
+	}
+
+	if (kr != KERN_SUCCESS) {
+		/* the last mapping we tried (mappings[i]) failed ! */
+		assert(i < mappings_count);
+		SHARED_REGION_TRACE_ERROR(
+			("shared_region: mapping[%d]: "
+			"address:0x%016llx size:0x%016llx "
+			"offset:0x%016llx "
+			"maxprot:0x%x prot:0x%x failed 0x%x\n",
+			i,
+			(long long)mappings[i].sfm_address,
+			(long long)mappings[i].sfm_size,
+			(long long)mappings[i].sfm_file_offset,
+			mappings[i].sfm_max_prot,
+			mappings[i].sfm_init_prot,
+			kr));
+		/* undo all the previous mappings */
+		vm_shared_region_undo_mappings(sr_map, sr_base_address, mappings, i);
 	}
 
 	if (kr == KERN_SUCCESS &&
@@ -1566,7 +1593,7 @@ vm_shared_region_trim_and_get(task_t task)
 	}
 
 	sr_handle = shared_region->sr_mem_entry;
-	sr_mem_entry = (vm_named_entry_t) sr_handle->ip_kobject;
+	sr_mem_entry = (vm_named_entry_t) ip_get_kobject(sr_handle);
 	sr_map = sr_mem_entry->backing.map;
 
 	/* Trim the pmap if possible. */
@@ -1694,25 +1721,29 @@ vm_shared_region_enter(
 	/*
 	 * We may need to map several pmap-nested portions, due to platform
 	 * specific restrictions on pmap nesting.
-	 * The pmap-nesting is triggered by the "VM_MEMORY_SHARED_PMAP" alias...
+	 * The pmap-nesting is triggered by the "vmkf_nested_pmap" flag...
 	 */
 	for (;
 	    sr_pmap_nesting_size > 0;
 	    sr_offset += mapping_size,
 	    sr_size -= mapping_size,
 	    sr_pmap_nesting_size -= mapping_size) {
+		vm_map_kernel_flags_t vmk_flags;
+
 		target_address = sr_address + sr_offset;
 		mapping_size = sr_pmap_nesting_size;
 		if (mapping_size > pmap_nesting_size_max) {
 			mapping_size = (vm_map_offset_t) pmap_nesting_size_max;
 		}
+		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
+		vmk_flags.vmkf_nested_pmap = TRUE;
 		kr = vm_map_enter_mem_object(
 			map,
 			&target_address,
 			mapping_size,
 			0,
 			VM_FLAGS_FIXED,
-			VM_MAP_KERNEL_FLAGS_NONE,
+			vmk_flags,
 			VM_MEMORY_SHARED_PMAP,
 			sr_handle,
 			sr_offset,
@@ -1911,6 +1942,13 @@ vm_shared_region_slide_mapping(
 	si->start = start;
 	si->end = si->start + size;
 	si->slide = slide;
+#if defined(HAS_APPLE_PAC)
+	if (sr->sr_cpu_type == CPU_TYPE_ARM64 &&
+	    sr->sr_cpu_subtype == CPU_SUBTYPE_ARM64E) {
+		/* arm64e has pointer authentication */
+		si->si_ptrauth = TRUE;
+	}
+#endif /* HAS_APPLE_PAC */
 
 	/* find the shared region's map entry to slide */
 	sr_map = vm_shared_region_vm_map(sr);
@@ -2465,6 +2503,11 @@ vm_shared_region_slide_page_v3(vm_shared_region_slide_info_t si, vm_offset_t vad
 			return KERN_FAILURE;
 		}
 
+#if defined(HAS_APPLE_PAC)
+		uint16_t diversity_data = (uint16_t)(value >> 32);
+		bool hasAddressDiversity = (value & (1ULL << 48)) != 0;
+		ptrauth_key key = (ptrauth_key)((value >> 49) & 0x3);
+#endif /* HAS_APPLE_PAC */
 		bool isAuthenticated = (value & (1ULL << 63)) != 0;
 
 		if (isAuthenticated) {
@@ -2474,6 +2517,23 @@ vm_shared_region_slide_page_v3(vm_shared_region_slide_info_t si, vm_offset_t vad
 			const uint64_t value_add = s_info->value_add;
 			value += value_add;
 
+#if defined(HAS_APPLE_PAC)
+			uint64_t discriminator = diversity_data;
+			if (hasAddressDiversity) {
+				// First calculate a new discriminator using the address of where we are trying to store the value
+				uintptr_t pageOffset = rebaseLocation - page_content;
+				discriminator = __builtin_ptrauth_blend_discriminator((void*)(((uintptr_t)uservaddr) + pageOffset), discriminator);
+			}
+
+			if (si->si_ptrauth &&
+			    !(BootArgs->bootFlags & kBootFlagsDisableUserJOP)) {
+				/*
+				 * these pointers are used in user mode. disable the kernel key diversification
+				 * so we can sign them for use in user mode.
+				 */
+				value = (uintptr_t)pmap_sign_user_ptr((void *)value, key, discriminator);
+			}
+#endif /* HAS_APPLE_PAC */
 		} else {
 			// The new value for a rebase is the low 51-bits of the threaded value plus the slide.
 			// Regular pointer which needs to fit in 51-bits of value.
@@ -2658,7 +2718,7 @@ _vm_commpage_init(
 	if (kr != KERN_SUCCESS) {
 		panic("_vm_commpage_init: could not allocate mem_entry");
 	}
-	new_map = vm_map_create(pmap_create(NULL, 0, 0), 0, size, TRUE);
+	new_map = vm_map_create(pmap_create_options(NULL, 0, 0), 0, size, PMAP_CREATE_64BIT);
 	if (new_map == VM_MAP_NULL) {
 		panic("_vm_commpage_init: could not allocate VM map");
 	}
@@ -2689,14 +2749,14 @@ vm_commpage_text_init(void)
 	/* create the 32 bit comm text page */
 	unsigned int offset = (random() % _PFZ32_SLIDE_RANGE) << PAGE_SHIFT; /* restricting to 32bMAX-2PAGE */
 	_vm_commpage_init(&commpage_text32_handle, _COMM_PAGE_TEXT_AREA_LENGTH);
-	commpage_text32_entry = (vm_named_entry_t) commpage_text32_handle->ip_kobject;
+	commpage_text32_entry = (vm_named_entry_t) ip_get_kobject(commpage_text32_handle);
 	commpage_text32_map = commpage_text32_entry->backing.map;
 	commpage_text32_location = (user32_addr_t) (_COMM_PAGE32_TEXT_START + offset);
 	/* XXX if (cpu_is_64bit_capable()) ? */
 	/* create the 64-bit comm page */
 	offset = (random() % _PFZ64_SLIDE_RANGE) << PAGE_SHIFT; /* restricting sliding upto 2Mb range */
 	_vm_commpage_init(&commpage_text64_handle, _COMM_PAGE_TEXT_AREA_LENGTH);
-	commpage_text64_entry = (vm_named_entry_t) commpage_text64_handle->ip_kobject;
+	commpage_text64_entry = (vm_named_entry_t) ip_get_kobject(commpage_text64_handle);
 	commpage_text64_map = commpage_text64_entry->backing.map;
 	commpage_text64_location = (user64_addr_t) (_COMM_PAGE64_TEXT_START + offset);
 
@@ -2722,13 +2782,13 @@ vm_commpage_init(void)
 #if defined(__i386__) || defined(__x86_64__)
 	/* create the 32-bit comm page */
 	_vm_commpage_init(&commpage32_handle, _COMM_PAGE32_AREA_LENGTH);
-	commpage32_entry = (vm_named_entry_t) commpage32_handle->ip_kobject;
+	commpage32_entry = (vm_named_entry_t) ip_get_kobject(commpage32_handle);
 	commpage32_map = commpage32_entry->backing.map;
 
 	/* XXX if (cpu_is_64bit_capable()) ? */
 	/* create the 64-bit comm page */
 	_vm_commpage_init(&commpage64_handle, _COMM_PAGE64_AREA_LENGTH);
-	commpage64_entry = (vm_named_entry_t) commpage64_handle->ip_kobject;
+	commpage64_entry = (vm_named_entry_t) ip_get_kobject(commpage64_handle);
 	commpage64_map = commpage64_entry->backing.map;
 
 #endif /* __i386__ || __x86_64__ */
@@ -2736,11 +2796,11 @@ vm_commpage_init(void)
 	/* populate them according to this specific platform */
 	commpage_populate();
 	__commpage_setup = 1;
-#if defined(__i386__) || defined(__x86_64__)
+#if !CONFIG_EMBEDDED
 	if (__system_power_source == 0) {
 		post_sys_powersource_internal(0, 1);
 	}
-#endif /* __i386__ || __x86_64__ */
+#endif
 
 	SHARED_REGION_TRACE_DEBUG(
 		("commpage: init() <-\n"));
@@ -2812,6 +2872,7 @@ vm_commpage_enter(
 	    (commpage_size & (pmap_nesting_size_min - 1)) == 0) {
 		/* the commpage is properly aligned or sized for pmap-nesting */
 		tag = VM_MEMORY_SHARED_PMAP;
+		vmk_flags.vmkf_nested_pmap = TRUE;
 	}
 	/* map the comm page in the task's address space */
 	assert(commpage_handle != IPC_PORT_NULL);
@@ -3030,19 +3091,19 @@ done:
  * 1 if it is internal power source ie battery
  */
 void
-#if defined(__i386__) || defined(__x86_64__)
+#if !CONFIG_EMBEDDED
 post_sys_powersource(int i)
 #else
 post_sys_powersource(__unused int i)
 #endif
 {
-#if defined(__i386__) || defined(__x86_64__)
+#if !CONFIG_EMBEDDED
 	post_sys_powersource_internal(i, 0);
-#endif /* __i386__ || __x86_64__ */
+#endif
 }
 
 
-#if defined(__i386__) || defined(__x86_64__)
+#if !CONFIG_EMBEDDED
 static void
 post_sys_powersource_internal(int i, int internal)
 {
@@ -3058,4 +3119,4 @@ post_sys_powersource_internal(int i, int internal)
 		}
 	}
 }
-#endif /* __i386__ || __x86_64__ */
+#endif

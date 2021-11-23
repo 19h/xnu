@@ -72,8 +72,9 @@ struct ledger_template_info {
  */
 struct ledger_entry {
 	volatile uint32_t        le_flags;
+#define LEDGER_PERCENT_NONE  UINT16_MAX
+	uint16_t                 le_warn_percent;
 	ledger_amount_t          le_limit;
-	ledger_amount_t          le_warn_level;
 	volatile ledger_amount_t le_credit __attribute__((aligned(8)));
 	volatile ledger_amount_t le_debit  __attribute__((aligned(8)));
 	union {
@@ -96,7 +97,7 @@ struct ledger_entry {
 
 struct ledger {
 	uint64_t                l_id;
-	struct os_refcnt        l_refs;
+	os_refcnt_t             l_refs;
 	int32_t                 l_size;
 	struct ledger_template *l_template;
 	struct ledger_entry     l_entries[0] __attribute__((aligned(8)));
@@ -141,6 +142,7 @@ typedef void (*ledger_callback_t)(int warning, const void * param0, const void *
 extern void ledger_init(void);
 
 extern ledger_template_t ledger_template_create(const char *name);
+extern ledger_template_t ledger_template_copy(ledger_template_t template, const char *name);
 extern void ledger_template_dereference(ledger_template_t template);
 extern int ledger_entry_add(ledger_template_t template, const char *key,
     const char *group, const char *units);
@@ -207,9 +209,8 @@ extern kern_return_t ledger_rollup_entry(ledger_t to_ledger, ledger_t from_ledge
 
 extern void ledger_ast(thread_t thread);
 
-extern int ledger_reference_count(ledger_t ledger);
-extern kern_return_t ledger_reference(ledger_t ledger);
-extern kern_return_t ledger_dereference(ledger_t ledger);
+extern void ledger_reference(ledger_t ledger);
+extern void ledger_dereference(ledger_t ledger);
 
 /* Support for ledger() syscall */
 #ifdef LEDGER_DEBUG

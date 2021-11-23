@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2018 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -59,7 +59,6 @@
  *	Locking primitives implementation
  */
 
-#define ATOMIC_PRIVATE 1
 #define LOCK_PRIVATE 1
 
 #include <mach_ldebug.h>
@@ -71,10 +70,12 @@
 #include <kern/thread.h>
 #include <kern/processor.h>
 #include <kern/sched_prim.h>
-#include <kern/xpr.h>
 #include <kern/debug.h>
 #include <kern/kcdata.h>
 #include <string.h>
+#include <arm/cpu_internal.h>
+#include <os/hash.h>
+#include <arm/cpu_data.h>
 
 #include <arm/cpu_data_internal.h>
 #include <arm/proc_reg.h>
@@ -119,7 +120,10 @@ int lck_mtx_adaptive_spin_mode = 0;
 typedef enum {
 	SPINWAIT_ACQUIRED,     /* Got the lock. */
 	SPINWAIT_INTERLOCK,    /* Got the interlock, no owner, but caller must finish acquiring the lock. */
-	SPINWAIT_DID_SPIN,     /* Got the interlock, spun, but failed to get the lock. */
+	SPINWAIT_DID_SPIN_HIGH_THR, /* Got the interlock, spun, but failed to get the lock. */
+	SPINWAIT_DID_SPIN_OWNER_NOT_CORE, /* Got the interlock, spun, but failed to get the lock. */
+	SPINWAIT_DID_SPIN_NO_WINDOW_CONTENTION, /* Got the interlock, spun, but failed to get the lock. */
+	SPINWAIT_DID_SPIN_SLIDING_THR,/* Got the interlock, spun, but failed to get the lock. */
 	SPINWAIT_DID_NOT_SPIN, /* Got the interlock, did not spin. */
 } spinwait_result_t;
 
@@ -128,17 +132,6 @@ extern uint64_t dtrace_spin_threshold;
 #endif
 
 /* Forwards */
-
-
-#if     USLOCK_DEBUG
-/*
- *	Perform simple lock checks.
- */
-int             uslock_check = 1;
-int             max_lock_loops = 100000000;
-decl_simple_lock_data(extern, printf_lock)
-decl_simple_lock_data(extern, panic_lock)
-#endif                          /* USLOCK_DEBUG */
 
 extern unsigned int not_in_kdp;
 
@@ -165,19 +158,6 @@ typedef void   *pc_t;
  *	Portable lock package implementation of usimple_locks.
  */
 
-#if     USLOCK_DEBUG
-#define USLDBG(stmt)    stmt
-void            usld_lock_init(usimple_lock_t, unsigned short);
-void            usld_lock_pre(usimple_lock_t, pc_t);
-void            usld_lock_post(usimple_lock_t, pc_t);
-void            usld_unlock(usimple_lock_t, pc_t);
-void            usld_lock_try_pre(usimple_lock_t, pc_t);
-void            usld_lock_try_post(usimple_lock_t, pc_t);
-int             usld_lock_common_checks(usimple_lock_t, const char *);
-#else                           /* USLOCK_DEBUG */
-#define USLDBG(stmt)
-#endif                          /* USLOCK_DEBUG */
-
 /*
  * Owner thread pointer when lock held in spin mode
  */
@@ -190,26 +170,24 @@ int             usld_lock_common_checks(usimple_lock_t, const char *);
 #define lck_rw_ilk_lock(lock)   hw_lock_bit  ((hw_lock_bit_t*)(&(lock)->lck_rw_tag), LCK_RW_INTERLOCK_BIT, LCK_GRP_NULL)
 #define lck_rw_ilk_unlock(lock) hw_unlock_bit((hw_lock_bit_t*)(&(lock)->lck_rw_tag), LCK_RW_INTERLOCK_BIT)
 
-#define memory_barrier()        __c11_atomic_thread_fence(memory_order_acq_rel_smp)
-#define load_memory_barrier()   __c11_atomic_thread_fence(memory_order_acquire_smp)
-#define store_memory_barrier()  __c11_atomic_thread_fence(memory_order_release_smp)
+#define load_memory_barrier()   os_atomic_thread_fence(acquire)
 
 // Enforce program order of loads and stores.
-#define ordered_load(target, type) \
-	        __c11_atomic_load((_Atomic type *)(target), memory_order_relaxed)
-#define ordered_store(target, type, value) \
-	        __c11_atomic_store((_Atomic type *)(target), value, memory_order_relaxed)
+#define ordered_load(target) \
+	        os_atomic_load(target, compiler_acq_rel)
+#define ordered_store(target, value) \
+	        os_atomic_store(target, value, compiler_acq_rel)
 
-#define ordered_load_mtx(lock)                  ordered_load(&(lock)->lck_mtx_data, uintptr_t)
-#define ordered_store_mtx(lock, value)  ordered_store(&(lock)->lck_mtx_data, uintptr_t, (value))
-#define ordered_load_rw(lock)                   ordered_load(&(lock)->lck_rw_data, uint32_t)
-#define ordered_store_rw(lock, value)   ordered_store(&(lock)->lck_rw_data, uint32_t, (value))
-#define ordered_load_rw_owner(lock)             ordered_load(&(lock)->lck_rw_owner, thread_t)
-#define ordered_store_rw_owner(lock, value)     ordered_store(&(lock)->lck_rw_owner, thread_t, (value))
-#define ordered_load_hw(lock)                   ordered_load(&(lock)->lock_data, uintptr_t)
-#define ordered_store_hw(lock, value)   ordered_store(&(lock)->lock_data, uintptr_t, (value))
-#define ordered_load_bit(lock)                  ordered_load((lock), uint32_t)
-#define ordered_store_bit(lock, value)  ordered_store((lock), uint32_t, (value))
+#define ordered_load_mtx(lock)                  ordered_load(&(lock)->lck_mtx_data)
+#define ordered_store_mtx(lock, value)  ordered_store(&(lock)->lck_mtx_data, (value))
+#define ordered_load_rw(lock)                   ordered_load(&(lock)->lck_rw_data)
+#define ordered_store_rw(lock, value)   ordered_store(&(lock)->lck_rw_data, (value))
+#define ordered_load_rw_owner(lock)             ordered_load(&(lock)->lck_rw_owner)
+#define ordered_store_rw_owner(lock, value)     ordered_store(&(lock)->lck_rw_owner, (value))
+#define ordered_load_hw(lock)                   ordered_load(&(lock)->lock_data)
+#define ordered_store_hw(lock, value)   ordered_store(&(lock)->lock_data, (value))
+#define ordered_load_bit(lock)                  ordered_load((lock))
+#define ordered_store_bit(lock, value)  ordered_store((lock), (value))
 
 
 // Prevent the compiler from reordering memory operations around this
@@ -253,11 +231,56 @@ static boolean_t lck_rw_grab(lck_rw_t *lock, int mode, boolean_t wait);
  * atomic_exchange_complete() - conclude an exchange
  * atomic_exchange_abort() - cancel an exchange started with atomic_exchange_begin()
  */
+__unused static uint32_t
+load_exclusive32(uint32_t *target, enum memory_order ord)
+{
+	uint32_t        value;
+
+#if __arm__
+	if (memory_order_has_release(ord)) {
+		// Pre-load release barrier
+		atomic_thread_fence(memory_order_release);
+	}
+	value = __builtin_arm_ldrex(target);
+#else
+	if (memory_order_has_acquire(ord)) {
+		value = __builtin_arm_ldaex(target);    // ldaxr
+	} else {
+		value = __builtin_arm_ldrex(target);    // ldxr
+	}
+#endif  // __arm__
+	return value;
+}
+
+__unused static boolean_t
+store_exclusive32(uint32_t *target, uint32_t value, enum memory_order ord)
+{
+	boolean_t err;
+
+#if __arm__
+	err = __builtin_arm_strex(value, target);
+	if (memory_order_has_acquire(ord)) {
+		// Post-store acquire barrier
+		atomic_thread_fence(memory_order_acquire);
+	}
+#else
+	if (memory_order_has_release(ord)) {
+		err = __builtin_arm_stlex(value, target);       // stlxr
+	} else {
+		err = __builtin_arm_strex(value, target);       // stxr
+	}
+#endif  // __arm__
+	return !err;
+}
+
 static uint32_t
 atomic_exchange_begin32(uint32_t *target, uint32_t *previous, enum memory_order ord)
 {
 	uint32_t        val;
 
+#if __ARM_ATOMICS_8_1
+	ord = memory_order_relaxed;
+#endif
 	val = load_exclusive32(target, ord);
 	*previous = val;
 	return val;
@@ -266,14 +289,18 @@ atomic_exchange_begin32(uint32_t *target, uint32_t *previous, enum memory_order 
 static boolean_t
 atomic_exchange_complete32(uint32_t *target, uint32_t previous, uint32_t newval, enum memory_order ord)
 {
+#if __ARM_ATOMICS_8_1
+	return __c11_atomic_compare_exchange_strong((_Atomic uint32_t *)target, &previous, newval, ord, memory_order_relaxed);
+#else
 	(void)previous;         // Previous not needed, monitor is held
 	return store_exclusive32(target, newval, ord);
+#endif
 }
 
 static void
 atomic_exchange_abort(void)
 {
-	clear_exclusive();
+	os_atomic_clear_exclusive();
 }
 
 static boolean_t
@@ -298,64 +325,107 @@ atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, e
 	}
 }
 
-void
-_disable_preemption(void)
+inline boolean_t
+hw_atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, enum memory_order ord, boolean_t wait)
 {
-	thread_t        thread = current_thread();
-	unsigned int    count;
-
-	count = thread->machine.preemption_count + 1;
-	ordered_store(&thread->machine.preemption_count, unsigned int, count);
+	return atomic_test_and_set32(target, test_mask, set_mask, ord, wait);
 }
 
 void
-_enable_preemption(void)
+_disable_preemption(void)
 {
-	thread_t        thread = current_thread();
-	long            state;
-	unsigned int    count;
+	thread_t     thread = current_thread();
+	unsigned int count  = thread->machine.preemption_count;
+
+	count += 1;
+	if (__improbable(count == 0)) {
+		panic("Preemption count overflow");
+	}
+
+	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
+}
+
+/*
+ * This function checks whether an AST_URGENT has been pended.
+ *
+ * It is called once the preemption has been reenabled, which means the thread
+ * may have been preempted right before this was called, and when this function
+ * actually performs the check, we've changed CPU.
+ *
+ * This race is however benign: the point of AST_URGENT is to trigger a context
+ * switch, so if one happened, there's nothing left to check for, and AST_URGENT
+ * was cleared in the process.
+ *
+ * It follows that this check cannot have false negatives, which allows us
+ * to avoid fiddling with interrupt state for the vast majority of cases
+ * when the check will actually be negative.
+ */
+static NOINLINE void
+kernel_preempt_check(thread_t thread)
+{
+	cpu_data_t *cpu_data_ptr;
+	long        state;
+
 #if __arm__
 #define INTERRUPT_MASK PSR_IRQF
 #else   // __arm__
 #define INTERRUPT_MASK DAIF_IRQF
 #endif  // __arm__
 
-	count = thread->machine.preemption_count;
-	if (count == 0) {
-		panic("Preemption count negative");     // Count will go negative when released
+	/*
+	 * This check is racy and could load from another CPU's pending_ast mask,
+	 * but as described above, this can't have false negatives.
+	 */
+	cpu_data_ptr = os_atomic_load(&thread->machine.CpuDatap, compiler_acq_rel);
+	if (__probable((cpu_data_ptr->cpu_pending_ast & AST_URGENT) == 0)) {
+		return;
 	}
-	count--;
-	if (count > 0) {
-		goto update_count;                      // Preemption is still disabled, just update
-	}
-	state = get_interrupts();                       // Get interrupt state
-	if (state & INTERRUPT_MASK) {
-		goto update_count;                      // Interrupts are already masked, can't take AST here
-	}
-	disable_interrupts_noread();                    // Disable interrupts
-	ordered_store(&thread->machine.preemption_count, unsigned int, count);
-	if (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
-#if __arm__
-#if __ARM_USER_PROTECT__
-		uintptr_t up = arm_user_protect_begin(thread);
-#endif  // __ARM_USER_PROTECT__
-		enable_fiq();
-#endif  // __arm__
-		ast_taken_kernel();                     // Handle urgent AST
-#if __arm__
-#if __ARM_USER_PROTECT__
-		arm_user_protect_end(thread, up, TRUE);
-#endif  // __ARM_USER_PROTECT__
-		enable_interrupts();
-		return;                                 // Return early on arm only due to FIQ enabling
-#endif  // __arm__
-	}
-	restore_interrupts(state);                      // Enable interrupts
-	return;
 
-update_count:
-	ordered_store(&thread->machine.preemption_count, unsigned int, count);
-	return;
+	/* If interrupts are masked, we can't take an AST here */
+	state = get_interrupts();
+	if ((state & INTERRUPT_MASK) == 0) {
+		disable_interrupts_noread();                    // Disable interrupts
+
+		/*
+		 * Reload cpu_data_ptr: a context switch would cause it to change.
+		 * Now that interrupts are disabled, this will debounce false positives.
+		 */
+		cpu_data_ptr = os_atomic_load(&thread->machine.CpuDatap, compiler_acq_rel);
+		if (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
+#if __arm__
+#if __ARM_USER_PROTECT__
+			uintptr_t up = arm_user_protect_begin(thread);
+#endif  // __ARM_USER_PROTECT__
+			enable_fiq();
+#endif  // __arm__
+			ast_taken_kernel();                 // Handle urgent AST
+#if __arm__
+#if __ARM_USER_PROTECT__
+			arm_user_protect_end(thread, up, TRUE);
+#endif  // __ARM_USER_PROTECT__
+			enable_interrupts();
+			return;                             // Return early on arm only due to FIQ enabling
+#endif  // __arm__
+		}
+		restore_interrupts(state);              // Enable interrupts
+	}
+}
+
+void
+_enable_preemption(void)
+{
+	thread_t     thread = current_thread();
+	unsigned int count  = thread->machine.preemption_count;
+
+	if (__improbable(count == 0)) {
+		panic("Preemption count underflow");
+	}
+	count -= 1;
+
+	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
+	if (count == 0) {
+		kernel_preempt_check(thread);
+	}
 }
 
 int
@@ -363,222 +433,6 @@ get_preemption_level(void)
 {
 	return current_thread()->machine.preemption_count;
 }
-
-#if     __SMP__
-static unsigned int
-hw_lock_bit_to_contended(hw_lock_bit_t *lock, uint32_t mask, uint32_t timeout LCK_GRP_ARG(lck_grp_t *grp));
-#endif
-
-static inline unsigned int
-hw_lock_bit_to_internal(hw_lock_bit_t *lock, unsigned int bit, uint32_t timeout LCK_GRP_ARG(lck_grp_t *grp))
-{
-	unsigned int success = 0;
-	uint32_t        mask = (1 << bit);
-#if     !__SMP__
-	uint32_t        state;
-#endif
-
-#if     __SMP__
-	if (__improbable(!atomic_test_and_set32(lock, mask, mask, memory_order_acquire, FALSE))) {
-		success = hw_lock_bit_to_contended(lock, mask, timeout LCK_GRP_ARG(grp));
-	} else {
-		success = 1;
-	}
-#else   // __SMP__
-	(void)timeout;
-	state = ordered_load_bit(lock);
-	if (!(mask & state)) {
-		ordered_store_bit(lock, state | mask);
-		success = 1;
-	}
-#endif  // __SMP__
-
-	if (success) {
-		lck_grp_spin_update_held(lock LCK_GRP_ARG(grp));
-	}
-
-	return success;
-}
-
-unsigned
-int
-(hw_lock_bit_to)(hw_lock_bit_t * lock, unsigned int bit, uint32_t timeout LCK_GRP_ARG(lck_grp_t *grp))
-{
-	_disable_preemption();
-	return hw_lock_bit_to_internal(lock, bit, timeout LCK_GRP_ARG(grp));
-}
-
-#if     __SMP__
-static unsigned int NOINLINE
-hw_lock_bit_to_contended(hw_lock_bit_t *lock, uint32_t mask, uint32_t timeout LCK_GRP_ARG(lck_grp_t *grp))
-{
-	uint64_t        end = 0;
-	int             i;
-#if CONFIG_DTRACE || LOCK_STATS
-	uint64_t begin = 0;
-	boolean_t stat_enabled = lck_grp_spin_spin_enabled(lock LCK_GRP_ARG(grp));
-#endif /* CONFIG_DTRACE || LOCK_STATS */
-
-#if LOCK_STATS || CONFIG_DTRACE
-	if (__improbable(stat_enabled)) {
-		begin = mach_absolute_time();
-	}
-#endif /* LOCK_STATS || CONFIG_DTRACE */
-	for (;;) {
-		for (i = 0; i < LOCK_SNOOP_SPINS; i++) {
-			// Always load-exclusive before wfe
-			// This grabs the monitor and wakes up on a release event
-			if (atomic_test_and_set32(lock, mask, mask, memory_order_acquire, TRUE)) {
-				goto end;
-			}
-		}
-		if (end == 0) {
-			end = ml_get_timebase() + timeout;
-		} else if (ml_get_timebase() >= end) {
-			break;
-		}
-	}
-	return 0;
-end:
-#if CONFIG_DTRACE || LOCK_STATS
-	if (__improbable(stat_enabled)) {
-		lck_grp_spin_update_spin(lock LCK_GRP_ARG(grp), mach_absolute_time() - begin);
-	}
-	lck_grp_spin_update_miss(lock LCK_GRP_ARG(grp));
-#endif /* CONFIG_DTRACE || LCK_GRP_STAT */
-
-	return 1;
-}
-#endif  // __SMP__
-
-void
-(hw_lock_bit)(hw_lock_bit_t * lock, unsigned int bit LCK_GRP_ARG(lck_grp_t *grp))
-{
-	if (hw_lock_bit_to(lock, bit, LOCK_PANIC_TIMEOUT, LCK_GRP_PROBEARG(grp))) {
-		return;
-	}
-#if     __SMP__
-	panic("hw_lock_bit(): timed out (%p)", lock);
-#else
-	panic("hw_lock_bit(): interlock held (%p)", lock);
-#endif
-}
-
-void
-(hw_lock_bit_nopreempt)(hw_lock_bit_t * lock, unsigned int bit LCK_GRP_ARG(lck_grp_t *grp))
-{
-	if (__improbable(get_preemption_level() == 0)) {
-		panic("Attempt to take no-preempt bitlock %p in preemptible context", lock);
-	}
-	if (hw_lock_bit_to_internal(lock, bit, LOCK_PANIC_TIMEOUT LCK_GRP_ARG(grp))) {
-		return;
-	}
-#if     __SMP__
-	panic("hw_lock_bit_nopreempt(): timed out (%p)", lock);
-#else
-	panic("hw_lock_bit_nopreempt(): interlock held (%p)", lock);
-#endif
-}
-
-unsigned
-int
-(hw_lock_bit_try)(hw_lock_bit_t * lock, unsigned int bit LCK_GRP_ARG(lck_grp_t *grp))
-{
-	uint32_t        mask = (1 << bit);
-#if     !__SMP__
-	uint32_t        state;
-#endif
-	boolean_t       success = FALSE;
-
-	_disable_preemption();
-#if     __SMP__
-	// TODO: consider weak (non-looping) atomic test-and-set
-	success = atomic_test_and_set32(lock, mask, mask, memory_order_acquire, FALSE);
-#else
-	state = ordered_load_bit(lock);
-	if (!(mask & state)) {
-		ordered_store_bit(lock, state | mask);
-		success = TRUE;
-	}
-#endif  // __SMP__
-	if (!success) {
-		_enable_preemption();
-	}
-
-	if (success) {
-		lck_grp_spin_update_held(lock LCK_GRP_ARG(grp));
-	}
-
-	return success;
-}
-
-static inline void
-hw_unlock_bit_internal(hw_lock_bit_t *lock, unsigned int bit)
-{
-	uint32_t        mask = (1 << bit);
-#if     !__SMP__
-	uint32_t        state;
-#endif
-
-#if     __SMP__
-	__c11_atomic_fetch_and((_Atomic uint32_t *)lock, ~mask, memory_order_release);
-	set_event();
-#else   // __SMP__
-	state = ordered_load_bit(lock);
-	ordered_store_bit(lock, state & ~mask);
-#endif  // __SMP__
-#if CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_SPIN_UNLOCK_RELEASE, lock, bit);
-#endif
-}
-
-/*
- *	Routine:	hw_unlock_bit
- *
- *		Release spin-lock. The second parameter is the bit number to test and set.
- *		Decrement the preemption level.
- */
-void
-hw_unlock_bit(hw_lock_bit_t * lock, unsigned int bit)
-{
-	hw_unlock_bit_internal(lock, bit);
-	_enable_preemption();
-}
-
-void
-hw_unlock_bit_nopreempt(hw_lock_bit_t * lock, unsigned int bit)
-{
-	if (__improbable(get_preemption_level() == 0)) {
-		panic("Attempt to release no-preempt bitlock %p in preemptible context", lock);
-	}
-	hw_unlock_bit_internal(lock, bit);
-}
-
-#if __SMP__
-static inline boolean_t
-interlock_try_disable_interrupts(
-	lck_mtx_t *mutex,
-	boolean_t *istate)
-{
-	*istate = ml_set_interrupts_enabled(FALSE);
-
-	if (interlock_try(mutex)) {
-		return 1;
-	} else {
-		ml_set_interrupts_enabled(*istate);
-		return 0;
-	}
-}
-
-static inline void
-interlock_unlock_enable_interrupts(
-	lck_mtx_t *mutex,
-	boolean_t istate)
-{
-	interlock_unlock(mutex);
-	ml_set_interrupts_enabled(istate);
-}
-#endif /* __SMP__ */
 
 /*
  *      Routine:        lck_spin_alloc_init
@@ -618,11 +472,12 @@ lck_spin_init(
 	lck_grp_t * grp,
 	__unused lck_attr_t * attr)
 {
-	hw_lock_init(&lck->hwlock);
 	lck->type = LCK_SPIN_TYPE;
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_SPIN);
-	store_memory_barrier();
+	hw_lock_init(&lck->hwlock);
+	if (grp) {
+		lck_grp_reference(grp);
+		lck_grp_lckcnt_incr(grp, LCK_TYPE_SPIN);
+	}
 }
 
 /*
@@ -633,7 +488,6 @@ arm_usimple_lock_init(simple_lock_t lck, __unused unsigned short initial_value)
 {
 	lck->type = LCK_SPIN_TYPE;
 	hw_lock_init(&lck->hwlock);
-	store_memory_barrier();
 }
 
 
@@ -767,8 +621,10 @@ lck_spin_destroy(
 		return;
 	}
 	lck->lck_spin_data = LCK_SPIN_TAG_DESTROYED;
-	lck_grp_lckcnt_decr(grp, LCK_TYPE_SPIN);
-	lck_grp_deallocate(grp);
+	if (grp) {
+		lck_grp_lckcnt_decr(grp, LCK_TYPE_SPIN);
+		lck_grp_deallocate(grp);
+	}
 }
 
 /*
@@ -794,12 +650,7 @@ usimple_lock_init(
 	usimple_lock_t l,
 	unsigned short tag)
 {
-#ifndef MACHINE_SIMPLE_LOCK
-	USLDBG(usld_lock_init(l, tag));
-	hw_lock_init(&l->lck_spin_data);
-#else
 	simple_lock_init((simple_lock_t) l, tag);
-#endif
 }
 
 
@@ -815,21 +666,7 @@ void
 	usimple_lock_t l
 	LCK_GRP_ARG(lck_grp_t *grp))
 {
-#ifndef MACHINE_SIMPLE_LOCK
-	pc_t            pc;
-
-	OBTAIN_PC(pc, l);
-	USLDBG(usld_lock_pre(l, pc));
-
-	if (!hw_lock_to(&l->lck_spin_data, LockTimeOut, LCK_GRP_ARG(grp))) {      /* Try to get the lock
-		                                                                   * with a timeout */
-		panic("simple lock deadlock detection - l=%p, cpu=%d, ret=%p", &l, cpu_number(), pc);
-	}
-
-	USLDBG(usld_lock_post(l, pc));
-#else
 	simple_lock((simple_lock_t) l, LCK_GRP_PROBEARG(grp));
-#endif
 }
 
 
@@ -846,16 +683,7 @@ void
 (usimple_unlock)(
 	usimple_lock_t l)
 {
-#ifndef MACHINE_SIMPLE_LOCK
-	pc_t            pc;
-
-	OBTAIN_PC(pc, l);
-	USLDBG(usld_unlock(l, pc));
-	sync();
-	hw_lock_unlock(&l->lck_spin_data);
-#else
 	simple_unlock((simple_lock_t)l);
-#endif
 }
 
 
@@ -877,298 +705,8 @@ int
 	usimple_lock_t l
 	LCK_GRP_ARG(lck_grp_t *grp))
 {
-#ifndef MACHINE_SIMPLE_LOCK
-	pc_t            pc;
-	unsigned int    success;
-
-	OBTAIN_PC(pc, l);
-	USLDBG(usld_lock_try_pre(l, pc));
-	if ((success = hw_lock_try(&l->lck_spin_data LCK_GRP_ARG(grp)))) {
-		USLDBG(usld_lock_try_post(l, pc));
-	}
-	return success;
-#else
 	return simple_lock_try((simple_lock_t) l, grp);
-#endif
 }
-
-#if     USLOCK_DEBUG
-/*
- *	States of a usimple_lock.  The default when initializing
- *	a usimple_lock is setting it up for debug checking.
- */
-#define USLOCK_CHECKED          0x0001  /* lock is being checked */
-#define USLOCK_TAKEN            0x0002  /* lock has been taken */
-#define USLOCK_INIT             0xBAA0  /* lock has been initialized */
-#define USLOCK_INITIALIZED      (USLOCK_INIT|USLOCK_CHECKED)
-#define USLOCK_CHECKING(l)      (uslock_check &&                        \
-	                         ((l)->debug.state & USLOCK_CHECKED))
-
-/*
- *	Trace activities of a particularly interesting lock.
- */
-void            usl_trace(usimple_lock_t, int, pc_t, const char *);
-
-
-/*
- *	Initialize the debugging information contained
- *	in a usimple_lock.
- */
-void
-usld_lock_init(
-	usimple_lock_t l,
-	__unused unsigned short tag)
-{
-	if (l == USIMPLE_LOCK_NULL) {
-		panic("lock initialization:  null lock pointer");
-	}
-	l->lock_type = USLOCK_TAG;
-	l->debug.state = uslock_check ? USLOCK_INITIALIZED : 0;
-	l->debug.lock_cpu = l->debug.unlock_cpu = 0;
-	l->debug.lock_pc = l->debug.unlock_pc = INVALID_PC;
-	l->debug.lock_thread = l->debug.unlock_thread = INVALID_THREAD;
-	l->debug.duration[0] = l->debug.duration[1] = 0;
-	l->debug.unlock_cpu = l->debug.unlock_cpu = 0;
-	l->debug.unlock_pc = l->debug.unlock_pc = INVALID_PC;
-	l->debug.unlock_thread = l->debug.unlock_thread = INVALID_THREAD;
-}
-
-
-/*
- *	These checks apply to all usimple_locks, not just
- *	those with USLOCK_CHECKED turned on.
- */
-int
-usld_lock_common_checks(
-	usimple_lock_t l,
-	const char *caller)
-{
-	if (l == USIMPLE_LOCK_NULL) {
-		panic("%s:  null lock pointer", caller);
-	}
-	if (l->lock_type != USLOCK_TAG) {
-		panic("%s:  0x%x is not a usimple lock", caller, (integer_t) l);
-	}
-	if (!(l->debug.state & USLOCK_INIT)) {
-		panic("%s:  0x%x is not an initialized lock",
-		    caller, (integer_t) l);
-	}
-	return USLOCK_CHECKING(l);
-}
-
-
-/*
- *	Debug checks on a usimple_lock just before attempting
- *	to acquire it.
- */
-/* ARGSUSED */
-void
-usld_lock_pre(
-	usimple_lock_t l,
-	pc_t pc)
-{
-	const char     *caller = "usimple_lock";
-
-
-	if (!usld_lock_common_checks(l, caller)) {
-		return;
-	}
-
-	/*
-	 *	Note that we have a weird case where we are getting a lock when we are]
-	 *	in the process of putting the system to sleep. We are running with no
-	 *	current threads, therefore we can't tell if we are trying to retake a lock
-	 *	we have or someone on the other processor has it.  Therefore we just
-	 *	ignore this test if the locking thread is 0.
-	 */
-
-	if ((l->debug.state & USLOCK_TAKEN) && l->debug.lock_thread &&
-	    l->debug.lock_thread == (void *) current_thread()) {
-		printf("%s:  lock 0x%x already locked (at %p) by",
-		    caller, (integer_t) l, l->debug.lock_pc);
-		printf(" current thread %p (new attempt at pc %p)\n",
-		    l->debug.lock_thread, pc);
-		panic("%s", caller);
-	}
-	mp_disable_preemption();
-	usl_trace(l, cpu_number(), pc, caller);
-	mp_enable_preemption();
-}
-
-
-/*
- *	Debug checks on a usimple_lock just after acquiring it.
- *
- *	Pre-emption has been disabled at this point,
- *	so we are safe in using cpu_number.
- */
-void
-usld_lock_post(
-	usimple_lock_t l,
-	pc_t pc)
-{
-	int             mycpu;
-	const char     *caller = "successful usimple_lock";
-
-
-	if (!usld_lock_common_checks(l, caller)) {
-		return;
-	}
-
-	if (!((l->debug.state & ~USLOCK_TAKEN) == USLOCK_INITIALIZED)) {
-		panic("%s:  lock 0x%x became uninitialized",
-		    caller, (integer_t) l);
-	}
-	if ((l->debug.state & USLOCK_TAKEN)) {
-		panic("%s:  lock 0x%x became TAKEN by someone else",
-		    caller, (integer_t) l);
-	}
-
-	mycpu = cpu_number();
-	l->debug.lock_thread = (void *) current_thread();
-	l->debug.state |= USLOCK_TAKEN;
-	l->debug.lock_pc = pc;
-	l->debug.lock_cpu = mycpu;
-
-	usl_trace(l, mycpu, pc, caller);
-}
-
-
-/*
- *	Debug checks on a usimple_lock just before
- *	releasing it.  Note that the caller has not
- *	yet released the hardware lock.
- *
- *	Preemption is still disabled, so there's
- *	no problem using cpu_number.
- */
-void
-usld_unlock(
-	usimple_lock_t l,
-	pc_t pc)
-{
-	int             mycpu;
-	const char     *caller = "usimple_unlock";
-
-
-	if (!usld_lock_common_checks(l, caller)) {
-		return;
-	}
-
-	mycpu = cpu_number();
-
-	if (!(l->debug.state & USLOCK_TAKEN)) {
-		panic("%s:  lock 0x%x hasn't been taken",
-		    caller, (integer_t) l);
-	}
-	if (l->debug.lock_thread != (void *) current_thread()) {
-		panic("%s:  unlocking lock 0x%x, owned by thread %p",
-		    caller, (integer_t) l, l->debug.lock_thread);
-	}
-	if (l->debug.lock_cpu != mycpu) {
-		printf("%s:  unlocking lock 0x%x on cpu 0x%x",
-		    caller, (integer_t) l, mycpu);
-		printf(" (acquired on cpu 0x%x)\n", l->debug.lock_cpu);
-		panic("%s", caller);
-	}
-	usl_trace(l, mycpu, pc, caller);
-
-	l->debug.unlock_thread = l->debug.lock_thread;
-	l->debug.lock_thread = INVALID_PC;
-	l->debug.state &= ~USLOCK_TAKEN;
-	l->debug.unlock_pc = pc;
-	l->debug.unlock_cpu = mycpu;
-}
-
-
-/*
- *	Debug checks on a usimple_lock just before
- *	attempting to acquire it.
- *
- *	Preemption isn't guaranteed to be disabled.
- */
-void
-usld_lock_try_pre(
-	usimple_lock_t l,
-	pc_t pc)
-{
-	const char     *caller = "usimple_lock_try";
-
-	if (!usld_lock_common_checks(l, caller)) {
-		return;
-	}
-	mp_disable_preemption();
-	usl_trace(l, cpu_number(), pc, caller);
-	mp_enable_preemption();
-}
-
-
-/*
- *	Debug checks on a usimple_lock just after
- *	successfully attempting to acquire it.
- *
- *	Preemption has been disabled by the
- *	lock acquisition attempt, so it's safe
- *	to use cpu_number.
- */
-void
-usld_lock_try_post(
-	usimple_lock_t l,
-	pc_t pc)
-{
-	int             mycpu;
-	const char     *caller = "successful usimple_lock_try";
-
-	if (!usld_lock_common_checks(l, caller)) {
-		return;
-	}
-
-	if (!((l->debug.state & ~USLOCK_TAKEN) == USLOCK_INITIALIZED)) {
-		panic("%s:  lock 0x%x became uninitialized",
-		    caller, (integer_t) l);
-	}
-	if ((l->debug.state & USLOCK_TAKEN)) {
-		panic("%s:  lock 0x%x became TAKEN by someone else",
-		    caller, (integer_t) l);
-	}
-
-	mycpu = cpu_number();
-	l->debug.lock_thread = (void *) current_thread();
-	l->debug.state |= USLOCK_TAKEN;
-	l->debug.lock_pc = pc;
-	l->debug.lock_cpu = mycpu;
-
-	usl_trace(l, mycpu, pc, caller);
-}
-
-
-/*
- *	For very special cases, set traced_lock to point to a
- *	specific lock of interest.  The result is a series of
- *	XPRs showing lock operations on that lock.  The lock_seq
- *	value is used to show the order of those operations.
- */
-usimple_lock_t  traced_lock;
-unsigned int    lock_seq;
-
-void
-usl_trace(
-	usimple_lock_t l,
-	int mycpu,
-	pc_t pc,
-	const char *op_name)
-{
-	if (traced_lock == l) {
-		XPR(XPR_SLOCK,
-		    "seq %d, cpu %d, %s @ %x\n",
-		    (integer_t) lock_seq, (integer_t) mycpu,
-		    (integer_t) op_name, (integer_t) pc, 0);
-		lock_seq++;
-	}
-}
-
-
-#endif                          /* USLOCK_DEBUG */
 
 /*
  * The C portion of the shared/exclusive locks package.
@@ -1225,13 +763,13 @@ lck_rw_drain_status(lck_rw_t *lock, uint32_t status_mask, boolean_t wait __unuse
 		if (wait) {
 			wait_for_event();
 		} else {
-			clear_exclusive();
+			os_atomic_clear_exclusive();
 		}
 		if (!wait || (mach_absolute_time() >= deadline)) {
 			return FALSE;
 		}
 	}
-	clear_exclusive();
+	os_atomic_clear_exclusive();
 	return TRUE;
 #else
 	uint32_t        data;
@@ -1259,7 +797,7 @@ lck_rw_interlock_spin(lck_rw_t *lock)
 		if (data & LCK_RW_INTERLOCK) {
 			wait_for_event();
 		} else {
-			clear_exclusive();
+			os_atomic_clear_exclusive();
 			return;
 		}
 	}
@@ -1495,6 +1033,8 @@ lck_rw_lock_shared(lck_rw_t *lock)
 
 /*
  *	Routine:	lck_rw_lock_shared_to_exclusive
+ *
+ *	False returned upon failure, in this case the shared lock is dropped.
  */
 boolean_t
 lck_rw_lock_shared_to_exclusive(lck_rw_t *lock)
@@ -2505,7 +2045,6 @@ lck_mtx_init(
 	{
 		lck->lck_mtx_ptr = NULL;                // Clear any padding in the union fields below
 		lck->lck_mtx_waiters = 0;
-		lck->lck_mtx_pri = 0;
 		lck->lck_mtx_type = LCK_MTX_TYPE;
 		ordered_store_mtx(lck, 0);
 	}
@@ -2538,7 +2077,6 @@ lck_mtx_init_ext(
 		lck->lck_mtx_type = LCK_MTX_TYPE;
 	} else {
 		lck->lck_mtx_waiters = 0;
-		lck->lck_mtx_pri = 0;
 		lck->lck_mtx_type = LCK_MTX_TYPE;
 		ordered_store_mtx(lck, 0);
 	}
@@ -2627,8 +2165,8 @@ lck_mtx_lock(lck_mtx_t *lock)
 	lck_mtx_verify(lock);
 	lck_mtx_check_preemption(lock);
 	thread = current_thread();
-	if (atomic_compare_exchange(&lock->lck_mtx_data, 0, LCK_MTX_THREAD_TO_STATE(thread),
-	    memory_order_acquire_smp, FALSE)) {
+	if (os_atomic_cmpxchg(&lock->lck_mtx_data,
+	    0, LCK_MTX_THREAD_TO_STATE(thread), acquire)) {
 #if     CONFIG_DTRACE
 		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ACQUIRE, lock, 0);
 #endif /* CONFIG_DTRACE */
@@ -2647,6 +2185,7 @@ lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, boolean_t interlocked)
 	uintptr_t               state;
 	int                     waiters = 0;
 	spinwait_result_t       sw_res;
+	struct turnstile        *ts = NULL;
 
 	/* Loop waiting until I see that the mutex is unowned */
 	for (;;) {
@@ -2655,6 +2194,11 @@ lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, boolean_t interlocked)
 
 		switch (sw_res) {
 		case SPINWAIT_ACQUIRED:
+			if (ts != NULL) {
+				interlock_lock(lock);
+				turnstile_complete((uintptr_t)lock, NULL, NULL, TURNSTILE_KERNEL_MUTEX);
+				interlock_unlock(lock);
+			}
 			goto done;
 		case SPINWAIT_INTERLOCK:
 			goto set_owner;
@@ -2668,7 +2212,7 @@ lck_mtx_lock_contended(lck_mtx_t *lock, thread_t thread, boolean_t interlocked)
 			break;
 		}
 		ordered_store_mtx(lock, (state | LCK_ILOCK | ARM_LCK_WAITERS)); // Set waiters bit and wait
-		lck_mtx_lock_wait(lock, holding_thread);
+		lck_mtx_lock_wait(lock, holding_thread, &ts);
 		/* returns interlock unlocked */
 	}
 
@@ -2678,7 +2222,15 @@ set_owner:
 
 	if (state & ARM_LCK_WAITERS) {
 		/* Skip lck_mtx_lock_acquire if there are no waiters. */
-		waiters = lck_mtx_lock_acquire(lock);
+		waiters = lck_mtx_lock_acquire(lock, ts);
+		/*
+		 * lck_mtx_lock_acquire will call
+		 * turnstile_complete
+		 */
+	} else {
+		if (ts != NULL) {
+			turnstile_complete((uintptr_t)lock, NULL, NULL, TURNSTILE_KERNEL_MUTEX);
+		}
 	}
 
 	state = LCK_MTX_THREAD_TO_STATE(thread);
@@ -2696,6 +2248,12 @@ set_owner:
 
 done:
 	load_memory_barrier();
+
+	assert(thread->turnstile != NULL);
+
+	if (ts != NULL) {
+		turnstile_cleanup();
+	}
 
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ACQUIRE, lock, 0);
@@ -2715,14 +2273,15 @@ lck_mtx_lock_contended_spinwait_arm(lck_mtx_t *lock, thread_t thread, boolean_t 
 	int                     has_interlock = (int)interlocked;
 #if __SMP__
 	__kdebug_only uintptr_t trace_lck = VM_KERNEL_UNSLIDE_OR_PERM(lock);
-	thread_t                holder;
-	uint64_t                overall_deadline;
-	uint64_t                check_owner_deadline;
-	uint64_t                cur_time;
-	spinwait_result_t       retval = SPINWAIT_DID_SPIN;
-	int                     loopcount = 0;
-	uintptr_t               state;
-	boolean_t               istate;
+	thread_t        owner, prev_owner;
+	uint64_t        window_deadline, sliding_deadline, high_deadline;
+	uint64_t        start_time, cur_time, avg_hold_time, bias, delta;
+	int             loopcount = 0;
+	uint            i, prev_owner_cpu;
+	int             total_hold_time_samples, window_hold_time_samples, unfairness;
+	bool            owner_on_core, adjust;
+	uintptr_t       state, new_state, waiters;
+	spinwait_result_t       retval = SPINWAIT_DID_SPIN_HIGH_THR;
 
 	if (__improbable(!(lck_mtx_adaptive_spin_mode & ADAPTIVE_SPIN_ENABLE))) {
 		if (!has_interlock) {
@@ -2732,101 +2291,290 @@ lck_mtx_lock_contended_spinwait_arm(lck_mtx_t *lock, thread_t thread, boolean_t 
 		return SPINWAIT_DID_NOT_SPIN;
 	}
 
-	state = ordered_load_mtx(lock);
-
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_SPIN_CODE) | DBG_FUNC_START,
 	    trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(LCK_MTX_STATE_TO_THREAD(state)), lock->lck_mtx_waiters, 0, 0);
 
-	cur_time = mach_absolute_time();
-	overall_deadline = cur_time + MutexSpin;
-	check_owner_deadline = cur_time;
-
-	if (has_interlock) {
-		istate = ml_get_interrupts_enabled();
+	start_time = mach_absolute_time();
+	/*
+	 * window_deadline represents the "learning" phase.
+	 * The thread collects statistics about the lock during
+	 * window_deadline and then it makes a decision on whether to spin more
+	 * or block according to the concurrency behavior
+	 * observed.
+	 *
+	 * Every thread can spin at least low_MutexSpin.
+	 */
+	window_deadline = start_time + low_MutexSpin;
+	/*
+	 * Sliding_deadline is the adjusted spin deadline
+	 * computed after the "learning" phase.
+	 */
+	sliding_deadline = window_deadline;
+	/*
+	 * High_deadline is a hard deadline. No thread
+	 * can spin more than this deadline.
+	 */
+	if (high_MutexSpin >= 0) {
+		high_deadline = start_time + high_MutexSpin;
+	} else {
+		high_deadline = start_time + low_MutexSpin * real_ncpus;
 	}
+
+	/*
+	 * Do not know yet which is the owner cpu.
+	 * Initialize prev_owner_cpu with next cpu.
+	 */
+	prev_owner_cpu = (cpu_number() + 1) % real_ncpus;
+	total_hold_time_samples = 0;
+	window_hold_time_samples = 0;
+	avg_hold_time = 0;
+	adjust = TRUE;
+	bias = (os_hash_kernel_pointer(lock) + cpu_number()) % real_ncpus;
 
 	/* Snoop the lock state */
 	state = ordered_load_mtx(lock);
+	owner = LCK_MTX_STATE_TO_THREAD(state);
+	prev_owner = owner;
+
+	if (has_interlock) {
+		if (owner == NULL) {
+			retval = SPINWAIT_INTERLOCK;
+			goto done_spinning;
+		} else {
+			/*
+			 * We are holding the interlock, so
+			 * we can safely dereference owner.
+			 */
+			if (!(owner->machine.machine_thread_flags & MACHINE_THREAD_FLAGS_ON_CPU) ||
+			    (owner->state & TH_IDLE)) {
+				retval = SPINWAIT_DID_NOT_SPIN;
+				goto done_spinning;
+			}
+		}
+		interlock_unlock(lock);
+		has_interlock = 0;
+	}
 
 	/*
 	 * Spin while:
 	 *   - mutex is locked, and
 	 *   - it's locked as a spin lock, and
 	 *   - owner is running on another processor, and
-	 *   - owner (processor) is not idling, and
 	 *   - we haven't spun for long enough.
 	 */
 	do {
-		if (!(state & LCK_ILOCK) || has_interlock) {
-			if (!has_interlock) {
-				has_interlock = interlock_try_disable_interrupts(lock, &istate);
+		/*
+		 * Try to acquire the lock.
+		 */
+		owner = LCK_MTX_STATE_TO_THREAD(state);
+		if (owner == NULL) {
+			waiters = state & ARM_LCK_WAITERS;
+			if (waiters) {
+				/*
+				 * preserve the waiter bit
+				 * and try acquire the interlock.
+				 * Note: we will successfully acquire
+				 * the interlock only if we can also
+				 * acquire the lock.
+				 */
+				new_state = ARM_LCK_WAITERS | LCK_ILOCK;
+				has_interlock = 1;
+				retval = SPINWAIT_INTERLOCK;
+				disable_preemption();
+			} else {
+				new_state = LCK_MTX_THREAD_TO_STATE(thread);
+				retval = SPINWAIT_ACQUIRED;
 			}
 
-			if (has_interlock) {
-				state = ordered_load_mtx(lock);
-				holder = LCK_MTX_STATE_TO_THREAD(state);
-
-				if (holder == NULL) {
-					retval = SPINWAIT_INTERLOCK;
-
-					if (istate) {
-						ml_set_interrupts_enabled(istate);
-					}
-
-					break;
+			/*
+			 * The cmpxchg will succed only if the lock
+			 * is not owned (doesn't have an owner set)
+			 * and it is not interlocked.
+			 * It will not fail if there are waiters.
+			 */
+			if (os_atomic_cmpxchgv(&lock->lck_mtx_data,
+			    waiters, new_state, &state, acquire)) {
+				goto done_spinning;
+			} else {
+				if (waiters) {
+					has_interlock = 0;
+					enable_preemption();
 				}
-
-				if (!(holder->machine.machine_thread_flags & MACHINE_THREAD_FLAGS_ON_CPU) ||
-				    (holder->state & TH_IDLE)) {
-					if (loopcount == 0) {
-						retval = SPINWAIT_DID_NOT_SPIN;
-					}
-
-					if (istate) {
-						ml_set_interrupts_enabled(istate);
-					}
-
-					break;
-				}
-
-				interlock_unlock_enable_interrupts(lock, istate);
-				has_interlock = 0;
 			}
 		}
 
 		cur_time = mach_absolute_time();
 
-		if (cur_time >= overall_deadline) {
+		/*
+		 * Never spin past high_deadline.
+		 */
+		if (cur_time >= high_deadline) {
+			retval = SPINWAIT_DID_SPIN_HIGH_THR;
 			break;
 		}
 
-		check_owner_deadline = cur_time + (MutexSpin / SPINWAIT_OWNER_CHECK_COUNT);
+		/*
+		 * Check if owner is on core. If not block.
+		 */
+		owner = LCK_MTX_STATE_TO_THREAD(state);
+		if (owner) {
+			i = prev_owner_cpu;
+			owner_on_core = FALSE;
 
-		if (cur_time < check_owner_deadline) {
-			machine_delay_until(check_owner_deadline - cur_time, check_owner_deadline);
+			disable_preemption();
+			state = ordered_load_mtx(lock);
+			owner = LCK_MTX_STATE_TO_THREAD(state);
+
+			/*
+			 * For scalability we want to check if the owner is on core
+			 * without locking the mutex interlock.
+			 * If we do not lock the mutex interlock, the owner that we see might be
+			 * invalid, so we cannot dereference it. Therefore we cannot check
+			 * any field of the thread to tell us if it is on core.
+			 * Check if the thread that is running on the other cpus matches the owner.
+			 */
+			if (owner) {
+				do {
+					cpu_data_t *cpu_data_ptr = CpuDataEntries[i].cpu_data_vaddr;
+					if ((cpu_data_ptr != NULL) && (cpu_data_ptr->cpu_active_thread == owner)) {
+						owner_on_core = TRUE;
+						break;
+					}
+					if (++i >= real_ncpus) {
+						i = 0;
+					}
+				} while (i != prev_owner_cpu);
+				enable_preemption();
+
+				if (owner_on_core) {
+					prev_owner_cpu = i;
+				} else {
+					prev_owner = owner;
+					state = ordered_load_mtx(lock);
+					owner = LCK_MTX_STATE_TO_THREAD(state);
+					if (owner == prev_owner) {
+						/*
+						 * Owner is not on core.
+						 * Stop spinning.
+						 */
+						if (loopcount == 0) {
+							retval = SPINWAIT_DID_NOT_SPIN;
+						} else {
+							retval = SPINWAIT_DID_SPIN_OWNER_NOT_CORE;
+						}
+						break;
+					}
+					/*
+					 * Fall through if the owner changed while we were scanning.
+					 * The new owner could potentially be on core, so loop
+					 * again.
+					 */
+				}
+			} else {
+				enable_preemption();
+			}
 		}
 
-		/* Snoop the lock state */
-		state = ordered_load_mtx(lock);
+		/*
+		 * Save how many times we see the owner changing.
+		 * We can roughly estimate the the mutex hold
+		 * time and the fairness with that.
+		 */
+		if (owner != prev_owner) {
+			prev_owner = owner;
+			total_hold_time_samples++;
+			window_hold_time_samples++;
+		}
 
-		if (state == 0) {
-			/* Try to grab the lock. */
-			if (os_atomic_cmpxchg(&lock->lck_mtx_data,
-			    0, LCK_MTX_THREAD_TO_STATE(thread), acquire)) {
-				retval = SPINWAIT_ACQUIRED;
+		/*
+		 * Learning window expired.
+		 * Try to adjust the sliding_deadline.
+		 */
+		if (cur_time >= window_deadline) {
+			/*
+			 * If there was not contention during the window
+			 * stop spinning.
+			 */
+			if (window_hold_time_samples < 1) {
+				retval = SPINWAIT_DID_SPIN_NO_WINDOW_CONTENTION;
 				break;
 			}
+
+			if (adjust) {
+				/*
+				 * For a fair lock, we'd wait for at most (NCPU-1) periods,
+				 * but the lock is unfair, so let's try to estimate by how much.
+				 */
+				unfairness = total_hold_time_samples / real_ncpus;
+
+				if (unfairness == 0) {
+					/*
+					 * We observed the owner changing `total_hold_time_samples` times which
+					 * let us estimate the average hold time of this mutex for the duration
+					 * of the spin time.
+					 * avg_hold_time = (cur_time - start_time) / total_hold_time_samples;
+					 *
+					 * In this case spin at max avg_hold_time * (real_ncpus - 1)
+					 */
+					delta = cur_time - start_time;
+					sliding_deadline = start_time + (delta * (real_ncpus - 1)) / total_hold_time_samples;
+				} else {
+					/*
+					 * In this case at least one of the other cpus was able to get the lock twice
+					 * while I was spinning.
+					 * We could spin longer but it won't necessarily help if the system is unfair.
+					 * Try to randomize the wait to reduce contention.
+					 *
+					 * We compute how much time we could potentially spin
+					 * and distribute it over the cpus.
+					 *
+					 * bias is an integer between 0 and real_ncpus.
+					 * distributed_increment = ((high_deadline - cur_time) / real_ncpus) * bias
+					 */
+					delta = high_deadline - cur_time;
+					sliding_deadline = cur_time + ((delta * bias) / real_ncpus);
+					adjust = FALSE;
+				}
+			}
+
+			window_deadline += low_MutexSpin;
+			window_hold_time_samples = 0;
+		}
+
+		/*
+		 * Stop spinning if we past
+		 * the adjusted deadline.
+		 */
+		if (cur_time >= sliding_deadline) {
+			retval = SPINWAIT_DID_SPIN_SLIDING_THR;
+			break;
+		}
+
+		/*
+		 * We want to arm the monitor for wfe,
+		 * so load exclusively the lock.
+		 *
+		 * NOTE:
+		 * we rely on the fact that wfe will
+		 * eventually return even if the cache line
+		 * is not modified. This way we will keep
+		 * looping and checking if the deadlines expired.
+		 */
+		state = os_atomic_load_exclusive(&lock->lck_mtx_data, relaxed);
+		owner = LCK_MTX_STATE_TO_THREAD(state);
+		if (owner != NULL) {
+			wait_for_event();
+			state = ordered_load_mtx(lock);
+		} else {
+			atomic_exchange_abort();
 		}
 
 		loopcount++;
 	} while (TRUE);
 
+done_spinning:
 #if     CONFIG_DTRACE
 	/*
-	 * We've already kept a count via overall_deadline of how long we spun.
-	 * If dtrace is active, then we compute backwards to decide how
-	 * long we spun.
-	 *
 	 * Note that we record a different probe id depending on whether
 	 * this is a direct or indirect mutex.  This allows us to
 	 * penalize only lock groups that have debug/stats enabled
@@ -2834,10 +2582,10 @@ lck_mtx_lock_contended_spinwait_arm(lck_mtx_t *lock, thread_t thread, boolean_t 
 	 */
 	if (__probable(lock->lck_mtx_tag != LCK_MTX_TAG_INDIRECT)) {
 		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN, lock,
-		    mach_absolute_time() - (overall_deadline - MutexSpin));
+		    mach_absolute_time() - start_time);
 	} else {
 		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_SPIN, lock,
-		    mach_absolute_time() - (overall_deadline - MutexSpin));
+		    mach_absolute_time() - start_time);
 	}
 	/* The lockstat acquire event is recorded by the caller. */
 #endif
@@ -2858,6 +2606,7 @@ lck_mtx_lock_contended_spinwait_arm(lck_mtx_t *lock, thread_t thread, boolean_t 
 
 	return retval;
 }
+
 
 /*
  *	Common code for mutex locking as spinlock
@@ -2918,8 +2667,8 @@ lck_mtx_try_lock(lck_mtx_t *lock)
 	thread_t        thread = current_thread();
 
 	lck_mtx_verify(lock);
-	if (atomic_compare_exchange(&lock->lck_mtx_data, 0, LCK_MTX_THREAD_TO_STATE(thread),
-	    memory_order_acquire_smp, FALSE)) {
+	if (os_atomic_cmpxchg(&lock->lck_mtx_data,
+	    0, LCK_MTX_THREAD_TO_STATE(thread), acquire)) {
 #if     CONFIG_DTRACE
 		LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_ACQUIRE, lock, 0);
 #endif /* CONFIG_DTRACE */
@@ -2957,7 +2706,7 @@ lck_mtx_try_lock_contended(lck_mtx_t *lock, thread_t thread)
 	state |= LCK_ILOCK;
 	ordered_store_mtx(lock, state);
 #endif  // __SMP__
-	waiters = lck_mtx_lock_acquire(lock);
+	waiters = lck_mtx_lock_acquire(lock, NULL);
 	state = LCK_MTX_THREAD_TO_STATE(thread);
 	if (waiters != 0) {
 		state |= ARM_LCK_WAITERS;
@@ -2971,6 +2720,9 @@ lck_mtx_try_lock_contended(lck_mtx_t *lock, thread_t thread)
 	enable_preemption();
 #endif
 	load_memory_barrier();
+
+	turnstile_cleanup();
+
 	return TRUE;
 }
 
@@ -3046,8 +2798,8 @@ lck_mtx_unlock(lck_mtx_t *lock)
 		goto slow_case;
 	}
 	// Locked as a mutex
-	if (atomic_compare_exchange(&lock->lck_mtx_data, LCK_MTX_THREAD_TO_STATE(thread), 0,
-	    memory_order_release_smp, FALSE)) {
+	if (os_atomic_cmpxchg(&lock->lck_mtx_data,
+	    LCK_MTX_THREAD_TO_STATE(thread), 0, release)) {
 #if     CONFIG_DTRACE
 		LOCKSTAT_RECORD(LS_LCK_MTX_UNLOCK_RELEASE, lock, 0);
 #endif /* CONFIG_DTRACE */
@@ -3061,6 +2813,7 @@ static void NOINLINE
 lck_mtx_unlock_contended(lck_mtx_t *lock, thread_t thread, boolean_t ilk_held)
 {
 	uintptr_t       state;
+	boolean_t               cleanup = FALSE;
 
 	if (ilk_held) {
 		state = ordered_load_mtx(lock);
@@ -3084,13 +2837,17 @@ lck_mtx_unlock_contended(lck_mtx_t *lock, thread_t thread, boolean_t ilk_held)
 		ordered_store_mtx(lock, state);
 #endif
 		if (state & ARM_LCK_WAITERS) {
-			lck_mtx_unlock_wakeup(lock, thread);
-			state = ordered_load_mtx(lock);
-		} else {
-			assertf(lock->lck_mtx_pri == 0, "pri=0x%x", lock->lck_mtx_pri);
+			if (lck_mtx_unlock_wakeup(lock, thread)) {
+				state = ARM_LCK_WAITERS;
+			} else {
+				state = 0;
+			}
+			cleanup = TRUE;
+			goto unlock;
 		}
 	}
 	state &= ARM_LCK_WAITERS;   /* Clear state, retain waiters bit */
+unlock:
 #if __SMP__
 	state |= LCK_ILOCK;
 	ordered_store_mtx(lock, state);
@@ -3099,6 +2856,16 @@ lck_mtx_unlock_contended(lck_mtx_t *lock, thread_t thread, boolean_t ilk_held)
 	ordered_store_mtx(lock, state);
 	enable_preemption();
 #endif
+	if (cleanup) {
+		/*
+		 * Do not do any turnstile operations outside of this block.
+		 * lock/unlock is called at early stage of boot with single thread,
+		 * when turnstile is not yet initialized.
+		 * Even without contention we can come throught the slow path
+		 * if the mutex is acquired as a spin lock.
+		 */
+		turnstile_cleanup();
+	}
 
 #if     CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_MTX_UNLOCK_RELEASE, lock, 0);
@@ -3165,7 +2932,7 @@ lck_mtx_convert_spin(lck_mtx_t *lock)
 	}
 	state &= ~(LCK_MTX_THREAD_MASK);                // Clear the spin tag
 	ordered_store_mtx(lock, state);
-	waiters = lck_mtx_lock_acquire(lock);   // Acquire to manage priority boosts
+	waiters = lck_mtx_lock_acquire(lock, NULL);   // Acquire to manage priority boosts
 	state = LCK_MTX_THREAD_TO_STATE(thread);
 	if (waiters != 0) {
 		state |= ARM_LCK_WAITERS;
@@ -3178,6 +2945,7 @@ lck_mtx_convert_spin(lck_mtx_t *lock)
 	ordered_store_mtx(lock, state);                 // Set ownership
 	enable_preemption();
 #endif
+	turnstile_cleanup();
 }
 
 
@@ -3232,12 +3000,7 @@ lck_spin_assert(lck_spin_t *lock, unsigned int type)
 		if (holder != 0) {
 			if (holder == thread) {
 				panic("Lock owned by current thread %p = %lx", lock, state);
-			} else {
-				panic("Lock %p owned by thread %p", lock, holder);
 			}
-		}
-		if (state & LCK_ILOCK) {
-			panic("Lock bit set %p = %lx", lock, state);
 		}
 	} else {
 		panic("lck_spin_assert(): invalid arg (%u)", type);

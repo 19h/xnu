@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2019 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -998,7 +998,7 @@ struct omb_stat *omb_stat;      /* For backwards compatibility */
 #define MB_STAT_SIZE(n) \
 	__builtin_offsetof(mb_stat_t, mbs_class[n])
 #define OMB_STAT_SIZE(n) \
-	((size_t)(&((struct omb_stat *)0)->mbs_class[n]))
+	__builtin_offsetof(struct omb_stat, mbs_class[n])
 
 /*
  * The legacy structure holding all of the mbuf allocation statistics.
@@ -1038,7 +1038,7 @@ typedef struct {
 static mbuf_mtypes_t *mbuf_mtypes;      /* per-CPU statistics */
 
 #define MBUF_MTYPES_SIZE(n) \
-	((size_t)(&((mbuf_mtypes_t *)0)->mbs_cpu[n]))
+	__builtin_offsetof(mbuf_mtypes_t, mbs_cpu[n])
 
 #define MTYPES_CPU(p) \
 	((mtypes_cpu_t *)(void *)((char *)(p) + MBUF_MTYPES_SIZE(cpu_number())))
@@ -1268,7 +1268,7 @@ m_incref(struct mbuf *m)
 	do {
 		old = *addr;
 		new = old + 1;
-		ASSERT(new != 0);
+		VERIFY(new != 0);
 	} while (!OSCompareAndSwap16(old, new, addr));
 
 	/*
@@ -1290,7 +1290,7 @@ m_decref(struct mbuf *m)
 	do {
 		old = *addr;
 		new = old - 1;
-		ASSERT(old != 0);
+		VERIFY(old != 0);
 	} while (!OSCompareAndSwap16(old, new, addr));
 
 	return new;
@@ -4686,7 +4686,7 @@ fail:
 		mcache_free_ext(rcp, rmp_list);
 	}
 	if (wantall && top != NULL) {
-		m_freem(top);
+		m_freem_list(top);
 		return NULL;
 	}
 	*numlist = num;
@@ -5576,6 +5576,8 @@ m_copyup(struct mbuf *n, int len, int dstoff)
 	struct mbuf *m;
 	int count, space;
 
+	VERIFY(len >= 0 && dstoff >= 0);
+
 	if (len > (MHLEN - dstoff)) {
 		goto bad;
 	}
@@ -6348,6 +6350,9 @@ m_dup(struct mbuf *m, int how)
 				(void) m_free(n);
 				goto nospace;
 			}
+		} else {
+			VERIFY((copyhdr == 1 && m->m_len <= MHLEN) ||
+			    (copyhdr == 0 && m->m_len <= MLEN));
 		}
 		*np = n;
 		if (copyhdr) {
@@ -7455,6 +7460,7 @@ mcl_audit_scratch(mcache_audit_t *mca)
 	}
 }
 
+__abortlike
 static void
 mcl_audit_mcheck_panic(struct mbuf *m)
 {
@@ -7535,7 +7541,7 @@ mleak_logger(u_int32_t num, mcache_obj_t *addr, boolean_t alloc)
 
 	if ((temp % mleak_table.mleak_sample_factor) == 0 && addr != NULL) {
 		uintptr_t bt[MLEAK_STACK_DEPTH];
-		int logged = backtrace(bt, MLEAK_STACK_DEPTH);
+		int logged = backtrace(bt, MLEAK_STACK_DEPTH, NULL);
 		mleak_log(bt, addr, logged, num);
 	}
 }
@@ -7842,14 +7848,14 @@ mbuf_dump(void)
 	if (totmbufs > m_mbufs) {
 		totmbufs = m_mbufs;
 	}
-	k = snprintf(c, clen, "%lu/%u mbufs in use:\n", totmbufs, m_mbufs);
+	k = scnprintf(c, clen, "%lu/%u mbufs in use:\n", totmbufs, m_mbufs);
 	MBUF_DUMP_BUF_CHK();
 
 	bzero(&seen, sizeof(seen));
 	for (mp = mbtypes; mp->mt_name != NULL; mp++) {
 		if (mbstat.m_mtypes[mp->mt_type] != 0) {
 			seen[mp->mt_type] = 1;
-			k = snprintf(c, clen, "\t%u mbufs allocated to %s\n",
+			k = scnprintf(c, clen, "\t%u mbufs allocated to %s\n",
 			    mbstat.m_mtypes[mp->mt_type], mp->mt_name);
 			MBUF_DUMP_BUF_CHK();
 		}
@@ -7857,17 +7863,17 @@ mbuf_dump(void)
 	seen[MT_FREE] = 1;
 	for (i = 0; i < nmbtypes; i++) {
 		if (!seen[i] && mbstat.m_mtypes[i] != 0) {
-			k = snprintf(c, clen, "\t%u mbufs allocated to "
+			k = scnprintf(c, clen, "\t%u mbufs allocated to "
 			    "<mbuf type %d>\n", mbstat.m_mtypes[i], i);
 			MBUF_DUMP_BUF_CHK();
 		}
 	}
 	if ((m_mbufs - totmbufs) > 0) {
-		k = snprintf(c, clen, "\t%lu mbufs allocated to caches\n",
+		k = scnprintf(c, clen, "\t%lu mbufs allocated to caches\n",
 		    m_mbufs - totmbufs);
 		MBUF_DUMP_BUF_CHK();
 	}
-	k = snprintf(c, clen, "%u/%u mbuf 2KB clusters in use\n"
+	k = scnprintf(c, clen, "%u/%u mbuf 2KB clusters in use\n"
 	    "%u/%u mbuf 4KB clusters in use\n",
 	    (unsigned int)(mbstat.m_clusters - m_clfree),
 	    (unsigned int)mbstat.m_clusters,
@@ -7876,7 +7882,7 @@ mbuf_dump(void)
 	MBUF_DUMP_BUF_CHK();
 
 	if (njcl > 0) {
-		k = snprintf(c, clen, "%u/%u mbuf %uKB clusters in use\n",
+		k = scnprintf(c, clen, "%u/%u mbuf %uKB clusters in use\n",
 		    m_16kclusters - m_16kclfree, m_16kclusters,
 		    njclbytes / 1024);
 		MBUF_DUMP_BUF_CHK();
@@ -7891,21 +7897,21 @@ mbuf_dump(void)
 		u_long totused1 = totused / 100;
 		totpct = (totused1 * 100) / totmem1;
 	}
-	k = snprintf(c, clen, "%lu KB allocated to network (approx. %lu%% "
+	k = scnprintf(c, clen, "%lu KB allocated to network (approx. %lu%% "
 	    "in use)\n", totmem / 1024, totpct);
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "%lu KB returned to the system\n",
+	k = scnprintf(c, clen, "%lu KB returned to the system\n",
 	    totreturned / 1024);
 	MBUF_DUMP_BUF_CHK();
 
 	net_update_uptime();
-	k = snprintf(c, clen,
+	k = scnprintf(c, clen,
 	    "VM allocation failures: contiguous %u, normal %u, one page %u\n",
 	    mb_kmem_contig_failed, mb_kmem_failed, mb_kmem_one_failed);
 	MBUF_DUMP_BUF_CHK();
 	if (mb_kmem_contig_failed_ts || mb_kmem_failed_ts ||
 	    mb_kmem_one_failed_ts) {
-		k = snprintf(c, clen,
+		k = scnprintf(c, clen,
 		    "VM allocation failure timestamps: contiguous %llu "
 		    "(size %llu), normal %llu (size %llu), one page %llu "
 		    "(now %llu)\n",
@@ -7913,20 +7919,20 @@ mbuf_dump(void)
 		    mb_kmem_failed_ts, mb_kmem_failed_size,
 		    mb_kmem_one_failed_ts, net_uptime());
 		MBUF_DUMP_BUF_CHK();
-		k = snprintf(c, clen,
+		k = scnprintf(c, clen,
 		    "VM return codes: ");
 		MBUF_DUMP_BUF_CHK();
 		for (i = 0;
 		    i < sizeof(mb_kmem_stats) / sizeof(mb_kmem_stats[0]);
 		    i++) {
-			k = snprintf(c, clen, "%s: %u ", mb_kmem_stats_labels[i],
+			k = scnprintf(c, clen, "%s: %u ", mb_kmem_stats_labels[i],
 			    mb_kmem_stats[i]);
 			MBUF_DUMP_BUF_CHK();
 		}
-		k = snprintf(c, clen, "\n");
+		k = scnprintf(c, clen, "\n");
 		MBUF_DUMP_BUF_CHK();
 	}
-	k = snprintf(c, clen,
+	k = scnprintf(c, clen,
 	    "worker thread runs: %u, expansions: %llu, cl %llu/%llu, "
 	    "bigcl %llu/%llu, 16k %llu/%llu\n", mbuf_worker_run_cnt,
 	    mb_expand_cnt, mb_expand_cl_cnt, mb_expand_cl_total,
@@ -7934,14 +7940,14 @@ mbuf_dump(void)
 	    mb_expand_16kcl_total);
 	MBUF_DUMP_BUF_CHK();
 	if (mbuf_worker_last_runtime != 0) {
-		k = snprintf(c, clen, "worker thread last run time: "
+		k = scnprintf(c, clen, "worker thread last run time: "
 		    "%llu (%llu seconds ago)\n",
 		    mbuf_worker_last_runtime,
 		    net_uptime() - mbuf_worker_last_runtime);
 		MBUF_DUMP_BUF_CHK();
 	}
 	if (mbuf_drain_last_runtime != 0) {
-		k = snprintf(c, clen, "drain routine last run time: "
+		k = scnprintf(c, clen, "drain routine last run time: "
 		    "%llu (%llu seconds ago)\n",
 		    mbuf_drain_last_runtime,
 		    net_uptime() - mbuf_drain_last_runtime);
@@ -7949,7 +7955,7 @@ mbuf_dump(void)
 	}
 
 #if DEBUG || DEVELOPMENT
-	k = snprintf(c, clen, "\nworker thread log:\n%s\n", mbwdog_logging);
+	k = scnprintf(c, clen, "\nworker thread log:\n%s\n", mbwdog_logging);
 	MBUF_DUMP_BUF_CHK();
 #endif
 
@@ -7959,61 +7965,61 @@ mbuf_dump(void)
 			continue;
 		}
 		if (printed_banner == false) {
-			k = snprintf(c, clen,
+			k = scnprintf(c, clen,
 			    "\nlargest allocation failure backtraces:\n");
 			MBUF_DUMP_BUF_CHK();
 			printed_banner = true;
 		}
-		k = snprintf(c, clen, "size %llu: < ", trace->size);
+		k = scnprintf(c, clen, "size %llu: < ", trace->size);
 		MBUF_DUMP_BUF_CHK();
 		for (i = 0; i < trace->depth; i++) {
 			if (mleak_stat->ml_isaddr64) {
-				k = snprintf(c, clen, "0x%0llx ",
+				k = scnprintf(c, clen, "0x%0llx ",
 				    (uint64_t)VM_KERNEL_UNSLIDE(
 					    trace->addr[i]));
 			} else {
-				k = snprintf(c, clen,
+				k = scnprintf(c, clen,
 				    "0x%08x ",
 				    (uint32_t)VM_KERNEL_UNSLIDE(
 					    trace->addr[i]));
 			}
 			MBUF_DUMP_BUF_CHK();
 		}
-		k = snprintf(c, clen, ">\n");
+		k = scnprintf(c, clen, ">\n");
 		MBUF_DUMP_BUF_CHK();
 	}
 
 	/* mbuf leak detection statistics */
 	mleak_update_stats();
 
-	k = snprintf(c, clen, "\nmbuf leak detection table:\n");
+	k = scnprintf(c, clen, "\nmbuf leak detection table:\n");
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "\ttotal captured: %u (one per %u)\n",
+	k = scnprintf(c, clen, "\ttotal captured: %u (one per %u)\n",
 	    mleak_table.mleak_capture / mleak_table.mleak_sample_factor,
 	    mleak_table.mleak_sample_factor);
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "\ttotal allocs outstanding: %llu\n",
+	k = scnprintf(c, clen, "\ttotal allocs outstanding: %llu\n",
 	    mleak_table.outstanding_allocs);
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "\tnew hash recorded: %llu allocs, %llu traces\n",
+	k = scnprintf(c, clen, "\tnew hash recorded: %llu allocs, %llu traces\n",
 	    mleak_table.alloc_recorded, mleak_table.trace_recorded);
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "\thash collisions: %llu allocs, %llu traces\n",
+	k = scnprintf(c, clen, "\thash collisions: %llu allocs, %llu traces\n",
 	    mleak_table.alloc_collisions, mleak_table.trace_collisions);
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "\toverwrites: %llu allocs, %llu traces\n",
+	k = scnprintf(c, clen, "\toverwrites: %llu allocs, %llu traces\n",
 	    mleak_table.alloc_overwrites, mleak_table.trace_overwrites);
 	MBUF_DUMP_BUF_CHK();
-	k = snprintf(c, clen, "\tlock conflicts: %llu\n\n",
+	k = scnprintf(c, clen, "\tlock conflicts: %llu\n\n",
 	    mleak_table.total_conflicts);
 	MBUF_DUMP_BUF_CHK();
 
-	k = snprintf(c, clen, "top %d outstanding traces:\n",
+	k = scnprintf(c, clen, "top %d outstanding traces:\n",
 	    mleak_stat->ml_cnt);
 	MBUF_DUMP_BUF_CHK();
 	for (i = 0; i < mleak_stat->ml_cnt; i++) {
 		mltr = &mleak_stat->ml_trace[i];
-		k = snprintf(c, clen, "[%d] %llu outstanding alloc(s), "
+		k = scnprintf(c, clen, "[%d] %llu outstanding alloc(s), "
 		    "%llu hit(s), %llu collision(s)\n", (i + 1),
 		    mltr->mltr_allocs, mltr->mltr_hitcount,
 		    mltr->mltr_collisions);
@@ -8021,40 +8027,40 @@ mbuf_dump(void)
 	}
 
 	if (mleak_stat->ml_isaddr64) {
-		k = snprintf(c, clen, MB_LEAK_HDR_64);
+		k = scnprintf(c, clen, MB_LEAK_HDR_64);
 	} else {
-		k = snprintf(c, clen, MB_LEAK_HDR_32);
+		k = scnprintf(c, clen, MB_LEAK_HDR_32);
 	}
 	MBUF_DUMP_BUF_CHK();
 
 	for (i = 0; i < MLEAK_STACK_DEPTH; i++) {
-		k = snprintf(c, clen, "%2d: ", (i + 1));
+		k = scnprintf(c, clen, "%2d: ", (i + 1));
 		MBUF_DUMP_BUF_CHK();
 		for (j = 0; j < mleak_stat->ml_cnt; j++) {
 			mltr = &mleak_stat->ml_trace[j];
 			if (i < mltr->mltr_depth) {
 				if (mleak_stat->ml_isaddr64) {
-					k = snprintf(c, clen, "0x%0llx  ",
+					k = scnprintf(c, clen, "0x%0llx  ",
 					    (uint64_t)VM_KERNEL_UNSLIDE(
 						    mltr->mltr_addr[i]));
 				} else {
-					k = snprintf(c, clen,
+					k = scnprintf(c, clen,
 					    "0x%08x  ",
 					    (uint32_t)VM_KERNEL_UNSLIDE(
 						    mltr->mltr_addr[i]));
 				}
 			} else {
 				if (mleak_stat->ml_isaddr64) {
-					k = snprintf(c, clen,
+					k = scnprintf(c, clen,
 					    MB_LEAK_SPACING_64);
 				} else {
-					k = snprintf(c, clen,
+					k = scnprintf(c, clen,
 					    MB_LEAK_SPACING_32);
 				}
 			}
 			MBUF_DUMP_BUF_CHK();
 		}
-		k = snprintf(c, clen, "\n");
+		k = scnprintf(c, clen, "\n");
 		MBUF_DUMP_BUF_CHK();
 	}
 done:
@@ -8686,7 +8692,7 @@ _mbwdog_logger(const char *func, const int line, const char *fmt, ...)
 	vsnprintf(p, sizeof(p), fmt, ap);
 	va_end(ap);
 	microuptime(&now);
-	len = snprintf(str, sizeof(str),
+	len = scnprintf(str, sizeof(str),
 	    "\n%ld.%d (%d/%llx) %s:%d %s",
 	    now.tv_sec, now.tv_usec,
 	    current_proc()->p_pid,
@@ -8800,7 +8806,7 @@ mtracelarge_register(size_t size)
 	uintptr_t bt[MLEAK_STACK_DEPTH];
 	unsigned int depth;
 
-	depth = backtrace(bt, MLEAK_STACK_DEPTH);
+	depth = backtrace(bt, MLEAK_STACK_DEPTH, NULL);
 	/* Check if this entry is already on the list. */
 	for (i = 0; i < MTRACELARGE_NUM_TRACES; i++) {
 		trace = &mtracelarge_table[i];

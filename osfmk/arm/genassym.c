@@ -131,11 +131,9 @@ main(
 	DECLARE("ACT_TASK", offsetof(struct thread, task));
 	DECLARE("ACT_PCBDATA", offsetof(struct thread, machine.PcbData));
 #if __ARM_VFP__
-	DECLARE("ACT_UVFP", offsetof(struct thread, machine.uVFPdata));
-	DECLARE("ACT_KVFP", offsetof(struct thread, machine.kVFPdata));
+	DECLARE("ACT_UVFP", offsetof(struct thread, machine.PcbData.VFPdata));
 #endif
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
-	DECLARE("TH_CTH_DATA", offsetof(struct thread, machine.cthread_data));
 	DECLARE("ACT_PCBDATA_PC", offsetof(struct thread, machine.PcbData.pc));
 	DECLARE("ACT_PCBDATA_R0", offsetof(struct thread, machine.PcbData.r[0]));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
@@ -176,6 +174,7 @@ main(
 	DECLARE("SS_EXC", offsetof(struct arm_saved_state, exception));
 
 #if __ARM_VFP__
+	DECLARE("SS_KVFP", offsetof(struct arm_saved_state, VFPdata));
 	DECLARE("VSS_SIZE", sizeof(struct arm_vfpsaved_state));
 	DECLARE("VSS_FPSCR", offsetof(struct arm_vfpsaved_state, fpscr));
 	DECLARE("VSS_FPEXC", offsetof(struct arm_vfpsaved_state, fpexc));
@@ -355,11 +354,11 @@ main(
 	DECLARE("BA_TOP_OF_KERNEL_DATA",
 	    offsetof(struct boot_args, topOfKernelData));
 
-	DECLARE("ENTROPY_INDEX_PTR",
-	    offsetof(entropy_data_t, index_ptr));
+	DECLARE("ENTROPY_SAMPLE_COUNT",
+	    offsetof(entropy_data_t, sample_count));
 	DECLARE("ENTROPY_BUFFER",
 	    offsetof(entropy_data_t, buffer));
-	DECLARE("ENTROPY_DATA_SIZE", sizeof(struct entropy_data));
+	DECLARE("ENTROPY_BUFFER_INDEX_MASK", ENTROPY_BUFFER_INDEX_MASK);
 
 	return 0;
 }

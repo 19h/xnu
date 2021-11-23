@@ -115,6 +115,12 @@ machine_switch_context(
 	return retval;
 }
 
+boolean_t
+machine_thread_on_core(thread_t thread)
+{
+	return thread->machine.machine_thread_flags & MACHINE_THREAD_FLAGS_ON_CPU;
+}
+
 /*
  * Routine:	machine_thread_create
  *
@@ -137,13 +143,12 @@ machine_thread_create(
 	}
 	thread->machine.preemption_count = 0;
 	thread->machine.cthread_self = 0;
-	thread->machine.cthread_data = 0;
 #if	__ARM_USER_PROTECT__
 	{
 	struct pmap *new_pmap = vm_map_pmap(task->map);
 
 	thread->machine.kptw_ttb = ((unsigned int) kernel_pmap->ttep) | TTBR_SETUP;
-	thread->machine.asid = new_pmap->asid;
+	thread->machine.asid = new_pmap->hw_asid;
 	if (new_pmap->tte_index_max == NTTES) {
 		thread->machine.uptw_ttc = 2;
 		thread->machine.uptw_ttb = ((unsigned int) new_pmap->ttep) | TTBR_SETUP;
@@ -188,6 +193,15 @@ machine_thread_init(void)
 					 "arm debug state");
 }
 
+/*
+ * Routine:	machine_thread_template_init
+ *
+ */
+void
+machine_thread_template_init(thread_t __unused thr_template)
+{
+	/* Nothing to do on this platform. */
+}
 
 /*
  * Routine:	get_useraddr
@@ -246,6 +260,7 @@ machine_stack_attach(
 	savestate->r[7] = 0x0UL;
 	savestate->r[9] = (uint32_t) NULL;
 	savestate->cpsr = PSR_SVC_MODE | PSR_INTMASK;
+	vfp_state_initialize(&savestate->VFPdata);
 	machine_stack_attach_kprintf("thread = %x pc = %x, sp = %x\n", thread, savestate->lr, savestate->sp);
 }
 
