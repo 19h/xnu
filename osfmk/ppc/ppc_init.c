@@ -1,29 +1,23 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -54,8 +48,6 @@
 #include <ppc/mem.h>
 #include <ppc/mappings.h>
 #include <ppc/locks.h>
-#include <kern/pms.h>
-#include <ppc/rtclock.h>
 
 #include <pexpert/pexpert.h>
 
@@ -126,7 +118,6 @@ patch_entry_t patch_table[] = {
     {NULL,                  0x00000000, PATCH_END_OF_TABLE, 0}
 	};
 
-
 /*
  * Forward definition
  */
@@ -162,7 +153,7 @@ ppc_init(
 
 	BootProcInfo.cpu_number = 0;
 	BootProcInfo.cpu_flags = 0;
-	BootProcInfo.istackptr = 0;							/* we're on the interrupt stack */
+	BootProcInfo.istackptr = 0;	/* we're on the interrupt stack */
 	BootProcInfo.intstack_top_ss = (vm_offset_t)&intstack + INTSTACK_SIZE - FM_SIZE;
 	BootProcInfo.debstack_top_ss = (vm_offset_t)&debstack + KERNEL_STACK_SIZE - FM_SIZE;
 	BootProcInfo.debstackptr = BootProcInfo.debstack_top_ss;
@@ -171,27 +162,17 @@ ppc_init(
 	BootProcInfo.FPU_owner = 0;
 	BootProcInfo.VMX_owner = 0;
 	BootProcInfo.pp_cbfr = console_per_proc_alloc(TRUE);
-	BootProcInfo.rtcPop = EndOfAllTime;
-	BootProcInfo.pp2ndPage = (addr64_t)&BootProcInfo;	/* Initial physical address of the second page */
-
- 	BootProcInfo.pms.pmsStamp = 0;						/* Dummy transition time */
- 	BootProcInfo.pms.pmsPop = EndOfAllTime;				/* Set the pop way into the future */
- 	
- 	BootProcInfo.pms.pmsState = pmsParked;				/* Park the power stepper */
-	BootProcInfo.pms.pmsCSetCmd = pmsCInit;				/* Set dummy initial hardware state */
-	
+	BootProcInfo.rtcPop = 0xFFFFFFFFFFFFFFFFULL;
 	mp = (mapping_t *)BootProcInfo.ppUMWmp;
 	mp->mpFlags = 0x01000000 | mpLinkage | mpPerm | 1;
 	mp->mpSpace = invalSpace;
-
-	pmsInit();											/* Initialize the stepper */
 
 	thread_bootstrap();
 
 	thread = current_thread();
 	thread->machine.curctx = &thread->machine.facctx;
 	thread->machine.facctx.facAct = thread;
-	thread->machine.umwSpace = invalSpace;				/* Initialize user memory window space to invalid */
+	thread->machine.umwSpace = invalSpace;					/* Initialize user memory window space to invalid */
 	thread->machine.preemption_count = 1;
 
 	cpu_bootstrap();
@@ -204,34 +185,33 @@ ppc_init(
 
 	static_memory_end = round_page(args->topOfKernelData);;
       
-	PE_init_platform(FALSE, args);						/* Get platform expert set up */
+	PE_init_platform(FALSE, args);				/* Get platform expert set up */
 
 	if (!PE_parse_boot_arg("novmx", &novmx)) novmx=0;	/* Special run without VMX? */
-	if(novmx) {											/* Yeah, turn it off */
-		BootProcInfo.pf.Available &= ~pfAltivec;		/* Turn off Altivec available */
+	if(novmx) {									/* Yeah, turn it off */
+		BootProcInfo.pf.Available &= ~pfAltivec;	/* Turn off Altivec available */
 		__asm__ volatile("mtsprg 2,%0" : : "r" (BootProcInfo.pf.Available));	/* Set live value */
 	}
 
 	if (!PE_parse_boot_arg("fn", &forcenap)) forcenap = 0;	/* If force nap not set, make 0 */
 	else {
-		if(forcenap < 2) forcenap = forcenap + 1;		/* Else set 1 for off, 2 for on */
-		else forcenap = 0;								/* Clear for error case */
+		if(forcenap < 2) forcenap = forcenap + 1;			/* Else set 1 for off, 2 for on */
+		else forcenap = 0;									/* Clear for error case */
 	}
 	
-	if (!PE_parse_boot_arg("pmsx", &pmsExperimental)) pmsExperimental = 0;	/* Check if we should start in experimental power management stepper mode */
-	if (!PE_parse_boot_arg("lcks", &LcksOpts)) LcksOpts = 0;	/* Set lcks options */
-	if (!PE_parse_boot_arg("diag", &dgWork.dgFlags)) dgWork.dgFlags = 0;	/* Set diagnostic flags */
+	if (!PE_parse_boot_arg("diag", &dgWork.dgFlags)) dgWork.dgFlags=0;	/* Set diagnostic flags */
+	if (!PE_parse_boot_arg("lcks", &LcksOpts)) LcksOpts=0;				/* Set lcks options */
 	if(dgWork.dgFlags & enaExpTrace) trcWork.traceMask = 0xFFFFFFFF;	/* If tracing requested, enable it */
 
-	if(PE_parse_boot_arg("ctrc", &cputrace)) {			/* See if tracing is limited to a specific cpu */
+	if(PE_parse_boot_arg("ctrc", &cputrace)) {							/* See if tracing is limited to a specific cpu */
 		trcWork.traceMask = (trcWork.traceMask & 0xFFFFFFF0) | (cputrace & 0xF);	/* Limit to 4 */
 	}
 
 	if(!PE_parse_boot_arg("tb", &trcWork.traceSize)) {	/* See if non-default trace buffer size */
 #if DEBUG
-		trcWork.traceSize = 32;							/* Default 32 page trace table for DEBUG */
+		trcWork.traceSize = 32;					/* Default 32 page trace table for DEBUG */
 #else
-		trcWork.traceSize = 8;							/* Default 8 page trace table for RELEASE */
+		trcWork.traceSize = 8;					/* Default 8 page trace table for RELEASE */
 #endif
 	}
 
@@ -248,7 +228,7 @@ ppc_init(
 	else wcte = (wcte != 0);							/* Force to 0 or 1 */
 
 	if (!PE_parse_boot_arg("mcklog", &mckFlags)) mckFlags = 0;	/* If machine check flags not specified, clear */
-	else if(mckFlags > 1) mckFlags = 0;					/* If bogus, clear */
+	else if(mckFlags > 1) mckFlags = 0;			/* If bogus, clear */
     
     if (!PE_parse_boot_arg("ht_shift", &hash_table_shift))  /* should we use a non-default hash table size? */
         hash_table_shift = 0;                           /* no, use default size */
@@ -277,7 +257,9 @@ ppc_init(
 			}
 		}
 	}
-		
+	
+	PE_init_platform(TRUE, args);
+	
 	machine_startup(args);
 }
 

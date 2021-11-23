@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /*
  * Copyright (c) 1982, 1986, 1989, 1991, 1993
@@ -94,11 +88,7 @@
 struct	zone *unp_zone;
 static	unp_gen_t unp_gencnt;
 static	u_int unp_count;
-
-static	lck_attr_t 		*unp_mtx_attr;
-static	lck_grp_t 		*unp_mtx_grp;
-static	lck_grp_attr_t 		*unp_mtx_grp_attr;
-static	lck_rw_t 		*unp_list_mtx;
+static	lck_mtx_t 		*unp_mutex;
 
 extern lck_mtx_t * uipc_lock;
 static	struct unp_head unp_shead, unp_dhead;
@@ -313,13 +303,8 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		goto release;
 	}
 
-	if (control) {
-		socket_unlock(so, 0); /* release global lock to avoid deadlock (4436174) */ 
-		error = unp_internalize(control, p);
-		socket_lock(so, 0);
-		if (error)
-			goto release;
-	}
+	if (control && (error = unp_internalize(control, p)))
+		goto release;
 
 	switch (so->so_type) {
 	case SOCK_DGRAM: 
@@ -574,7 +559,7 @@ unp_attach(struct socket *so)
 	if (unp == NULL)
 		return (ENOBUFS);
 	bzero(unp, sizeof *unp);
-	lck_rw_lock_exclusive(unp_list_mtx);
+	lck_mtx_lock(unp_mutex);
 	LIST_INIT(&unp->unp_refs);
 	unp->unp_socket = so;
 	unp->unp_gencnt = ++unp_gencnt;
@@ -582,17 +567,16 @@ unp_attach(struct socket *so)
 	LIST_INSERT_HEAD(so->so_type == SOCK_DGRAM ? &unp_dhead
 			 : &unp_shead, unp, unp_link);
 	so->so_pcb = (caddr_t)unp;
-	lck_rw_done(unp_list_mtx);
+	lck_mtx_unlock(unp_mutex);
 	return (0);
 }
 
 static void
 unp_detach(struct unpcb *unp)
 {
-	lck_rw_lock_exclusive(unp_list_mtx);
+	lck_mtx_assert(unp_mutex, LCK_MTX_ASSERT_OWNED);
 	LIST_REMOVE(unp, unp_link);
 	unp->unp_gencnt = ++unp_gencnt;
-	lck_rw_done(unp_list_mtx);
 	--unp_count;
 	if (unp->unp_vnode) {
 		struct vnode *tvp = unp->unp_vnode;
@@ -638,17 +622,13 @@ unp_bind(
 	char buf[SOCK_MAXADDRLEN];
 
 	context.vc_proc = p;
-	context.vc_ucred = kauth_cred_proc_ref(p);	/* XXX kauth_cred_get() ??? proxy */
+	context.vc_ucred = p->p_ucred;	/* XXX kauth_cred_get() ??? proxy */
 
-	if (unp->unp_vnode != NULL) {
-		kauth_cred_unref(&context.vc_ucred);
+	if (unp->unp_vnode != NULL)
 		return (EINVAL);
-	}
 	namelen = soun->sun_len - offsetof(struct sockaddr_un, sun_path);
-	if (namelen <= 0) {
-		kauth_cred_unref(&context.vc_ucred);
+	if (namelen <= 0)
 		return EINVAL;
-	}
 	strncpy(buf, soun->sun_path, namelen);
 	buf[namelen] = 0;	/* null-terminate the string */
 	NDINIT(&nd, CREATE, FOLLOW | LOCKPARENT, UIO_SYSSPACE32,
@@ -656,7 +636,6 @@ unp_bind(
 /* SHOULD BE ABLE TO ADOPT EXISTING AND wakeup() ALA FIFO's */
 	error = namei(&nd);
 	if (error) {
-		kauth_cred_unref(&context.vc_ucred);
 		return (error);
 	}
 	dvp = nd.ni_dvp;
@@ -672,7 +651,6 @@ unp_bind(
 		vnode_put(dvp);
 		vnode_put(vp);
 
-		kauth_cred_unref(&context.vc_ucred);
 		return (EADDRINUSE);
 	}
 
@@ -692,7 +670,6 @@ unp_bind(
 	vnode_put(dvp);
 
 	if (error) {
-		kauth_cred_unref(&context.vc_ucred);
 		return (error);
 	}
 	vnode_ref(vp);	/* gain a longterm reference */
@@ -701,7 +678,6 @@ unp_bind(
 	unp->unp_addr = (struct sockaddr_un *)dup_sockaddr(nam, 1);
 	vnode_put(vp);		/* drop the iocount */
 
-	kauth_cred_unref(&context.vc_ucred);
 	return (0);
 }
 
@@ -721,21 +697,18 @@ unp_connect(
 	char buf[SOCK_MAXADDRLEN];
 
 	context.vc_proc = p;
-	context.vc_ucred = kauth_cred_proc_ref(p);	/* XXX kauth_cred_get() ??? proxy */
+	context.vc_ucred = p->p_ucred;	/* XXX kauth_cred_get() ??? proxy */
 	so2 = so3 = NULL;
 
 	len = nam->sa_len - offsetof(struct sockaddr_un, sun_path);
-	if (len <= 0) {
-		kauth_cred_unref(&context.vc_ucred);
+	if (len <= 0)
 		return EINVAL;
-	}
 	strncpy(buf, soun->sun_path, len);
 	buf[len] = 0;
 
 	NDINIT(&nd, LOOKUP, FOLLOW | LOCKLEAF, UIO_SYSSPACE32, CAST_USER_ADDR_T(buf), &context);
 	error = namei(&nd);
 	if (error) {
-		kauth_cred_unref(&context.vc_ucred);
 		return (error);
 	}
 	nameidone(&nd);
@@ -749,7 +722,7 @@ unp_connect(
 	if (error)
 		goto bad;
 	so2 = vp->v_socket;
-	if (so2 == 0 || so2->so_pcb == NULL ) {
+	if (so2 == 0) {
 		error = ECONNREFUSED;
 		goto bad;
 	}
@@ -793,7 +766,7 @@ unp_connect(
 		 * from its process structure at the time of connect()
 		 * (which is now).
 		 */
-		cru2x(context.vc_ucred, &unp3->unp_peercred);
+		cru2x(p->p_ucred, &unp3->unp_peercred);
 		unp3->unp_flags |= UNP_HAVEPC;
 		/*
 		 * The receiver's (server's) credentials are copied
@@ -814,12 +787,9 @@ unp_connect(
 	}
 	error = unp_connect2(so, so2);
 bad:
-	 
-	if (so2 != NULL) 
-			so2->so_usecount--;	/* release count on socket */
-	
+	if (so2 != NULL)
+		so2->so_usecount--; /* release count on socket */
 	vnode_put(vp);
-	kauth_cred_unref(&context.vc_ucred);
 	return (error);
 }
 
@@ -874,13 +844,12 @@ unp_disconnect(struct unpcb *unp)
 
 	if (unp2 == 0)
 		return;
+	lck_mtx_assert(unp_mutex, LCK_MTX_ASSERT_OWNED);
 	unp->unp_conn = 0;
 	switch (unp->unp_socket->so_type) {
 
 	case SOCK_DGRAM:
-		lck_rw_lock_exclusive(unp_list_mtx);
 		LIST_REMOVE(unp, unp_reflink);
-		lck_rw_done(unp_list_mtx);
 		unp->unp_socket->so_state &= ~SS_ISCONNECTED;
 		break;
 
@@ -910,7 +879,7 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	struct xunpgen xug;
 	struct unp_head *head;
 
-	lck_rw_lock_shared(unp_list_mtx);
+	lck_mtx_lock(unp_mutex);
 	head = ((intptr_t)arg1 == SOCK_DGRAM ? &unp_dhead : &unp_shead);
 
 	/*
@@ -921,12 +890,12 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		n = unp_count;
 		req->oldidx = 2 * (sizeof xug)
 			+ (n + n/8) * sizeof(struct xunpcb);
-		lck_rw_done(unp_list_mtx);
+		lck_mtx_unlock(unp_mutex);
 		return 0;
 	}
 
 	if (req->newptr != USER_ADDR_NULL) {
-		lck_rw_done(unp_list_mtx);
+		lck_mtx_unlock(unp_mutex);
 		return EPERM;
 	}
 
@@ -936,14 +905,13 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	gencnt = unp_gencnt;
 	n = unp_count;
 
-	bzero(&xug, sizeof(xug));
 	xug.xug_len = sizeof xug;
 	xug.xug_count = n;
 	xug.xug_gen = gencnt;
 	xug.xug_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xug, sizeof xug);
 	if (error) {
-		lck_rw_done(unp_list_mtx);
+		lck_mtx_unlock(unp_mutex);
 		return error;
 	}
 
@@ -951,13 +919,13 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	 * We are done if there is no pcb
 	 */
 	if (n == 0)  {
-	    lck_rw_done(unp_list_mtx);
+	    lck_mtx_unlock(unp_mutex);
 	    return 0;
 	}
 
 	MALLOC(unp_list, struct unpcb **, n * sizeof *unp_list, M_TEMP, M_WAITOK);
 	if (unp_list == 0) {
-		lck_rw_done(unp_list_mtx);
+		lck_mtx_unlock(unp_mutex);
 		return ENOMEM;
 	}
 	
@@ -973,8 +941,6 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		unp = unp_list[i];
 		if (unp->unp_gencnt <= gencnt) {
 			struct xunpcb xu;
-
-			bzero(&xu, sizeof(xu));
 			xu.xu_len = sizeof xu;
 			xu.xu_unpp = (struct  unpcb_compat *)unp;
 			/*
@@ -1001,15 +967,13 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		 * while we were processing this request, and it
 		 * might be necessary to retry.
 		 */
-		bzero(&xug, sizeof(xug));
-		xug.xug_len = sizeof xug;
 		xug.xug_gen = unp_gencnt;
 		xug.xug_sogen = so_gencnt;
 		xug.xug_count = unp_count;
 		error = SYSCTL_OUT(req, &xug, sizeof xug);
 	}
 	FREE(unp_list, M_TEMP);
-	lck_rw_done(unp_list_mtx);
+	lck_mtx_unlock(unp_mutex);
 	return error;
 }
 
@@ -1112,18 +1076,7 @@ unp_init(void)
 	LIST_INIT(&unp_dhead);
 	LIST_INIT(&unp_shead);
 	
-	/*
-	 * allocate lock group attribute and group for udp pcb mutexes
-	 */
-	unp_mtx_grp_attr = lck_grp_attr_alloc_init();
-
-	unp_mtx_grp = lck_grp_alloc_init("unp_list", unp_mtx_grp_attr);
-		
-	unp_mtx_attr = lck_attr_alloc_init();
-
-	if ((unp_list_mtx = lck_rw_alloc_init(unp_mtx_grp, unp_mtx_attr)) == NULL)
-		return;	/* pretty much dead if this fails... */
-
+	unp_mutex = localdomain.dom_mtx;
 }
 
 #ifndef MIN
@@ -1380,9 +1333,8 @@ unp_listen(
 	struct unpcb *unp,
 	struct proc *p)
 {
-	kauth_cred_t safecred = kauth_cred_proc_ref(p);
-	cru2x(safecred, &unp->unp_peercred);
-	kauth_cred_unref(&safecred);
+
+	cru2x(p->p_ucred, &unp->unp_peercred);
 	unp->unp_flags |= UNP_HAVEPCCACHED;
 	return (0);
 }

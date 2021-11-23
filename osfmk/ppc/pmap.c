@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -237,14 +231,8 @@ pmap_map(
 	vm_offset_t va,
 	vm_offset_t spa,
 	vm_offset_t epa,
-	vm_prot_t prot,
-	unsigned int flags)
+	vm_prot_t prot)
 {
-	unsigned int mflags;
-	mflags = 0;										/* Make sure this is initialized to nothing special */
-	if(!(flags & VM_WIMG_USE_DEFAULT)) {			/* Are they supplying the attributes? */
-		mflags = mmFlgUseAttr | (flags & VM_MEM_GUARDED) | ((flags & VM_MEM_NOT_CACHEABLE) >> 1);	/* Convert to our mapping_make flags */
-	}
 
 	addr64_t colladr;
 	
@@ -252,8 +240,7 @@ pmap_map(
 
 	assert(epa > spa);
 
-	colladr = mapping_make(kernel_pmap, (addr64_t)va, (ppnum_t)(spa >> 12),
-			       (mmFlgBlock | mmFlgPerm), (epa - spa) >> 12, (prot & VM_PROT_ALL) );
+	colladr = mapping_make(kernel_pmap, (addr64_t)va, (ppnum_t)(spa >> 12), (mmFlgBlock | mmFlgPerm), (epa - spa) >> 12, prot & VM_PROT_ALL);
 
 	if(colladr) {											/* Was something already mapped in the range? */
 		panic("pmap_map: attempt to map previously mapped range - va = %08X, pa = %08X, epa = %08X, collision = %016llX\n",
@@ -272,30 +259,23 @@ void
 pmap_map_physical()
 {
 	unsigned region;
-	uint64_t msize, size;
-	addr64_t paddr, vaddr, colladdr;
 
 	/* Iterate over physical memory regions, block mapping each into the kernel's address map */	
 	for (region = 0; region < (unsigned)pmap_mem_regions_count; region++) {
-		paddr = ((addr64_t)pmap_mem_regions[region].mrStart << 12);	/* Get starting physical address */
-		size  = (((addr64_t)pmap_mem_regions[region].mrEnd + 1) << 12) - paddr;
-
-		vaddr = paddr + lowGlo.lgPMWvaddr;					/* Get starting virtual address */
-
+		addr64_t paddr = ((addr64_t)pmap_mem_regions[region].mrStart << 12);
+		addr64_t size  = (((addr64_t)pmap_mem_regions[region].mrEnd + 1) << 12) - paddr;
 		while (size > 0) {
-			
-			msize = ((size > 0x0000020000000000ULL) ? 0x0000020000000000ULL : size);	/* Get size, but no more than 2TBs */
-			
-			colladdr = mapping_make(kernel_pmap, vaddr, (paddr >> 12),
-				(mmFlgBlock | mmFlgPerm), (msize >> 12),
-				(VM_PROT_READ | VM_PROT_WRITE));
+			/* Block mappings are limited to 256M, so we map in blocks of up to 256M */
+			addr64_t vaddr = paddr + lowGlo.lgPMWvaddr;
+			unsigned msize = ((size > 0x10000000)? 0x10000000 : size);
+			addr64_t colladdr = mapping_make(kernel_pmap, vaddr, (paddr >> 12),
+			                                 (mmFlgBlock | mmFlgPerm), (msize >> 12),
+			                                 (VM_PROT_READ | VM_PROT_WRITE));  
 			if (colladdr) {
-				panic ("pmap_map_physical: mapping failure - va = %016llX, pa = %08X, size = %08X, collision = %016llX\n",
+				panic ("pmap_map_physical: collision with previously mapped range - va = %016llX, pa = %08X, size = %08X, collision = %016llX\n",
 					   vaddr, (paddr >> 12), (msize >> 12), colladdr);
 			}
-
-			vaddr = vaddr + (uint64_t)msize;				/* Point to the next virtual addr */
-			paddr = paddr + (uint64_t)msize;				/* Point to the next physical addr */
+			paddr += msize;
 			size  -= msize;
 		}
 	}
@@ -310,28 +290,19 @@ pmap_map_physical()
 void
 pmap_map_iohole(addr64_t paddr, addr64_t size)
 {
-
-	addr64_t vaddr, colladdr, msize;
-	uint32_t psize;
-
-	vaddr = paddr + lowGlo.lgPMWvaddr;						/* Get starting virtual address */		
-
 	while (size > 0) {
-
-		msize = ((size > 0x0000020000000000ULL) ? 0x0000020000000000ULL : size);	/* Get size, but no more than 2TBs */
-		
-		colladdr = mapping_make(kernel_pmap, vaddr, (paddr >> 12),
-			(mmFlgBlock | mmFlgPerm | mmFlgGuarded | mmFlgCInhib), (msize >> 12),
-			(VM_PROT_READ | VM_PROT_WRITE));
+		addr64_t vaddr = paddr + lowGlo.lgPMWvaddr;
+		unsigned msize = ((size > 0x10000000)? 0x10000000 : size);
+		addr64_t colladdr = mapping_make(kernel_pmap, vaddr, (paddr >> 12),
+										 (mmFlgBlock | mmFlgPerm | mmFlgGuarded | mmFlgCInhib), (msize >> 12),
+										 (VM_PROT_READ | VM_PROT_WRITE));
 		if (colladdr) {
-			panic ("pmap_map_iohole: mapping failed - va = %016llX, pa = %08X, size = %08X, collision = %016llX\n",
-				   vaddr, (paddr >> 12), (msize >> 12), colladdr);
+			panic ("pmap_map_iohole: collision with previously mapped range - va = %016llX, pa = %08X, size = %08X, collision = %016llX\n",
+					vaddr, (paddr >> 12), (msize >> 12), colladdr);
 		}
-
-		vaddr = vaddr + (uint64_t)msize;					/* Point to the next virtual addr */
-		paddr = paddr + (uint64_t)msize;					/* Point to the next physical addr */
+		paddr += msize;
 		size  -= msize;
-	}	
+	}
 }
 
 /*
@@ -370,7 +341,6 @@ pmap_bootstrap(uint64_t msize, vm_offset_t *first_avail, unsigned int kmapsize)
 	kernel_pmap->pmap_link.prev = (queue_t)kernel_pmap;		/* Set up anchor reverse */
 	kernel_pmap->ref_count = 1;
 	kernel_pmap->pmapFlags = pmapKeyDef;					/* Set the default keys */
-	kernel_pmap->pmapFlags |= pmapNXdisabled;
 	kernel_pmap->pmapCCtl = pmapCCtlVal;					/* Initialize cache control */
 	kernel_pmap->space = PPC_SID_KERNEL;
 	kernel_pmap->pmapvr = 0;								/* Virtual = Real  */
@@ -539,7 +509,7 @@ pmap_bootstrap(uint64_t msize, vm_offset_t *first_avail, unsigned int kmapsize)
 
 	/* Map V=R the page tables */
 	pmap_map(first_used_addr, first_used_addr,
-		 round_page(first_used_addr + size), VM_PROT_READ | VM_PROT_WRITE, VM_WIMG_USE_DEFAULT);
+		 round_page(first_used_addr + size), VM_PROT_READ | VM_PROT_WRITE);
 
 	*first_avail = round_page(first_used_addr + size);		/* Set next available page */
 	first_free_virt = *first_avail;							/* Ditto */
@@ -662,7 +632,7 @@ void pmap_virtual_space(
  * only, and is bounded by that size.
  */
 pmap_t
-pmap_create(vm_map_size_t size, __unused boolean_t is_64bit)
+pmap_create(vm_map_size_t size)
 {
 	pmap_t pmap, ckpmap, fore;
 	int s;
@@ -950,7 +920,7 @@ pmap_page_protect(
 	mapping_t			*mp;
 
 
-	switch (prot & VM_PROT_ALL) {
+	switch (prot) {
 		case VM_PROT_READ:
 		case VM_PROT_READ|VM_PROT_EXECUTE:
 			remove = FALSE;
@@ -997,7 +967,7 @@ pmap_page_protect(
  *	physical page.  
  */
  
-	mapping_protect_phys(pa, (prot & VM_PROT_ALL) );		/* Change protection of all mappings to page. */
+	mapping_protect_phys(pa, prot & VM_PROT_ALL);	/* Change protection of all mappings to page. */
 
 }
 
@@ -1075,7 +1045,7 @@ void pmap_protect(
 	endva = eva & -4096LL;						/* Round end down to a page */
 
 	while(1) {									/* Go until we finish the range */
-		mapping_protect(pmap, va, (prot & VM_PROT_ALL), &va);	/* Change the protection and see what's next */
+		mapping_protect(pmap, va, prot & VM_PROT_ALL, &va);	/* Change the protection and see what's next */
 		if((va == 0) || (va >= endva)) break;	/* End loop if we finish range or run off the end */
 	}
 
@@ -1116,7 +1086,7 @@ pmap_enter(pmap_t pmap, vm_map_offset_t va, ppnum_t pa, vm_prot_t prot,
 
 	while(1) {										/* Keep trying the enter until it goes in */
 	
-		colva = mapping_make(pmap, va, pa, mflags, 1, (prot & VM_PROT_ALL) );		/* Enter the mapping into the pmap */
+		colva = mapping_make(pmap, va, pa, mflags, 1, prot & VM_PROT_ALL);	/* Enter the mapping into the pmap */
 		
 		if(!colva) break;							/* If there were no collisions, we are done... */
 		
@@ -1138,13 +1108,11 @@ pmap_enter(pmap_t pmap, vm_map_offset_t va, ppnum_t pa, vm_prot_t prot,
  *		not be changed.  The block must be unmapped and then remapped with the new stuff.
  *		We also do not keep track of reference or change flags.
  *
- *		Any block that is larger than 256MB must be a multiple of 32MB.  We panic if it is not.
- *
  *		Note that pmap_map_block_rc is the same but doesn't panic if collision.
  *
  */
  
-void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot_t prot, int attr, unsigned int flags) {	/* Map an autogenned block */
+void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, vm_size_t size, vm_prot_t prot, int attr, unsigned int flags) {	/* Map an autogenned block */
 
 	unsigned int		mflags;
 	addr64_t			colva;
@@ -1157,19 +1125,20 @@ void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot
 //	kprintf("pmap_map_block: (%08X) va = %016llX, pa = %08X, size = %08X, prot = %08X, attr = %08X, flags = %08X\n", 	/* (BRINGUP) */
 //		current_thread(), va, pa, size, prot, attr, flags);	/* (BRINGUP) */
 
+
 	mflags = mmFlgBlock | mmFlgUseAttr | (attr & VM_MEM_GUARDED) | ((attr & VM_MEM_NOT_CACHEABLE) >> 1);	/* Convert to our mapping_make flags */
 	if(flags) mflags |= mmFlgPerm;					/* Mark permanent if requested */
 	
-	colva = mapping_make(pmap, va, pa, mflags, size, prot);	/* Enter the mapping into the pmap */
+	colva = mapping_make(pmap, va, pa, mflags, (size >> 12), prot);	/* Enter the mapping into the pmap */
 	
 	if(colva) {										/* If there was a collision, panic */
-		panic("pmap_map_block: mapping error %d, pmap = %08X, va = %016llX\n", (uint32_t)(colva & mapRetCode), pmap, va);
+		panic("pmap_map_block: collision at %016llX, pmap = %08X\n", colva, pmap);
 	}
 	
 	return;											/* Return */
 }
 
-int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot_t prot, int attr, unsigned int flags) {	/* Map an autogenned block */
+int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, vm_size_t size, vm_prot_t prot, int attr, unsigned int flags) {	/* Map an autogenned block */
 
 	unsigned int		mflags;
 	addr64_t			colva;
@@ -1181,8 +1150,8 @@ int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_pr
 
 	mflags = mmFlgBlock | mmFlgUseAttr | (attr & VM_MEM_GUARDED) | ((attr & VM_MEM_NOT_CACHEABLE) >> 1);	/* Convert to our mapping_make flags */
 	if(flags) mflags |= mmFlgPerm;					/* Mark permanent if requested */
-
-	colva = mapping_make(pmap, va, pa, mflags, size, prot);	/* Enter the mapping into the pmap */
+	
+	colva = mapping_make(pmap, va, pa, mflags, (size >> 12), prot);	/* Enter the mapping into the pmap */
 	
 	if(colva) return 0;								/* If there was a collision, fail */
 	
@@ -1300,29 +1269,6 @@ pmap_attribute(
 	return KERN_INVALID_ARGUMENT;
 
 }
-
-
-
-unsigned int pmap_cache_attributes(ppnum_t pgn) {
-
-        unsigned int	flags;
-	struct phys_entry * pp;
-
-	// Find physical address
-	if ((pp = pmap_find_physentry(pgn))) {
-	        // Use physical attributes as default
-	        // NOTE: DEVICE_PAGER_FLAGS are made to line up
-	        flags = VM_MEM_COHERENT;				/* We only support coherent memory */
-		if (pp->ppLink & ppG) flags |= VM_MEM_GUARDED;		/* Add in guarded if it is */
-		if (pp->ppLink & ppI) flags |= VM_MEM_NOT_CACHEABLE;	/* Add in cache inhibited if so */
-	} else
-	        // If no physical, just hard code attributes
-	        flags = VM_WIMG_IO;
-
-	return (flags);
-}
-
-
 
 /*
  * pmap_attribute_cache_sync(vm_offset_t pa)
@@ -1679,7 +1625,7 @@ void pmap_switch(pmap_t map)
  *	subord = the pmap that goes into the grand
  *	vstart  = start of range in pmap to be inserted
  *	nstart  = start of range in pmap nested pmap
- *	size   = Size of nest area (up to 2TB)
+ *	size   = Size of nest area (up to 16TB)
  *
  *	Inserts a pmap into another.  This is used to implement shared segments.
  *	On the current PPC processors, this is limited to segment (256MB) aligned
@@ -1687,6 +1633,8 @@ void pmap_switch(pmap_t map)
  *
  *	We actually kinda allow recursive nests.  The gating factor is that we do not allow 
  *	nesting on top of something that is already mapped, i.e., the range must be empty.
+ *
+ *	
  *
  *	Note that we depend upon higher level VM locks to insure that things don't change while
  *	we are doing this.  For example, VM should not be doing any pmap enters while it is nesting
@@ -1700,8 +1648,9 @@ kern_return_t pmap_nest(pmap_t grand, pmap_t subord, addr64_t vstart, addr64_t n
 	int nlists;
 	mapping_t *mp;
 	
+	
 	if(size & 0x0FFFFFFFULL) return KERN_INVALID_VALUE;	/* We can only do this for multiples of 256MB */
-	if((size >> 25) > 65536)  return KERN_INVALID_VALUE;	/* Max size we can nest is 2TB */
+	if((size >> 28) > 65536)  return KERN_INVALID_VALUE;	/* Max size we can nest is 16TB */
 	if(vstart & 0x0FFFFFFFULL) return KERN_INVALID_VALUE;	/* We can only do this aligned to 256MB */
 	if(nstart & 0x0FFFFFFFULL) return KERN_INVALID_VALUE;	/* We can only do this aligned to 256MB */
 	
@@ -1709,13 +1658,13 @@ kern_return_t pmap_nest(pmap_t grand, pmap_t subord, addr64_t vstart, addr64_t n
 		panic("pmap_nest: size is invalid - %016llX\n", size);
 	}
 	
-	msize = (size >> 25) - 1;							/* Change size to blocks of 32MB */
+	msize = (size >> 28) - 1;							/* Change size to blocks of 256MB */
 	
 	nlists = mapSetLists(grand);						/* Set number of lists this will be on */
 
 	mp = mapping_alloc(nlists);							/* Get a spare mapping block */
 	
-	mp->mpFlags = 0x01000000 | mpNest | mpPerm | mpBSu | nlists;	/* Make this a permanent nested pmap with a 32MB basic size unit */
+	mp->mpFlags = 0x01000000 | mpNest | mpPerm | nlists;
 														/* Set the flags. Make sure busy count is 1 */
 	mp->mpSpace = subord->space;						/* Set the address space/pmap lookup ID */
 	mp->u.mpBSize = msize;								/* Set the size */
@@ -1851,10 +1800,10 @@ void MapUserMemoryWindowInit(void) {
 	
 	mp = mapping_alloc(nlists);							/* Get a spare mapping block */
 
-	mp->mpFlags = 0x01000000 | mpLinkage | mpPerm | mpBSu | nlists;	/* Make this a permanent nested pmap with a 32MB basic size unit */
+	mp->mpFlags = 0x01000000 | mpLinkage | mpPerm | nlists;
 														/* Set the flags. Make sure busy count is 1 */
 	mp->mpSpace = kernel_pmap->space;					/* Set the address space/pmap lookup ID */
-	mp->u.mpBSize = 15;									/* Set the size to 2 segments in 32MB chunks - 1 */
+	mp->u.mpBSize = 1;									/* Set the size to 2 segments */
 	mp->mpPte = 0;										/* Means nothing */
 	mp->mpPAddr = 0;									/* Means nothing */
 	mp->mpVAddr = lowGlo.lgUMWvaddr;					/* Set the address range we cover */
@@ -1993,7 +1942,7 @@ void pmap_init_sharedpage(vm_offset_t cpg){
 	addr64_t cva, cpoff;
 	ppnum_t cpphys;
 	
-	sharedPmap = pmap_create(0, FALSE);				/* Get a pmap to hold the common segment */
+	sharedPmap = pmap_create(0);				/* Get a pmap to hold the common segment */
 	if(!sharedPmap) {							/* Check for errors */
 		panic("pmap_init_sharedpage: couldn't make sharedPmap\n");
 	}
@@ -2006,7 +1955,7 @@ void pmap_init_sharedpage(vm_offset_t cpg){
 		}
 		
 		cva = mapping_make(sharedPmap, (addr64_t)((uint32_t)_COMM_PAGE_BASE_ADDRESS) + cpoff,
-			cpphys, mmFlgPerm, 1, VM_PROT_READ | VM_PROT_EXECUTE);		/* Map the page read/execute only */
+			cpphys, mmFlgPerm, 1, VM_PROT_READ);	/* Map the page read only */
 		if(cva) {								/* Check for errors */
 			panic("pmap_init_sharedpage: couldn't map commpage page - cva = %016llX\n", cva);
 		}
@@ -2094,12 +2043,8 @@ coredumpok(
 	return TRUE;
 }
 
-
 /*
- * disable no-execute capability on
- * the specified pmap
- */
-void pmap_disable_NX(pmap_t pmap) {
-  
-        pmap->pmapFlags |= pmapNXdisabled;
-}
+;;; Local Variables: ***
+;;; tab-width:4 ***
+;;; End: ***
+*/

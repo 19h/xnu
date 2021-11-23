@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 
 #define __KPI__
@@ -468,26 +462,12 @@ extern void in_delayed_cksum_offset(struct mbuf *m, int ip_offset);
 void
 mbuf_outbound_finalize(mbuf_t mbuf, u_long protocol_family, size_t protocol_offset)
 {
-	if ((mbuf->m_pkthdr.csum_flags &
-		 (CSUM_DELAY_DATA | CSUM_DELAY_IP | CSUM_TCP_SUM16)) == 0)
+	if ((mbuf->m_pkthdr.csum_flags & (CSUM_DELAY_DATA | CSUM_DELAY_IP)) == 0)
 		return;
 	
 	/* Generate the packet in software, client needs it */
 	switch (protocol_family) {
 		case PF_INET:
-			if (mbuf->m_pkthdr.csum_flags & CSUM_TCP_SUM16) {
-				/*
-				 * If you're wondering where this lovely code comes
-				 * from, we're trying to undo what happens in ip_output.
-				 * Look for CSUM_TCP_SUM16 in ip_output.
-				 */
-				u_int16_t	first, second;
-				mbuf->m_pkthdr.csum_flags &= ~CSUM_TCP_SUM16;
-				mbuf->m_pkthdr.csum_flags |= CSUM_TCP;
-				first = mbuf->m_pkthdr.csum_data >> 16;
-				second = mbuf->m_pkthdr.csum_data & 0xffff;
-				mbuf->m_pkthdr.csum_data = first - second;
-			}
 			if (mbuf->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
 				in_delayed_cksum_offset(mbuf, protocol_offset);
 			}
@@ -678,10 +658,12 @@ mbuf_tag_id_find_internal(
 		lck_mtx_t		*new_lock = NULL;
 		
 		grp_attrib = lck_grp_attr_alloc_init();
+		lck_grp_attr_setdefault(grp_attrib);
 		lck_group = lck_grp_alloc_init("mbuf_tag_allocate_id", grp_attrib);
 		lck_grp_attr_free(grp_attrib);
 		lck_attrb = lck_attr_alloc_init();
-
+		lck_attr_setdefault(lck_attrb);
+		lck_attr_setdebug(lck_attrb);
 		new_lock = lck_mtx_alloc_init(lck_group, lck_attrb);
 		if (!OSCompareAndSwap((UInt32)0, (UInt32)new_lock, (UInt32*)&mtag_id_lock)) {
 			/*

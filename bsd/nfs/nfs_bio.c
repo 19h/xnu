@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
@@ -160,6 +154,7 @@ void
 nfs_nbinit(void)
 {
 	nfs_buf_lck_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_attr_setstat(nfs_buf_lck_grp_attr);
 	nfs_buf_lck_grp = lck_grp_alloc_init("nfs_buf", nfs_buf_lck_grp_attr);
 
 	nfs_buf_lck_attr = lck_attr_alloc_init();
@@ -259,11 +254,13 @@ nfs_buf_freeup(int timer)
 	while ((fbp = TAILQ_FIRST(&nfsbuffreeup))) {
 		TAILQ_REMOVE(&nfsbuffreeup, fbp, nb_free);
 		/* nuke any creds */
-		if (IS_VALID_CRED(fbp->nb_rcred)) {
-			kauth_cred_unref(&fbp->nb_rcred);
+		if (fbp->nb_rcred != NOCRED) {
+			kauth_cred_rele(fbp->nb_rcred);
+			fbp->nb_rcred = NOCRED;
 		}
-		if (IS_VALID_CRED(fbp->nb_wcred)) {
-			kauth_cred_unref(&fbp->nb_wcred);
+		if (fbp->nb_wcred != NOCRED) {
+			kauth_cred_rele(fbp->nb_wcred);
+			fbp->nb_wcred = NOCRED;
 		}
 		/* if buf was NB_META, dump buffer */
 		if (ISSET(fbp->nb_flags, NB_META) && fbp->nb_data)
@@ -583,8 +580,6 @@ nfs_buf_delwri_push(int locked)
 			nfs_buf_drop(bp);
 			continue;
 		}
-		if (ISSET(bp->nb_flags, NB_NEEDCOMMIT))
-			nfs_buf_check_write_verifier(np, bp);
 		if (ISSET(bp->nb_flags, NB_NEEDCOMMIT)) {
 			/* put buffer at end of delwri list */
 			TAILQ_INSERT_TAIL(&nfsbufdelwri, bp, nb_free);
@@ -633,9 +628,9 @@ nfs_buf_get(
 	struct nfsbuf **bpp)
 {
 	struct nfsnode *np = VTONFS(vp);
-	struct nfsmount *nmp = VFSTONFS(vnode_mount(vp));
 	struct nfsbuf *bp;
 	int biosize, bufsize;
+	kauth_cred_t cred;
 	int slpflag = PCATCH;
 	int operation = (flags & NBLK_OPMASK);
 	int error = 0;
@@ -645,14 +640,10 @@ nfs_buf_get(
 	*bpp = NULL;
 
 	bufsize = size;
-	if (bufsize > NFS_MAXBSIZE)
-		panic("nfs_buf_get: buffer larger than NFS_MAXBSIZE requested");
+	if (bufsize > MAXBSIZE)
+		panic("nfs_buf_get: buffer larger than MAXBSIZE requested");
 
-	if (!nmp) {
-		FSDBG_BOT(541, vp, blkno, 0, ENXIO);
-		return (ENXIO);
-	}
-	biosize = nmp->nm_biosize;
+	biosize = vfs_statfs(vnode_mount(vp))->f_iosize;
 
 	if (UBCINVALID(vp) || !UBCINFOEXISTS(vp)) {
 		operation = NBLK_META;
@@ -785,11 +776,15 @@ loop:
 		}
 		LIST_REMOVE(bp, nb_hash);
 		/* nuke any creds we're holding */
-		if (IS_VALID_CRED(bp->nb_rcred)) {
-			kauth_cred_unref(&bp->nb_rcred);
+		cred = bp->nb_rcred;
+		if (cred != NOCRED) {
+			bp->nb_rcred = NOCRED; 
+			kauth_cred_rele(cred);
 		}
-		if (IS_VALID_CRED(bp->nb_wcred)) {
-			kauth_cred_unref(&bp->nb_wcred);
+		cred = bp->nb_wcred;
+		if (cred != NOCRED) {
+			bp->nb_wcred = NOCRED; 
+			kauth_cred_rele(cred);
 		}
 		/* if buf will no longer be NB_META, dump old buffer */
 		if (operation == NBLK_META) {
@@ -808,7 +803,6 @@ loop:
 		bp->nb_dirtyoff = bp->nb_dirtyend = 0;
 		bp->nb_valid = 0;
 		bp->nb_dirty = 0;
-		bp->nb_verf = 0;
 	} else {
 		/* no buffer to reuse */
 		if ((nfsbufcnt < nfsbufmax) &&
@@ -979,10 +973,8 @@ nfs_buf_release(struct nfsbuf *bp, int freeup)
 				panic("ubc_upl_unmap failed");
 			bp->nb_data = NULL;
 		}
-		/* abort pages if error, invalid, or non-needcommit nocache */
-		if ((bp->nb_flags & (NB_ERROR | NB_INVAL)) ||
-		    ((bp->nb_flags & NB_NOCACHE) && !(bp->nb_flags & (NB_NEEDCOMMIT | NB_DELWRI)))) {
-			if (bp->nb_flags & (NB_READ | NB_INVAL | NB_NOCACHE))
+		if (bp->nb_flags & (NB_ERROR | NB_INVAL | NB_NOCACHE)) {
+			if (bp->nb_flags & (NB_READ | NB_INVAL))
 				upl_flags = UPL_ABORT_DUMP_PAGES;
 			else
 				upl_flags = 0;
@@ -1011,9 +1003,10 @@ pagelist_cleanup_done:
 		/* was this the last buffer in the file? */
 		if (NBOFF(bp) + bp->nb_bufsize > (off_t)(VTONFS(vp)->n_size)) {
 			/* if so, invalidate all pages of last buffer past EOF */
+			int biosize = vfs_statfs(vnode_mount(vp))->f_iosize;
 			off_t start, end;
 			start = trunc_page_64(VTONFS(vp)->n_size) + PAGE_SIZE_64;
-			end = trunc_page_64(NBOFF(bp) + bp->nb_bufsize);
+			end = trunc_page_64(NBOFF(bp) + biosize);
 			if (end > start) {
 				if (!(rv = ubc_sync_range(vp, start, end, UBC_INVALIDATE)))
 					printf("nfs_buf_release(): ubc_sync_range failed!\n");
@@ -1038,9 +1031,8 @@ pagelist_cleanup_done:
 		wakeup_buffer = 1;
 	}
 
-	/* If it's non-needcommit nocache, or an error, mark it invalid. */
-	if (ISSET(bp->nb_flags, NB_ERROR) ||
-	    (ISSET(bp->nb_flags, NB_NOCACHE) && !ISSET(bp->nb_flags, (NB_NEEDCOMMIT | NB_DELWRI))))
+	/* If it's not cacheable, or an error, mark it invalid. */
+	if (ISSET(bp->nb_flags, (NB_NOCACHE|NB_ERROR)))
 		SET(bp->nb_flags, NB_INVAL);
 
 	if ((bp->nb_bufsize <= 0) || ISSET(bp->nb_flags, NB_INVAL)) {
@@ -1097,7 +1089,7 @@ pagelist_cleanup_done:
 	NFSBUFCNTCHK(1);
 
 	/* Unlock the buffer. */
-	CLR(bp->nb_flags, (NB_ASYNC | NB_STABLE | NB_IOD));
+	CLR(bp->nb_flags, (NB_ASYNC | NB_NOCACHE | NB_STABLE | NB_IOD));
 	CLR(bp->nb_lflags, NBL_BUSY);
 
 	FSDBG_BOT(548, bp, NBOFF(bp), bp->nb_flags, bp->nb_data);
@@ -1235,29 +1227,6 @@ nfs_buf_write_delayed(struct nfsbuf *bp, proc_t p)
 	nfs_buf_release(bp, 1);
 	FSDBG_BOT(551, bp, NBOFF(bp), bp->nb_flags, 0);
 	return;
-}
-
-/*
- * Check that a "needcommit" buffer can still be committed.
- * If the write verifier has changed, we need to clear the
- * the needcommit flag.
- */
-void
-nfs_buf_check_write_verifier(struct nfsnode *np, struct nfsbuf *bp)
-{
-	struct nfsmount *nmp;
-
-	if (!ISSET(bp->nb_flags, NB_NEEDCOMMIT))
-		return;
-
-	nmp = VFSTONFS(vnode_mount(NFSTOV(np)));
-	if (!nmp || (bp->nb_verf == nmp->nm_verf))
-		return;
-
-	/* write verifier changed, clear commit flag */
-	bp->nb_flags &= ~NB_NEEDCOMMIT;
-	np->n_needcommitcnt--;
-	CHECK_NEEDCOMMITCNT(np);
 }
 
 /*
@@ -1449,10 +1418,9 @@ nfs_bioread(
 		return (EINVAL);
 	}
 
-	biosize = nmp->nm_biosize;
 	if ((nmp->nm_flag & NFSMNT_NFSV3) && !(nmp->nm_state & NFSSTA_GOTFSINFO))
 		nfs_fsinfo(nmp, vp, cred, p);
-
+	biosize = vfs_statfs(vnode_mount(vp))->f_iosize;
 	vtype = vnode_vtype(vp);
 	/*
 	 * For nfs, cache consistency can only be maintained approximately.
@@ -1705,7 +1673,7 @@ again:
 				/* so write the buffer out and try again */
 				CLR(bp->nb_flags, (NB_DONE | NB_ERROR | NB_INVAL));
 				SET(bp->nb_flags, NB_ASYNC);
-				if (!IS_VALID_CRED(bp->nb_wcred))  {
+				if (bp->nb_wcred == NOCRED)  {
 					kauth_cred_ref(cred);
 					bp->nb_wcred = cred;
 				}
@@ -2014,11 +1982,9 @@ nfs_write(ap)
 		FSDBG_BOT(515, vp, uio->uio_offset, uio_uio_resid(uio), np->n_error);
 		return (np->n_error);
 	}
-
-	biosize = nmp->nm_biosize;
-	if ((nmp->nm_flag & NFSMNT_NFSV3) && !(nmp->nm_state & NFSSTA_GOTFSINFO))
-		nfs_fsinfo(nmp, vp, cred, p);
-
+	if ((nmp->nm_flag & NFSMNT_NFSV3) &&
+	    !(nmp->nm_state & NFSSTA_GOTFSINFO))
+		(void)nfs_fsinfo(nmp, vp, cred, p);
 	if (ioflag & (IO_APPEND | IO_SYNC)) {
 		if (np->n_flag & NMODIFIED) {
 			NATTRINVALIDATE(np);
@@ -2050,6 +2016,8 @@ nfs_write(ap)
 		FSDBG_BOT(515, vp, uio->uio_offset, uio_uio_resid(uio), 0);
 		return (0);
 	}
+
+	biosize = vfs_statfs(vnode_mount(vp))->f_iosize;
 
 	if (vnode_isnocache(vp)) {
 		if (!(np->n_flag & NNOCACHE)) {
@@ -2091,9 +2059,9 @@ again:
 		NFS_BUF_MAP(bp);
 
 		if (np->n_flag & NNOCACHE)
-			SET(bp->nb_flags, NB_NOCACHE);
+			SET(bp->nb_flags, (NB_NOCACHE|NB_STABLE));
 
-		if (!IS_VALID_CRED(bp->nb_wcred)) {
+		if (bp->nb_wcred == NOCRED) {
 			kauth_cred_ref(cred);
 			bp->nb_wcred = cred;
 		}
@@ -2233,7 +2201,7 @@ again:
 				char *d;
 				int i;
 				if (np->n_flag & NNOCACHE)
-					SET(eofbp->nb_flags, NB_NOCACHE);
+					SET(eofbp->nb_flags, (NB_NOCACHE|NB_STABLE));
 				NFS_BUF_MAP(eofbp);
 				FSDBG(516, eofbp, eofoff, biosize - eofoff, 0xe0fff01e);
 				d = eofbp->nb_data;
@@ -2498,14 +2466,9 @@ again:
 
 	} while (uio_uio_resid(uio) > 0 && n > 0);
 
-	if (np->n_flag & NNOCACHE) {
-		/* make sure all the buffers are flushed out */
-		error = nfs_flush(vp, MNT_WAIT, cred, p, 0);
-	}
-
 	np->n_flag &= ~NWRBUSY;
-	FSDBG_BOT(515, vp, uio->uio_offset, uio_uio_resid(uio), error);
-	return (error);
+	FSDBG_BOT(515, vp, uio->uio_offset, uio_uio_resid(uio), 0);
+	return (0);
 }
 
 /*
@@ -2590,7 +2553,7 @@ nfs_vinvalbuf_internal(
 				}
 				bp->nb_dirty &= (1 << (round_page_32(end)/PAGE_SIZE)) - 1;
 				/* also make sure we'll have a credential to do the write */
-				if (mustwrite && !IS_VALID_CRED(bp->nb_wcred) && !IS_VALID_CRED(cred)) {
+				if (mustwrite && (bp->nb_wcred == NOCRED) && (cred == NOCRED)) {
 					printf("nfs_vinvalbuf: found dirty buffer with no write creds\n");
 					mustwrite = 0;
 				}
@@ -2603,7 +2566,7 @@ nfs_vinvalbuf_internal(
 					/* (NB_NOCACHE indicates buffer should be discarded) */
 					CLR(bp->nb_flags, (NB_DONE | NB_ERROR | NB_INVAL | NB_ASYNC));
 					SET(bp->nb_flags, NB_STABLE | NB_NOCACHE);
-					if (!IS_VALID_CRED(bp->nb_wcred)) {
+					if (bp->nb_wcred == NOCRED) {
 						kauth_cred_ref(cred);
 						bp->nb_wcred = cred;
 					}
@@ -2842,13 +2805,13 @@ again:
 		}
 
 		if (ISSET(bp->nb_flags, NB_READ)) {
-			if (!IS_VALID_CRED(bp->nb_rcred) && IS_VALID_CRED(cred)) {
+			if (bp->nb_rcred == NOCRED && cred != NOCRED) {
 				kauth_cred_ref(cred);
 				bp->nb_rcred = cred;
 			}
 		} else {
 			SET(bp->nb_flags, NB_WRITEINPROG);
-			if (!IS_VALID_CRED(bp->nb_wcred) && IS_VALID_CRED(cred)) {
+			if (bp->nb_wcred == NOCRED && cred != NOCRED) {
 				kauth_cred_ref(cred);
 				bp->nb_wcred = cred;
 			}
@@ -2884,7 +2847,7 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 	vnode_t vp;
 	struct nfsnode *np;
 	struct nfsmount *nmp;
-	int error = 0, diff, len, iomode, invalidate = 0;
+	int error = 0, diff, len, iomode, must_commit = 0, invalidate = 0;
 	struct uio uio;
 	struct iovec_32 io;
 	enum vtype vtype;
@@ -3040,8 +3003,6 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 	     * an actual write will have to be done.
 	     * If NB_WRITEINPROG is already set, then push it with a write anyhow.
 	     */
-	    if (ISSET(bp->nb_flags, NB_NEEDCOMMIT))
-	    	nfs_buf_check_write_verifier(np, bp);
 	    if ((bp->nb_flags & (NB_NEEDCOMMIT | NB_WRITEINPROG)) == NB_NEEDCOMMIT) {
 		doff = NBOFF(bp) + bp->nb_dirtyoff;
 		SET(bp->nb_flags, NB_WRITEINPROG);
@@ -3053,7 +3014,8 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 		    CLR(bp->nb_flags, NB_NEEDCOMMIT);
 		    np->n_needcommitcnt--;
 		    CHECK_NEEDCOMMITCNT(np);
-		}
+		} else if (error == NFSERR_STALEWRITEVERF)
+		    nfs_clearcommit(vnode_mount(vp));
 	    }
 
 	    if (!error && bp->nb_dirtyend > 0) {
@@ -3094,10 +3056,10 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 
 		/* compare page mask to nb_dirty; if there are other dirty pages */
 		/* then write FILESYNC; otherwise, write UNSTABLE if async and */
-		/* not needcommit/stable; otherwise write FILESYNC */
+		/* not needcommit/nocache/call; otherwise write FILESYNC */
 		if (bp->nb_dirty & ~pagemask)
 		    iomode = NFSV3WRITE_FILESYNC;
-		else if ((bp->nb_flags & (NB_ASYNC | NB_NEEDCOMMIT | NB_STABLE)) == NB_ASYNC)
+		else if ((bp->nb_flags & (NB_ASYNC | NB_NEEDCOMMIT | NB_NOCACHE | NB_STABLE)) == NB_ASYNC)
 		    iomode = NFSV3WRITE_UNSTABLE;
 		else
 		    iomode = NFSV3WRITE_FILESYNC;
@@ -3112,7 +3074,9 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 		OSAddAtomic(1, (SInt32*)&nfsstats.write_bios);
 
 		SET(bp->nb_flags, NB_WRITEINPROG);
-		error = nfs_writerpc(vp, uiop, cr, p, &iomode, &bp->nb_verf);
+		error = nfs_writerpc(vp, uiop, cr, p, &iomode, &must_commit);
+		if (must_commit)
+		    nfs_clearcommit(vnode_mount(vp));
 		/* clear dirty bits for pages we've written */
 		if (!error)
 		    bp->nb_dirty &= ~pagemask;
@@ -3145,7 +3109,7 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 		 * NB_NEEDCOMMIT flags.
 		 */
 		if (error == EINTR || (!error && bp->nb_flags & NB_NEEDCOMMIT)) {
-		    CLR(bp->nb_flags, NB_INVAL);
+		    CLR(bp->nb_flags, NB_INVAL | NB_NOCACHE);
 		    if (!ISSET(bp->nb_flags, NB_DELWRI)) {
 			SET(bp->nb_flags, NB_DELWRI);
 			OSAddAtomic(1, (SInt32*)&nfs_nbdwrite);
@@ -3248,7 +3212,9 @@ nfs_doio(struct nfsbuf *bp, kauth_cred_t cr, proc_t p)
 			uio_uio_resid_set(uiop, io.iov_len);
 			uiop->uio_offset = NBOFF(bp) + off;
 			io.iov_base = (uintptr_t) bp->nb_data + off;
-			error = nfs_writerpc(vp, uiop, cr, p, &iomode, &bp->nb_verf);
+			error = nfs_writerpc(vp, uiop, cr, p, &iomode, &must_commit);
+			if (must_commit)
+			    nfs_clearcommit(vnode_mount(vp));
 			if (error)
 			    break;
 		    }

@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
@@ -219,7 +213,10 @@ nfsrv3_access(nfsd, slp, procp, mrq)
 			    KAUTH_VNODE_DELETE_CHILD;
 		} else {
 			testaction =
-                           KAUTH_VNODE_WRITE_DATA;
+			    KAUTH_VNODE_WRITE_DATA |
+			    KAUTH_VNODE_WRITE_ATTRIBUTES |
+			    KAUTH_VNODE_WRITE_EXTATTRIBUTES |
+			    KAUTH_VNODE_WRITE_SECURITY;
 		}
 		if (nfsrv_authorize(vp, NULL, testaction, &context, nxo, 0))
 			nfsmode &= ~NFSV3ACCESS_MODIFY;
@@ -783,7 +780,7 @@ nfsrv_read(nfsd, slp, procp, mrq)
 	int i;
 	caddr_t bpos;
 	int error = 0, count, len, left, siz, tlen, getret;
-	int v3 = (nfsd->nd_flag & ND_NFSV3), reqlen, maxlen;
+	int v3 = (nfsd->nd_flag & ND_NFSV3), reqlen;
 	char *cp2;
 	mbuf_t mb, mb2, mreq;
 	mbuf_t m2;
@@ -806,12 +803,7 @@ nfsrv_read(nfsd, slp, procp, mrq)
 		nfsm_dissect(tl, u_long *, NFSX_UNSIGNED);
 		off = (off_t)fxdr_unsigned(u_long, *tl);
 	}
-	nfsm_dissect(tl, u_long *, NFSX_UNSIGNED);
-	reqlen = fxdr_unsigned(u_long, *tl);
-	maxlen = NFS_SRVMAXDATA(nfsd);
-	if (reqlen > maxlen)
-		reqlen = maxlen;
-
+	nfsm_srvstrsiz(reqlen, NFS_SRVMAXDATA(nfsd));
 	if ((error = nfsrv_fhtovp(&nfh, nam, TRUE, &vp, &nx, &nxo))) {
 		nfsm_reply(2 * NFSX_UNSIGNED);
 		nfsm_srvpostop_attr(1, NULL);
@@ -1171,7 +1163,11 @@ nfsrv_write(nfsd, slp, procp, mrq)
 			*tl++ = txdr_unsigned(stable);
 		else
 			*tl++ = txdr_unsigned(NFSV3WRITE_FILESYNC);
-		/* write verifier */
+		/*
+		 * Actually, there is no need to txdr these fields,
+		 * but it may make the values more human readable,
+		 * for debugging purposes.
+		 */
 		*tl++ = txdr_unsigned(boottime_sec());
 		*tl = txdr_unsigned(0);
 	} else {
@@ -1471,7 +1467,11 @@ loop1:
 			    nfsm_build(tl, u_long *, 4 * NFSX_UNSIGNED);
 			    *tl++ = txdr_unsigned(nfsd->nd_len);
 			    *tl++ = txdr_unsigned(swp->nd_stable);
-			    /* write verifier */
+			    /*
+			     * Actually, there is no need to txdr these fields,
+			     * but it may make the values more human readable,
+			     * for debugging purposes.
+			     */
 			    *tl++ = txdr_unsigned(boottime_sec());
 			    *tl = txdr_unsigned(0);
 			} else {
@@ -1597,10 +1597,7 @@ nfsrvw_sort(list, num)
 /*
  * copy credentials making sure that the result can be compared with bcmp().
  *
- * NOTE:	This function is only intended to operate on a real input
- *		credential and a template output credential; the template
- *		ouptut credential is intended to then be used as an argument
- *		to kauth_cred_create() - AND NEVER REFERENCED OTHERWISE.
+ * XXX ILLEGAL
  */
 void
 nfsrv_setcred(kauth_cred_t incred, kauth_cred_t outcred)
@@ -1608,6 +1605,7 @@ nfsrv_setcred(kauth_cred_t incred, kauth_cred_t outcred)
 	int i;
 
 	bzero((caddr_t)outcred, sizeof (*outcred));
+	outcred->cr_ref = 1;
 	outcred->cr_uid = kauth_cred_getuid(incred);
 	outcred->cr_ngroups = incred->cr_ngroups;
 	for (i = 0; i < incred->cr_ngroups; i++)
@@ -1853,7 +1851,6 @@ nfsrv_create(nfsd, slp, procp, mrq)
 			if (!error) {
 			        if (nd.ni_cnd.cn_flags & ISSYMLINK)
 				        error = EINVAL;
-				vp = nd.ni_vp;
 			}
 			if (error)
 				nfsm_reply(0);
@@ -1975,6 +1972,8 @@ nfsrv_mknod(nfsd, slp, procp, mrq)
 
 	context.vc_proc = procp;
 	context.vc_ucred = nfsd->nd_cr;
+	hacked_context.vc_proc = procp;
+	hacked_context.vc_ucred = proc_ucred(procp);
 
 	/*
 	 * Save the original credential UID in case they are
@@ -2095,9 +2094,6 @@ nfsrv_mknod(nfsd, slp, procp, mrq)
 			vnode_put(vp);
 			vp = NULL;
 		}
-		hacked_context.vc_proc = procp;
-		hacked_context.vc_ucred = kauth_cred_proc_ref(procp);
-
 		nd.ni_cnd.cn_nameiop = LOOKUP;
 		nd.ni_cnd.cn_flags &= ~LOCKPARENT;
 		nd.ni_cnd.cn_context = &hacked_context;
@@ -2109,7 +2105,6 @@ nfsrv_mknod(nfsd, slp, procp, mrq)
 			if (nd.ni_cnd.cn_flags & ISSYMLINK)
 			        error = EINVAL;
 		}
-		kauth_cred_unref(&hacked_context.vc_ucred);
 	}
 out1:
 	if (xacl != NULL)
@@ -2357,12 +2352,9 @@ retry:
 
 	/* reset credential if it was remapped */
 	if (nfsd->nd_cr != saved_cred) {
-		kauth_cred_unref(&nfsd->nd_cr);
-		/*
-		 * consume reference taken above
-		 */
+		kauth_cred_rele(nfsd->nd_cr);
 		nfsd->nd_cr = saved_cred;
-		saved_cred = NULL;
+		kauth_cred_ref(nfsd->nd_cr);
 	}
 
 	tond.ni_cnd.cn_nameiop = RENAME;
@@ -2726,7 +2718,7 @@ out:
 	if (topath)
 		FREE_ZONE(topath, MAXPATHLEN, M_NAMEI);
 	if (saved_cred)
-		kauth_cred_unref(&saved_cred);
+		kauth_cred_rele(saved_cred);
 	return (0);
 
 nfsmout:
@@ -2765,7 +2757,7 @@ nfsmout:
 	if (topath)
 		FREE_ZONE(topath, MAXPATHLEN, M_NAMEI);
 	if (saved_cred)
-		kauth_cred_unref(&saved_cred);
+		kauth_cred_rele(saved_cred);
 	return (error);
 }
 
@@ -3494,8 +3486,6 @@ nfsrv_readdir(nfsd, slp, procp, mrq)
 	}
 	context.vc_proc = procp;
 	context.vc_ucred = nfsd->nd_cr;
-	if (!v3 || (nxo->nxo_flags & NX_32BITCLIENTS))
-		vnopflag |= VNODE_READDIR_SEEKOFF32;
 	if (v3) {
 		nfsm_srv_vattr_init(&at, v3);
 		error = getret = vnode_getattr(vp, &at, &context);
@@ -3665,8 +3655,6 @@ again:
 			/* Finish off the record with the cookie */
 			nfsm_clget;
 			if (v3) {
-				if (vnopflag & VNODE_READDIR_SEEKOFF32)
-					dp->d_seekoff &= 0x00000000ffffffffULL;
 				txdr_hyper(&dp->d_seekoff, &tquad);
 				*tl = tquad.nfsuquad[0];
 				bp += NFSX_UNSIGNED;
@@ -3732,7 +3720,6 @@ nfsrv_readdirplus(nfsd, slp, procp, mrq)
 	vnode_t vp, nvp;
 	struct flrep fl;
 	struct nfs_filehandle dnfh, *nfhp = (struct nfs_filehandle *)&fl.fl_fhsize;
-	u_long fhsize;
 	struct nfs_export *nx;
 	struct nfs_export_options *nxo;
 	uio_t auio;
@@ -3775,8 +3762,6 @@ nfsrv_readdirplus(nfsd, slp, procp, mrq)
 	}
 	context.vc_proc = procp;
 	context.vc_ucred = nfsd->nd_cr;
-	if (nxo->nxo_flags & NX_32BITCLIENTS)
-		vnopflag |= VNODE_READDIR_SEEKOFF32;
 	nfsm_srv_vattr_init(&at, 1);
 	error = getret = vnode_getattr(vp, &at, &context);
 	if (!error && toff && verf && verf != at.va_filerev)
@@ -3944,12 +3929,9 @@ again:
 			 */
 			fp = (struct nfs_fattr *)&fl.fl_fattr;
 			nfsm_srvfillattr(vap, fp);
-			fhsize = nfhp->nfh_len;
-			fl.fl_fhsize = txdr_unsigned(fhsize);
+			fl.fl_fhsize = txdr_unsigned(nfhp->nfh_len);
 			fl.fl_fhok = nfs_true;
 			fl.fl_postopok = nfs_true;
-			if (vnopflag & VNODE_READDIR_SEEKOFF32)
-				dp->d_seekoff &= 0x00000000ffffffffULL;
 			txdr_hyper(&dp->d_seekoff, &fl.fl_off);
 
 			nfsm_clget;
@@ -3990,7 +3972,7 @@ again:
 			/*
 			 * Now copy the flrep structure out.
 			 */
-			xfer = sizeof(struct flrep) - sizeof(fl.fl_nfh) + fhsize;
+			xfer = sizeof(struct flrep) - sizeof(fl.fl_nfh) + fl.fl_fhsize;
 			cp = (caddr_t)&fl;
 			while (xfer > 0) {
 				nfsm_clget;

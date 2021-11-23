@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 
 #include <IOKit/IODeviceTreeSupport.h>
@@ -308,11 +302,7 @@ static void FreePhysicalMemory( vm_offset_t * range )
 {
     vm_offset_t	virt;
 
-#if defined (__i386__)
-    virt = ml_boot_ptovirt( range[0] );
-#else
     virt = ml_static_ptovirt( range[0] );
-#endif
     if( virt) {
         ml_static_mfree( virt, range[1] );
     }
@@ -922,6 +912,7 @@ static SInt32 DefaultCompare( UInt32 cellCount, UInt32 left[], UInt32 right[] )
     return( left[ cellCount ] - right[ cellCount ] );
 }
 
+
 void IODTGetCellCounts( IORegistryEntry * regEntry,
 			    UInt32 * sizeCount, UInt32 * addressCount)
 {
@@ -950,13 +941,10 @@ bool IODTResolveAddressCell( IORegistryEntry * regEntry,
     UInt32		childSizeCells, childAddressCells;
     UInt32		childCells;
     UInt32		cell[ 5 ], offset = 0, length;
-    UInt32		endCell[ 5 ];
     UInt32		*range;
-    UInt32		*lookRange;
-    UInt32		*startRange;
     UInt32		*endRanges;
     bool		ok = true;
-    SInt32		diff, endDiff;
+    SInt32		diff;
 
     IODTPersistent	*persist;
     IODTCompareAddressCellFunc	compare;
@@ -971,81 +959,60 @@ bool IODTResolveAddressCell( IORegistryEntry * regEntry,
     else
         *len = IOPhysical32( 0, cellsIn[ childAddressCells ] );
 
-    do
-    {
-	prop = OSDynamicCast( OSData, regEntry->getProperty( gIODTRangeKey ));
-	if( 0 == prop) {
-	    /* end of the road */
-	    *phys = IOPhysical32( 0,  cell[ childAddressCells - 1 ] + offset);
-	    break;
-	}
+    do {
+        prop = OSDynamicCast( OSData, regEntry->getProperty( gIODTRangeKey ));
+        if( 0 == prop) {
+            /* end of the road */
+            *phys = IOPhysical32( 0,  cell[ childAddressCells - 1 ] + offset);
+            break;
+        }
 
-	parent = regEntry->getParentEntry( gIODTPlane );
-	IODTGetCellCounts( parent, &sizeCells, &addressCells );
+        parent = regEntry->getParentEntry( gIODTPlane );
+        IODTGetCellCounts( parent, &sizeCells, &addressCells );
 
-	if( (length = prop->getLength())) {
-	    // search
-	    startRange = (UInt32 *) prop->getBytesNoCopy();
-	    range = startRange;
-	    endRanges = range + (length / 4);
+        if( (length = prop->getLength())) {
+            // search
+            range = (UInt32 *) prop->getBytesNoCopy();
+            endRanges = range + (length / 4);
 
-	    prop = (OSData *) regEntry->getProperty( gIODTPersistKey );
-	    if( prop) {
-		persist = (IODTPersistent *) prop->getBytesNoCopy();
-		compare = persist->compareFunc;
-	    } else
-		compare = DefaultCompare;
+            prop = (OSData *) regEntry->getProperty( gIODTPersistKey );
+            if( prop) {
+                persist = (IODTPersistent *) prop->getBytesNoCopy();
+                compare = persist->compareFunc;
+            } else
+                compare = DefaultCompare;
 
-	    for( ok = false;
-		 range < endRanges;
-		 range += (childCells + addressCells) ) {
+            for( ok = false;
+                 range < endRanges;
+                 range += (childCells + addressCells) ) {
 
-		// is cell start >= range start?
-		diff = (*compare)( childAddressCells, cell, range );
-		if( diff < 0)
-		    continue;
+                // is cell >= range start?
+                diff = (*compare)( childAddressCells, cell, range );
+                if( diff < 0)
+                    continue;
+                    
+                // is cell + size <= range end?
+                if( (diff + cell[ childCells - 1 ])
+                        > range[ childCells + addressCells - 1 ])
+                    continue;
 
-		ok = (0 == cell[childCells - 1]);
-		if (!ok)
-		{
-		    // search for cell end
-		    bcopy(cell, endCell, childAddressCells * sizeof(UInt32));
-		    endCell[childAddressCells - 1] += cell[childCells - 1] - 1;
-		    lookRange = startRange;
-		    for( ;
-			 lookRange < endRanges;
-			 lookRange += (childCells + addressCells) )
-		     {
-			// is cell >= range start?
-			endDiff = (*compare)( childAddressCells, endCell, lookRange );
-			if( endDiff < 0)
-			    continue;
-			if ((endDiff - cell[childCells - 1] + 1 + lookRange[childAddressCells + addressCells - 1])
-			    == (diff + range[childAddressCells + addressCells - 1]))
-			{
-			    ok = true;
-			    break;
-			}
-		    }
-		    if (!ok)
-			continue;
-		}
-		offset += diff;
-		break;
-	    }
+                offset += diff;
+                ok = true;
+                break;
+            }
 
-	    // Get the physical start of the range from our parent
-	    bcopy( range + childAddressCells, cell, 4 * addressCells );
-	    bzero( cell + addressCells, 4 * sizeCells );
+            // Get the physical start of the range from our parent
+            bcopy( range + childAddressCells, cell, 4 * addressCells );
+            bzero( cell + addressCells, 4 * sizeCells );
 
-	} /* else zero length range => pass thru to parent */
+        } /* else zero length range => pass thru to parent */
 
 	regEntry		= parent;
 	childSizeCells		= sizeCells;
 	childAddressCells	= addressCells;
 	childCells		= childAddressCells + childSizeCells;
-    }
-    while( ok && regEntry);
+
+    } while( ok && regEntry);
 
     return( ok);
 }

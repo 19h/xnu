@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /*	@(#)hfs_readwrite.c	1.0
  *
@@ -46,8 +40,6 @@
 #include <sys/vnode.h>
 #include <sys/uio.h>
 #include <sys/vfs_context.h>
-#include <sys/disk.h>
-#include <sys/sysctl.h>
 
 #include <miscfs/specfs/specdev.h>
 
@@ -82,10 +74,6 @@ extern int  hfs_setextendedsecurity(struct hfsmount *, int);
 static int  hfs_clonelink(struct vnode *, int, kauth_cred_t, struct proc *);
 static int  hfs_clonefile(struct vnode *, int, int, int);
 static int  hfs_clonesysfile(struct vnode *, int, int, int, kauth_cred_t, struct proc *);
-
-
-int flush_cache_on_write = 0;
-SYSCTL_INT (_kern, OID_AUTO, flush_cache_on_write, CTLFLAG_RW, &flush_cache_on_write, 0, "always flush the drive cache on writes to uncached files");
 
 
 /*****************************************************************************
@@ -476,13 +464,6 @@ sizeok:
 			cp->c_touch_modtime = TRUE;
 		}
 	}
-
-	// XXXdbg - testing for vivek and paul lambert
-	{
-	    if (flush_cache_on_write && ((ioflag & IO_NOCACHE) || vnode_isnocache(vp))) {
-		VNOP_IOCTL(hfsmp->hfs_devvp, DKIOCSYNCHRONIZECACHE, NULL, FWRITE, NULL);
-	    }
-	}
 	HFS_KNOTE(vp, NOTE_WRITE);
 
 ioerr_exit:
@@ -871,18 +852,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 
 	switch (ap->a_command) {
 
-	case HFS_RESIZE_PROGRESS: {
-
-		vfsp = vfs_statfs(HFSTOVFS(hfsmp));
-		if (suser(cred, NULL) &&
-			kauth_cred_getuid(cred) != vfsp->f_owner) {
-			return (EACCES); /* must be owner of file system */
-		}
-		if (!vnode_isvroot(vp)) {
-			return (EINVAL);
-		}
-		return hfs_resize_progress(hfsmp, (u_int32_t *)ap->a_data);
-	}
 	case HFS_RESIZE_VOLUME: {
 		u_int64_t newsize;
 		u_int64_t cursize;
@@ -1021,8 +990,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 
 		if (!(hfsmp->jnl))
 			return (ENOTSUP);
-
-		lck_rw_lock_exclusive(&hfsmp->hfs_insync);
  
 		task = current_task();
 		task_working_set_disable(task);
@@ -1034,9 +1001,9 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		vnode_iterate(mp, 0, hfs_freezewrite_callback, NULL);
 		hfs_global_exclusive_lock_acquire(hfsmp);
 		journal_flush(hfsmp->jnl);
-
 		// don't need to iterate on all vnodes, we just need to
 		// wait for writes to the system files and the device vnode
+		// vnode_iterate(mp, 0, hfs_freezewrite_callback, NULL);
 		if (HFSTOVCB(hfsmp)->extentsRefNum)
 		    vnode_waitforwrites(HFSTOVCB(hfsmp)->extentsRefNum, 0, 0, 0, "hfs freeze");
 		if (HFSTOVCB(hfsmp)->catalogRefNum)
@@ -1059,7 +1026,7 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		// if we're not the one who froze the fs then we
 		// can't thaw it.
 		if (hfsmp->hfs_freezing_proc != current_proc()) {
-		    return EPERM;
+		    return EINVAL;
 		}
 
 		// NOTE: if you add code here, also go check the
@@ -1067,7 +1034,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		//
 		hfsmp->hfs_freezing_proc = NULL;
 		hfs_global_exclusive_lock_release(hfsmp);
-		lck_rw_unlock_exclusive(&hfsmp->hfs_insync);
 
 		return (0);
 	}
@@ -1094,7 +1060,7 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		dev_t dev = VTOC(vp)->c_dev;
 		
 		short flags;
-		struct ucred myucred;
+		struct ucred myucred;	/* XXX ILLEGAL */
 		int num_files;
 		int *file_ids = NULL;
 		short *access = NULL;
@@ -1107,9 +1073,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		CatalogKey catkey;
 		struct cnode *skip_cp = VTOC(vp);
 		struct vfs_context	my_context;
-
-		/* set up front for common exit code */
-		my_context.vc_ucred = NOCRED;
 
 		/* first, return error if not run as root */
 		if (cred->cr_ruid != 0) {
@@ -1181,12 +1144,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 			check_leaf = false;
 		}
 		
-		/*
-		 * Create a templated credential; this credential may *NOT*
-		 * be used unless instantiated with a kauth_cred_create();
-		 * there must be a correcponding kauth_cred_unref() when it
-		 * is no longer in use (i.e. before it goes out of scope).
-		 */
 		memset(&myucred, 0, sizeof(myucred));
 		myucred.cr_ref = 1;
 		myucred.cr_uid = myucred.cr_ruid = myucred.cr_svuid = user_access_structp->uid;
@@ -1198,10 +1155,9 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 			goto err_exit_bulk_access;
 		}
 		myucred.cr_rgid = myucred.cr_svgid = myucred.cr_groups[0];
-		myucred.cr_gmuid = myucred.cr_uid;
 		
 		my_context.vc_proc = p;
-		my_context.vc_ucred = kauth_cred_create(&myucred);
+		my_context.vc_ucred = &myucred;
 
 		/* Check access to each file_id passed in */
 		for (i = 0; i < num_files; i++) {
@@ -1209,7 +1165,7 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 			cnid = (cnid_t) file_ids[i];
 			
 			/* root always has access */
-			if (!suser(my_context.vc_ucred, NULL)) {
+			if (!suser(&myucred, NULL)) {
 				access[i] = 0;
 				continue;
 			}
@@ -1225,7 +1181,7 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 							
 				/* before calling CheckAccess(), check the target file for read access */
 				myPerms = DerivePermissionSummary(cnattr.ca_uid, cnattr.ca_gid,
-								  cnattr.ca_mode, hfsmp->hfs_mp, my_context.vc_ucred, p  );
+								  cnattr.ca_mode, hfsmp->hfs_mp, &myucred, p  );
 				
 				
 				/* fail fast if no access */ 
@@ -1246,7 +1202,7 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 			}
 			
 			myaccess = do_access_check(hfsmp, &error, &cache, catkey.hfsPlus.parentID, 
-						   skip_cp, p, my_context.vc_ucred, dev);
+						   skip_cp, p, &myucred, dev);
 			
 			if ( myaccess ) {
 				access[i] = 0; // have access.. no errors to report
@@ -1272,12 +1228,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 
 			    hfs_unlock(VTOC(vp));
 			    if (vnode_vtype(vp) == VDIR) {
-			    	/*
-				 * XXX This code assumes that none of the
-				 * XXX callbacks from vnode_authorize() will
-				 * XXX take a persistent ref on the context
-				 * XXX credential, which is a bad assumption.
-				 */
 				myErr = vnode_authorize(vp, NULL, (KAUTH_VNODE_SEARCH | KAUTH_VNODE_LIST_DIRECTORY), &my_context);
 			    } else {
 				myErr = vnode_authorize(vp, NULL, KAUTH_VNODE_READ_DATA, &my_context);
@@ -1305,9 +1255,6 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 		release_pathbuff((char *) cache.haveaccess);
 		release_pathbuff((char *) file_ids);
 		release_pathbuff((char *) access);
-		/* clean up local context, if needed */
-		if (IS_VALID_CRED(my_context.vc_ucred))
-			kauth_cred_unref(&my_context.vc_ucred);
 		
 		return (error);
 	} /* HFS_BULKACCESS */
@@ -1315,18 +1262,13 @@ hfs_vnop_ioctl( struct vnop_ioctl_args /* {
 	case HFS_SETACLSTATE: {
 		int state;
 
+		if (!is_suser()) {
+			return (EPERM);
+		}
 		if (ap->a_data == NULL) {
 			return (EINVAL);
 		}
-
-		vfsp = vfs_statfs(HFSTOVFS(hfsmp));
 		state = *(int *)ap->a_data;
-
-		// super-user can enable or disable acl's on a volume.
-		// the volume owner can only enable acl's
-		if (!is_suser() && (state == 0 || kauth_cred_getuid(cred) != vfsp->f_owner)) {
-			return (EPERM);
-		}
 		if (state == 0 || state == 1)
 			return hfs_setextendedsecurity(hfsmp, state);
 		else
@@ -1663,11 +1605,6 @@ hfs_vnop_blockmap(struct vnop_blockmap_args *ap)
 	int started_tr = 0;
 	int tooklock = 0;
 
-	/* Do not allow blockmap operation on a directory */
-	if (vnode_isdir(vp)) {
-		return (ENOTSUP);
-	}
-
 	/*
 	 * Check for underlying vnode requests and ensure that logical
 	 * to physical mapping is requested.
@@ -1862,7 +1799,6 @@ do_hfs_truncate(struct vnode *vp, off_t length, int flags, int skipsetsize, vfs_
 	off_t bytesToAdd;
 	off_t actualBytesAdded;
 	off_t filebytes;
-	u_int64_t old_filesize;
 	u_long fileblocks;
 	int blksize;
 	struct hfsmount *hfsmp;
@@ -1871,16 +1807,11 @@ do_hfs_truncate(struct vnode *vp, off_t length, int flags, int skipsetsize, vfs_
 	blksize = VTOVCB(vp)->blockSize;
 	fileblocks = fp->ff_blocks;
 	filebytes = (off_t)fileblocks * (off_t)blksize;
-	old_filesize = fp->ff_size;
 
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 7)) | DBG_FUNC_START,
 		 (int)length, (int)fp->ff_size, (int)filebytes, 0, 0);
 
 	if (length < 0)
-		return (EINVAL);
-
-	/* This should only happen with a corrupt filesystem */
-	if ((off_t)fp->ff_size < 0)
 		return (EINVAL);
 
 	if ((!ISHFSPLUS(VTOVCB(vp))) && (length > (off_t)MAXHFSFILESIZE))
@@ -2126,9 +2057,6 @@ do_hfs_truncate(struct vnode *vp, off_t length, int flags, int skipsetsize, vfs_
 				hfs_systemfile_unlock(hfsmp, lockflags);
 			}
 			if (hfsmp->jnl) {
-				if (retval == 0) {
-					fp->ff_size = length;
-				}
 				(void) hfs_update(vp, TRUE);
 				(void) hfs_volupdate(hfsmp, VOL_UPDATE, 0);
 			}
@@ -2144,7 +2072,7 @@ do_hfs_truncate(struct vnode *vp, off_t length, int flags, int skipsetsize, vfs_
 #endif /* QUOTA */
 		}
 		/* Only set update flag if the logical length changes */
-		if (old_filesize != length)
+		if ((off_t)fp->ff_size != length)
 			cp->c_touch_modtime = TRUE;
 		fp->ff_size = length;
 	}
@@ -2178,7 +2106,6 @@ hfs_truncate(struct vnode *vp, off_t length, int flags, int skipsetsize,
 	off_t filebytes;
 	u_long fileblocks;
 	int blksize, error = 0;
-	struct cnode *cp = VTOC(vp);
 
 	if (vnode_isdir(vp))
 		return (EISDIR);	/* cannot truncate an HFS directory! */
@@ -2193,24 +2120,22 @@ hfs_truncate(struct vnode *vp, off_t length, int flags, int skipsetsize,
 
 	if (length < filebytes) {
 		while (filebytes > length) {
-			if ((filebytes - length) > HFS_BIGFILE_SIZE && overflow_extents(fp)) {
+			if ((filebytes - length) > HFS_BIGFILE_SIZE) {
 		    		filebytes -= HFS_BIGFILE_SIZE;
 			} else {
 		    		filebytes = length;
 			}
-			cp->c_flag |= C_FORCEUPDATE;
 			error = do_hfs_truncate(vp, filebytes, flags, skipsetsize, context);
 			if (error)
 				break;
 		}
 	} else if (length > filebytes) {
 		while (filebytes < length) {
-			if ((length - filebytes) > HFS_BIGFILE_SIZE && overflow_extents(fp)) {
+			if ((length - filebytes) > HFS_BIGFILE_SIZE) {
 				filebytes += HFS_BIGFILE_SIZE;
 			} else {
 				filebytes = length;
 			}
-			cp->c_flag |= C_FORCEUPDATE;
 			error = do_hfs_truncate(vp, filebytes, flags, skipsetsize, context);
 			if (error)
 				break;
@@ -2547,12 +2472,6 @@ hfs_vnop_pageout(struct vnop_pageout_args *ap)
 		      cp->c_desc.cd_nameptr ? cp->c_desc.cd_nameptr : "");
 	}
 	if ( (retval = hfs_lock(cp, HFS_EXCLUSIVE_LOCK))) {
-		if (!(ap->a_flags & UPL_NOCOMMIT)) {
-		        ubc_upl_abort_range(ap->a_pl,
-					    ap->a_pl_offset,
-					    ap->a_size,
-					    UPL_ABORT_FREE_ON_EMPTY);
-		}
 		return (retval);
 	}
 	fp = VTOF(vp);
@@ -2597,37 +2516,30 @@ hfs_vnop_bwrite(struct vnop_bwrite_args *ap)
 	int retval = 0;
 	register struct buf *bp = ap->a_bp;
 	register struct vnode *vp = buf_vnode(bp);
+#if BYTE_ORDER == LITTLE_ENDIAN
 	BlockDescriptor block;
 
 	/* Trap B-Tree writes */
 	if ((VTOC(vp)->c_fileid == kHFSExtentsFileID) ||
 	    (VTOC(vp)->c_fileid == kHFSCatalogFileID) ||
-	    (VTOC(vp)->c_fileid == kHFSAttributesFileID) ||
-	    (vp == VTOHFS(vp)->hfc_filevp)) {
+	    (VTOC(vp)->c_fileid == kHFSAttributesFileID)) {
 
-		/* 
-		 * Swap and validate the node if it is in native byte order.
-		 * This is always be true on big endian, so we always validate
-		 * before writing here.  On little endian, the node typically has
-		 * been swapped and validatated when it was written to the journal,
-		 * so we won't do anything here.
-		 */
+		/* Swap if the B-Tree node is in native byte order */
 		if (((UInt16 *)((char *)buf_dataptr(bp) + buf_count(bp) - 2))[0] == 0x000e) {
 			/* Prepare the block pointer */
 			block.blockHeader = bp;
 			block.buffer = (char *)buf_dataptr(bp);
-			block.blockNum = buf_lblkno(bp);
 			/* not found in cache ==> came from disk */
 			block.blockReadFromDisk = (buf_fromcache(bp) == 0);
 			block.blockSize = buf_count(bp);
     
 			/* Endian un-swap B-Tree node */
-			retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig);
-			if (retval)
-				panic("hfs_vnop_bwrite: about to write corrupt node!\n");
+			SWAP_BT_NODE (&block, ISHFSPLUS (VTOVCB(vp)), VTOC(vp)->c_fileid, 1);
 		}
-	}
 
+		/* We don't check to make sure that it's 0x0e00 because it could be all zeros */
+	}
+#endif
 	/* This buffer shouldn't be locked anymore but if it is clear it */
 	if ((buf_flags(bp) & B_LOCKED)) {
 	        // XXXdbg
@@ -2872,10 +2784,10 @@ out:
 		lockflags = 0;
 	}
 
-	/* Push cnode's new extent data to disk. */
-	if (retval == 0) {
-		(void) hfs_update(vp, MNT_WAIT);
-	}
+	// See comment up above about calls to hfs_fsync()
+	//
+	//if (retval == 0)
+	//	retval = hfs_fsync(vp, MNT_WAIT, 0, p);
 
 	if (hfsmp->jnl) {
 		if (cp->c_cnid < kHFSFirstUserCatalogNodeID)
@@ -2969,7 +2881,7 @@ hfs_clonefile(struct vnode *vp, int blkstart, int blkcnt, int blksize)
 	filesize = VTOF(vp)->ff_blocks * blksize;  /* virtual file size */
 	writebase = blkstart * blksize;
 	copysize = blkcnt * blksize;
-	iosize = bufsize = MIN(copysize, 128 * 1024);
+	iosize = bufsize = MIN(copysize, 4096 * 16);
 	offset = 0;
 
 	if (kmem_alloc(kernel_map, (vm_offset_t *)&bufp, bufsize)) {

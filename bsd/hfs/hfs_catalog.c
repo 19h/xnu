@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 
 #include <sys/systm.h>
@@ -519,18 +513,6 @@ cat_idlookup(struct hfsmount *hfsmp, cnid_t cnid, struct cat_desc *outdescp,
 	}
 
 	result = cat_lookupbykey(hfsmp, keyp, 0, 0, outdescp, attrp, forkp, NULL);
-	if (!result && outdescp) {
-		cnid_t dcnid = outdescp->cd_cnid;
-		/*
-		 * Just for sanity's sake, let's make sure that
-		 * the key in the thread matches the key in the record.
-		 */
-		if (cnid != dcnid) {
-			printf("Requested cnid (%d / 0x%08lx) != dcnid (%d / 0x%08lx)\n", cnid, cnid, dcnid, dcnid);
-			result = ENOENT;
-		}
-	}
-
 exit:
 	FREE(recp, M_TEMP);
 	FREE(iterator, M_TEMP);
@@ -614,7 +596,7 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 	hint = iterator->hint.nodeNum;
 
 	/* Hide the journal files (if any) */
-	if ((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY))) &&
+	if (hfsmp->jnl &&
 		((cnid == hfsmp->hfs_jnlfileid) ||
 		 (cnid == hfsmp->hfs_jnlinfoblkid))) {
 
@@ -671,9 +653,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 			bcopy(&recp->hfsPlusFile.resourceFork.extents[0],
 			      &forkp->cf_extents[0], sizeof(HFSPlusExtentRecord));
 		} else {
-			int i;
-			u_int32_t validblks;
-
 			/* Convert the data fork. */
 			forkp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
 			forkp->cf_blocks = recp->hfsPlusFile.dataFork.totalBlocks;
@@ -688,36 +667,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 			forkp->cf_vblocks = 0;
 			bcopy(&recp->hfsPlusFile.dataFork.extents[0],
 			      &forkp->cf_extents[0], sizeof(HFSPlusExtentRecord));
-
-			/* Validate the fork's resident extents. */
-			validblks = 0;
-			for (i = 0; i < kHFSPlusExtentDensity; ++i) {
-				if (forkp->cf_extents[i].startBlock + forkp->cf_extents[i].blockCount >= hfsmp->totalBlocks) {
-					/* Suppress any bad extents so a remove can succeed. */
-					forkp->cf_extents[i].startBlock = 0;
-					forkp->cf_extents[i].blockCount = 0;
-					/* Disable writes */
-					if (attrp != NULL) {
-						attrp->ca_mode &= S_IFMT | S_IRUSR | S_IRGRP | S_IROTH;
-					}
-				} else {
-					validblks += forkp->cf_extents[i].blockCount;
-				}
-			}
-			/* Adjust for any missing blocks. */
-			if ((validblks < forkp->cf_blocks) && (forkp->cf_extents[7].blockCount == 0)) {
-				u_int64_t psize;
-
-				forkp->cf_blocks = validblks;
-				if (attrp != NULL) {
-					attrp->ca_blocks = validblks + recp->hfsPlusFile.resourceFork.totalBlocks;
-				}
-				psize = (u_int64_t)validblks * (u_int64_t)hfsmp->blockSize;
-				if (psize < forkp->cf_size) {
-					forkp->cf_size = psize;
-				}
-
-			}
 		}
 	}
 	if (descp != NULL) {
@@ -1073,14 +1022,11 @@ cat_rename (
 
 		/* Find cnode data at new location */
 		result = BTSearchRecord(fcb, to_iterator, &btdata, &datasize, NULL);
-		if (result)
-			goto exit;
 		
 		if ((fromtype != recp->recordType) ||
-		    (from_cdp->cd_cnid != getcnid(recp))) {
-			result = EEXIST;
+		    (from_cdp->cd_cnid != getcnid(recp)))
 			goto exit; /* EEXIST */
-		}
+		
 		/* The old name is a case variant and must be removed */
 		result = BTDeleteRecord(fcb, from_iterator);
 		if (result)
@@ -1617,7 +1563,7 @@ cat_readattr(const CatalogKey *key, const CatalogRecord *rec,
 		    (rec->hfsPlusFolder.folderID == hfsmp->hfs_privdir_desc.cd_cnid)) {
 			return (1);	/* continue */
 		}
-		if ((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY))) &&
+		if (hfsmp->jnl &&
 		    (rec->recordType == kHFSPlusFileRecord) &&
 		    ((rec->hfsPlusFile.fileID == hfsmp->hfs_jnlfileid) ||
 		     (rec->hfsPlusFile.fileID == hfsmp->hfs_jnlinfoblkid))) {
@@ -1838,12 +1784,7 @@ struct packdirentry_state {
 	linkinfo_t *   cbs_linkinfo;
 	struct cat_desc * cbs_desc;
 //	struct dirent  * cbs_stdentry;
-	// followign fields are only used for NFS readdir, which uses the next file id as the seek offset of each entry
 	struct direntry * cbs_direntry;
-	struct direntry * cbs_prevdirentry;
-	u_int32_t      cbs_previlinkref;
-	Boolean        cbs_hasprevdirentry;
-	Boolean        cbs_eof;
 };
 
 static int
@@ -1857,8 +1798,7 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 	struct dirent catent;
 	struct direntry * entry = NULL;
 	time_t itime;
-	u_int32_t ilinkref = 0;
-	u_int32_t curlinkref = 0;
+	u_long ilinkref = 0;
 	cnid_t  cnid;
 	int hide = 0;
 	u_int8_t type;
@@ -1869,7 +1809,6 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 	size_t maxnamelen;
 	size_t uiosize = 0;
 	caddr_t uioaddr;
-	Boolean stop_after_pack = false;
 	
 	hfsmp = state->cbs_hfsmp;
 
@@ -1880,18 +1819,8 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 
 	/* We're done when parent directory changes */
 	if (state->cbs_parentID != curID) {
-		if (state->cbs_extended) {
-			if (state->cbs_hasprevdirentry) { /* the last record haven't been returned yet, so we want to stop after
-											   * packing the last item */
-				stop_after_pack = true;
-			} else {
-				state->cbs_result = ENOENT;
-				return (0);	/* stop */
-			}				
-		} else {
-			state->cbs_result = ENOENT;
-			return (0);	/* stop */
-		}
+		state->cbs_result = ENOENT;
+		return (0);	/* stop */
 	}
 
 	if (state->cbs_extended) {
@@ -1903,93 +1832,95 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 		maxnamelen = NAME_MAX;
 	}
 
-	if (state->cbs_extended && stop_after_pack) {
-		cnid = INT_MAX;			/* the last item returns a non-zero invalid cookie */
-	} else {
-		if (!(hfsmp->hfs_flags & HFS_STANDARD)) {
-			switch(crp->recordType) {
-			case kHFSPlusFolderRecord:
-				type = DT_DIR;
-				cnid = crp->hfsPlusFolder.folderID;
-				/* Hide our private meta data directory */
-				if ((curID == kHFSRootFolderID) &&
-					(cnid == hfsmp->hfs_privdir_desc.cd_cnid)) {
-					hide = 1;
-				}
-
-				break;
-			case kHFSPlusFileRecord:
-				itime = to_bsd_time(crp->hfsPlusFile.createDate);
-				/*
-				 * When a hardlink link is encountered save its link ref.
-				 */
-				if ((SWAP_BE32(crp->hfsPlusFile.userInfo.fdType) == kHardLinkFileType) &&
-					(SWAP_BE32(crp->hfsPlusFile.userInfo.fdCreator) == kHFSPlusCreator) &&
-					((itime == (time_t)hfsmp->hfs_itime) ||
-					 (itime == (time_t)hfsmp->hfs_metadata_createdate))) {
-					ilinkref = crp->hfsPlusFile.bsdInfo.special.iNodeNum;
-				}
-				type = MODE_TO_DT(crp->hfsPlusFile.bsdInfo.fileMode);
-				cnid = crp->hfsPlusFile.fileID;
-				/* Hide the journal files */
-				if ((curID == kHFSRootFolderID) &&
-					((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY)))) &&
-					((cnid == hfsmp->hfs_jnlfileid) ||
-					 (cnid == hfsmp->hfs_jnlinfoblkid))) {
-					hide = 1;
-				}
-				break;
-			default:
-				return (0);	/* stop */
-			};
-
-			cnp = (CatalogName*) &ckp->hfsPlus.nodeName;
-			result = utf8_encodestr(cnp->ustr.unicode, cnp->ustr.length * sizeof(UniChar),
-									nameptr, &namelen, maxnamelen + 1, ':', 0);
-			if (result == ENAMETOOLONG) {
-				result = ConvertUnicodeToUTF8Mangled(cnp->ustr.length * sizeof(UniChar),
-													 cnp->ustr.unicode, maxnamelen + 1,
-													 (ByteCount*)&namelen, nameptr,
-													 cnid);		
-				is_mangled = 1;
+	if (!(hfsmp->hfs_flags & HFS_STANDARD)) {
+		switch(crp->recordType) {
+		case kHFSPlusFolderRecord:
+			type = DT_DIR;
+			cnid = crp->hfsPlusFolder.folderID;
+			/* Hide our private meta data directory */
+			if ((curID == kHFSRootFolderID) &&
+			    (cnid == hfsmp->hfs_privdir_desc.cd_cnid)) {
+				hide = 1;
 			}
-		} else { /* hfs */
-			switch(crp->recordType) {
-			case kHFSFolderRecord:
-				type = DT_DIR;
-				cnid = crp->hfsFolder.folderID;
-				break;
-			case kHFSFileRecord:
-				type = DT_REG;
-				cnid = crp->hfsFile.fileID;
-				break;
-			default:
-				return (0);	/* stop */
-			};
 
-			cnp = (CatalogName*) ckp->hfs.nodeName;
-			result = hfs_to_utf8(hfsmp, cnp->pstr, maxnamelen + 1,
-								 (ByteCount *)&namelen, nameptr);
+			break;
+		case kHFSPlusFileRecord:
+			itime = to_bsd_time(crp->hfsPlusFile.createDate);
 			/*
-			 * When an HFS name cannot be encoded with the current
-			 * volume encoding we use MacRoman as a fallback.
+			 * When a hardlink link is encountered save its link ref.
 			 */
-			if (result)
-				result = mac_roman_to_utf8(cnp->pstr, maxnamelen + 1,
-										   (ByteCount *)&namelen, nameptr);
+			if ((SWAP_BE32(crp->hfsPlusFile.userInfo.fdType) == kHardLinkFileType) &&
+			    (SWAP_BE32(crp->hfsPlusFile.userInfo.fdCreator) == kHFSPlusCreator) &&
+			    ((itime == (time_t)hfsmp->hfs_itime) ||
+			     (itime == (time_t)hfsmp->hfs_metadata_createdate))) {
+				ilinkref = crp->hfsPlusFile.bsdInfo.special.iNodeNum;
+			}
+			type = MODE_TO_DT(crp->hfsPlusFile.bsdInfo.fileMode);
+			cnid = crp->hfsPlusFile.fileID;
+			/* Hide the journal files */
+			if ((curID == kHFSRootFolderID) &&
+			    (hfsmp->jnl) &&
+			    ((cnid == hfsmp->hfs_jnlfileid) ||
+			     (cnid == hfsmp->hfs_jnlinfoblkid))) {
+				hide = 1;
+			}
+			break;
+		default:
+			return (0);	/* stop */
+		};
+
+		cnp = (CatalogName*) &ckp->hfsPlus.nodeName;
+		result = utf8_encodestr(cnp->ustr.unicode, cnp->ustr.length * sizeof(UniChar),
+					nameptr, &namelen, maxnamelen + 1, ':', 0);
+		if (result == ENAMETOOLONG) {
+			result = ConvertUnicodeToUTF8Mangled(cnp->ustr.length * sizeof(UniChar),
+							     cnp->ustr.unicode, maxnamelen + 1,
+							     (ByteCount*)&namelen, nameptr,
+							     cnid);		
+			is_mangled = 1;
 		}
+	} else { /* hfs */
+		switch(crp->recordType) {
+		case kHFSFolderRecord:
+			type = DT_DIR;
+			cnid = crp->hfsFolder.folderID;
+			break;
+		case kHFSFileRecord:
+			type = DT_REG;
+			cnid = crp->hfsFile.fileID;
+			break;
+		default:
+			return (0);	/* stop */
+		};
+
+		cnp = (CatalogName*) ckp->hfs.nodeName;
+		result = hfs_to_utf8(hfsmp, cnp->pstr, maxnamelen + 1,
+				    (ByteCount *)&namelen, nameptr);
+		/*
+		 * When an HFS name cannot be encoded with the current
+		 * volume encoding we use MacRoman as a fallback.
+		 */
+		if (result)
+			result = mac_roman_to_utf8(cnp->pstr, maxnamelen + 1,
+				    (ByteCount *)&namelen, nameptr);
 	}
 
 	if (state->cbs_extended) {
+		entry->d_type = type;
+		entry->d_namlen = namelen;
+		entry->d_reclen = uiosize = EXT_DIRENT_LEN(namelen);
+		if (hide)
+			entry->d_fileno = 0;  /* file number = 0 means skip entry */
+		else
+			entry->d_fileno = cnid;
+
 		/*
 		 * The index is 1 relative and includes "." and ".."
 		 *
-		 * Also stuff the cnid in the upper 32 bits of the cookie.  The cookie is stored to the previous entry, which
-		 * will be packed and copied this time
+		 * Also stuff the cnid in the upper 32 bits of the cookie.
 		 */
-		state->cbs_prevdirentry->d_seekoff = (state->cbs_index + 3) | ((u_int64_t)cnid << 32);
-		uiosize = state->cbs_prevdirentry->d_reclen;
-		uioaddr = (caddr_t) state->cbs_prevdirentry;
+		entry->d_seekoff = (state->cbs_index + 3) | ((u_int64_t)cnid << 32);
+		uioaddr = (caddr_t) entry;
 	} else {
 		catent.d_type = type;
 		catent.d_namlen = namelen;
@@ -2010,89 +1941,58 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 		return (0);	/* stop */
 	}
 
-	if (!state->cbs_extended || state->cbs_hasprevdirentry) {
-		state->cbs_result = uiomove(uioaddr, uiosize, state->cbs_uio);
-		if (state->cbs_result == 0) {
-			++state->cbs_index;
+	state->cbs_result = uiomove(uioaddr, uiosize, state->cbs_uio);
+	if (state->cbs_result == 0) {
+		++state->cbs_index;
 
-			/* Remember previous entry */
-			state->cbs_desc->cd_cnid = cnid;
-			if (type == DT_DIR) {
-				state->cbs_desc->cd_flags |= CD_ISDIR;
-			} else {
-				state->cbs_desc->cd_flags &= ~CD_ISDIR;
-			}
-			if (state->cbs_desc->cd_nameptr != NULL) {
-				vfs_removename(state->cbs_desc->cd_nameptr);
-			}
+		/* Remember previous entry */
+		state->cbs_desc->cd_cnid = cnid;
+		if (type == DT_DIR) {
+			state->cbs_desc->cd_flags |= CD_ISDIR;
+		} else {
+			state->cbs_desc->cd_flags &= ~CD_ISDIR;
+		}
+		if (state->cbs_desc->cd_nameptr != NULL) {
+			vfs_removename(state->cbs_desc->cd_nameptr);
+		}
 #if 0
-			state->cbs_desc->cd_encoding = xxxx;
+		state->cbs_desc->cd_encoding = xxxx;
 #endif
-			if (!is_mangled) {
-				state->cbs_desc->cd_namelen = namelen;
-				state->cbs_desc->cd_nameptr = vfs_addname(nameptr, namelen, 0, 0);
-			} else {
-				/* Store unmangled name for the directory hint else it will 
-				 * restart readdir at the last location again 
-				 */
-				char *new_nameptr;
-				size_t bufsize;
-				size_t tmp_namelen = 0;
+		if (!is_mangled) {
+			state->cbs_desc->cd_namelen = namelen;
+			state->cbs_desc->cd_nameptr = vfs_addname(nameptr, namelen, 0, 0);
+		} else {
+			/* Store unmangled name for the directory hint else it will 
+			 * restart readdir at the last location again 
+		 	 */
+			char *new_nameptr;
+			size_t bufsize;
 			
-				cnp = (CatalogName *)&ckp->hfsPlus.nodeName;
-				bufsize = 1 + utf8_encodelen(cnp->ustr.unicode,
-											 cnp->ustr.length * sizeof(UniChar),
-											 ':', 0);
-				MALLOC(new_nameptr, char *, bufsize, M_TEMP, M_WAITOK);
-				result = utf8_encodestr(cnp->ustr.unicode,
-										cnp->ustr.length * sizeof(UniChar),
-										new_nameptr, &tmp_namelen,
-										bufsize, ':', 0);
+			cnp = (CatalogName *)&ckp->hfsPlus.nodeName;
+			bufsize = 1 + utf8_encodelen(cnp->ustr.unicode,
+		        	                     cnp->ustr.length * sizeof(UniChar),
+		                	             ':', 0);
+			MALLOC(new_nameptr, char *, bufsize, M_TEMP, M_WAITOK);
+			result = utf8_encodestr(cnp->ustr.unicode,
+		    	                    cnp->ustr.length * sizeof(UniChar),
+		        	                new_nameptr, &namelen,
+		            	            bufsize, ':', 0);
 			
-				state->cbs_desc->cd_namelen = tmp_namelen;
-				state->cbs_desc->cd_nameptr = vfs_addname(new_nameptr, tmp_namelen, 0, 0);
+			state->cbs_desc->cd_namelen = namelen;
+			state->cbs_desc->cd_nameptr = vfs_addname(new_nameptr, namelen, 0, 0);
 			
-				FREE(new_nameptr, M_TEMP);
-			} 
-		}
-		if (state->cbs_hasprevdirentry) {
-			curlinkref = ilinkref;               /* save current */
-			ilinkref = state->cbs_previlinkref;  /* use previous */
-		}
-		/*
-		 * Record any hard links for post processing.
-		 */
-		if ((ilinkref != 0) &&
-			(state->cbs_result == 0) &&
-			(state->cbs_nlinks < state->cbs_maxlinks)) {
-			state->cbs_linkinfo[state->cbs_nlinks].dirent_addr = uiobase;
-			state->cbs_linkinfo[state->cbs_nlinks].link_ref = ilinkref;
-			state->cbs_nlinks++;
-		}
-		if (state->cbs_hasprevdirentry) {
-			ilinkref = curlinkref;   /* restore current */
-		}
+			FREE(new_nameptr, M_TEMP);
+		} 
 	}
-
-	if (state->cbs_extended) {	/* fill the direntry to be used the next time */
-		if (stop_after_pack) {
-			state->cbs_eof = true;
-			return (0);	/* stop */
-		}
-		entry->d_type = type;
-		entry->d_namlen = namelen;
-		entry->d_reclen = EXT_DIRENT_LEN(namelen);
-		if (hide)
-			entry->d_fileno = 0;  /* file number = 0 means skip entry */
-		else
-			entry->d_fileno = cnid;
-		/* swap the current and previous entry */
-		struct direntry * tmp;
-		tmp = state->cbs_direntry;
-		state->cbs_direntry = state->cbs_prevdirentry;
-		state->cbs_prevdirentry = tmp;
-		state->cbs_hasprevdirentry = true;
-		state->cbs_previlinkref = ilinkref;
+	/*
+	 * Record any hard links for post processing.
+	 */
+	if ((ilinkref != 0) &&
+	    (state->cbs_result == 0) &&
+	    (state->cbs_nlinks < state->cbs_maxlinks)) {
+		state->cbs_linkinfo[state->cbs_nlinks].dirent_addr = uiobase;
+		state->cbs_linkinfo[state->cbs_nlinks].link_ref = ilinkref;
+		state->cbs_nlinks++;
 	}
 
 	/* Continue iteration if there's room */
@@ -2107,7 +2007,7 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 __private_extern__
 int
 cat_getdirentries(struct hfsmount *hfsmp, int entrycnt, directoryhint_t *dirhint,
-				  uio_t uio, int extended, int * items, int * eofflag)
+		uio_t uio, int extended, int * items)
 {
 	FCB* fcb;
 	BTreeIterator * iterator;
@@ -2122,20 +2022,16 @@ cat_getdirentries(struct hfsmount *hfsmp, int entrycnt, directoryhint_t *dirhint
 	
 	fcb = GetFileControlBlock(hfsmp->hfs_catalog_vp);
 
-	/*
-	 * Get a buffer for link info array, btree iterator and a direntry:
-	 */
+	/* Get a buffer for collecting link info and for a btree iterator */
 	maxlinks = MIN(entrycnt, uio_resid(uio) / SMALL_DIRENTRY_SIZE);
 	bufsize = (maxlinks * sizeof(linkinfo_t)) + sizeof(*iterator);
 	if (extended) {
-		bufsize += 2*sizeof(struct direntry);
+		bufsize += sizeof(struct direntry);
 	}
 	MALLOC(buffer, void *, bufsize, M_TEMP, M_WAITOK);
 	bzero(buffer, bufsize);
 
 	state.cbs_extended = extended;
-	state.cbs_hasprevdirentry = false;
-	state.cbs_previlinkref = 0;
 	state.cbs_nlinks = 0;
 	state.cbs_maxlinks = maxlinks;
 	state.cbs_linkinfo = (linkinfo_t *) buffer;
@@ -2145,9 +2041,7 @@ cat_getdirentries(struct hfsmount *hfsmp, int entrycnt, directoryhint_t *dirhint
 	have_key = 0;
 	index = dirhint->dh_index + 1;
 	if (extended) {
-		state.cbs_direntry = (struct direntry *)((char *)iterator + sizeof(BTreeIterator));
-		state.cbs_prevdirentry = state.cbs_direntry + 1;
-		state.cbs_eof = false;
+		state.cbs_direntry = (struct direntry *)((char *)buffer + sizeof(BTreeIterator));
 	}
 	/*
 	 * Attempt to build a key from cached filename
@@ -2206,39 +2100,15 @@ cat_getdirentries(struct hfsmount *hfsmp, int entrycnt, directoryhint_t *dirhint
 	state.cbs_result = 0;
 	state.cbs_parentID = dirhint->dh_desc.cd_parentcnid;
 
-	enum BTreeIterationOperations op;
-	if (extended && index != 0 && have_key)
-		op = kBTreeCurrentRecord;
-	else
-		op = kBTreeNextRecord;
-
 	/*
 	 * Process as many entries as possible starting at iterator->key.
 	 */
-	result = BTIterateRecords(fcb, op, iterator,
+	result = BTIterateRecords(fcb, kBTreeNextRecord, iterator,
 	                          (IterateCallBackProcPtr)cat_packdirentry, &state);
-
-	/* If readdir is called for NFS and BTIterateRecords reaches the end of the
-	 * Catalog BTree, call cat_packdirentry() with dummy values to copy previous 
-	 * direntry stored in state to the user buffer.
-	 */
-	if (state.cbs_extended && (result == fsBTRecordNotFoundErr)) {
-		CatalogKey ckp;
-		CatalogRecord crp;
-
-		bzero(&ckp, sizeof(ckp));
-		bzero(&crp, sizeof(crp));
-
-		result = cat_packdirentry(&ckp, &crp, &state);
-	}
 
 	/* Note that state.cbs_index is still valid on errors */
 	*items = state.cbs_index - index;
 	index = state.cbs_index;
-
-	if (state.cbs_eof) {
-		*eofflag = 1;
-	}
 	
 	/* Finish updating the catalog iterator. */
 	dirhint->dh_desc.cd_hint = iterator->hint.nodeNum;

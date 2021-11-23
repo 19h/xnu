@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 /*
  * Implementation of SVID semaphores
@@ -103,7 +97,7 @@ static void semundo_clear(int semid, int semnum);
 /* XXX casting to (sy_call_t *) is bogus, as usual. */
 static sy_call_t *semcalls[] = {
 	(sy_call_t *)semctl, (sy_call_t *)semget,
-	(sy_call_t *)semop
+	(sy_call_t *)semop, (sy_call_t *)semconfig
 };
 
 static int		semtot = 0;		/* # of used semaphores */
@@ -128,10 +122,12 @@ sysv_sem_lock_init( void )
 {
 
     sysv_sem_subsys_lck_grp_attr = lck_grp_attr_alloc_init();
+    lck_grp_attr_setstat(sysv_sem_subsys_lck_grp_attr);
 
-    sysv_sem_subsys_lck_grp = lck_grp_alloc_init("sysv_sem_subsys_lock", sysv_sem_subsys_lck_grp_attr);
+    sysv_sem_subsys_lck_grp = lck_grp_alloc_init("sysv_shm_subsys_lock", sysv_sem_subsys_lck_grp_attr);
 
     sysv_sem_subsys_lck_attr = lck_attr_alloc_init();
+    lck_attr_setdebug(sysv_sem_subsys_lck_attr); 
     lck_mtx_init(&sysv_sem_subsys_mutex, sysv_sem_subsys_lck_grp, sysv_sem_subsys_lck_attr);
 }
 
@@ -202,6 +198,46 @@ semsys(struct proc *p, struct semsys_args *uap, register_t *retval)
 }
 
 /*
+ * Lock or unlock the entire semaphore facility.
+ *
+ * This will probably eventually evolve into a general purpose semaphore
+ * facility status enquiry mechanism (I don't like the "read /dev/kmem"
+ * approach currently taken by ipcs and the amount of info that we want
+ * to be able to extract for ipcs is probably beyond what the capability
+ * of the getkerninfo facility.
+ *
+ * At the time that the current version of semconfig was written, ipcs is
+ * the only user of the semconfig facility.  It uses it to ensure that the
+ * semaphore facility data structures remain static while it fishes around
+ * in /dev/kmem.
+ */
+
+int
+semconfig(__unused struct proc *p, struct semconfig_args *uap, register_t *retval)
+{
+	int eval = 0;
+
+	switch (uap->flag) {
+	case SEM_CONFIG_FREEZE:
+		SYSV_SEM_SUBSYS_LOCK();
+		break;
+
+	case SEM_CONFIG_THAW:
+		SYSV_SEM_SUBSYS_UNLOCK();
+		break;
+
+	default:
+		printf("semconfig: unknown flag parameter value (%d) - ignored\n",
+		    uap->flag);
+		eval = EINVAL;
+		break;
+	}
+
+	*retval = 0;
+	return(eval);
+}
+
+/*
  * Expand the semu array to the given capacity.  If the expansion fails
  * return 0, otherwise return 1.
  *
@@ -212,6 +248,12 @@ grow_semu_array(int newSize)
 {
 	register int i;
 	register struct sem_undo *newSemu;
+	static boolean_t grow_semu_array_in_progress = FALSE;
+
+	while (grow_semu_array_in_progress) {
+		msleep(&grow_semu_array_in_progress, &sysv_sem_subsys_mutex,
+		       PPAUSE, "grow_semu_array", NULL);
+	}
 
 	if (newSize <= seminfo.semmnu)
 		return 1;
@@ -229,8 +271,13 @@ grow_semu_array(int newSize)
 #ifdef SEM_DEBUG
 	printf("growing semu[] from %d to %d\n", seminfo.semmnu, newSize);
 #endif
-	MALLOC(newSemu, struct sem_undo *, sizeof (struct sem_undo) * newSize,
-	       M_SYSVSEM, M_WAITOK | M_ZERO);
+	grow_semu_array_in_progress = TRUE;
+	SYSV_SEM_SUBSYS_UNLOCK();
+	MALLOC(newSemu, struct sem_undo*, sizeof(struct sem_undo) * newSize,
+		M_SYSVSEM, M_WAITOK);
+	SYSV_SEM_SUBSYS_LOCK();
+	grow_semu_array_in_progress = FALSE;
+	wakeup((caddr_t) &grow_semu_array_in_progress);
 	if (NULL == newSemu)
 	{
 #ifdef SEM_DEBUG
@@ -239,16 +286,15 @@ grow_semu_array(int newSize)
 		return 0;
 	}
 
-       	/* copy the old data to the new array */
+       	/* Initialize our structure.  */
 	for (i = 0; i < seminfo.semmnu; i++)
 	{
 		newSemu[i] = semu[i];
 	}
-	/*
-	 * The new elements (from newSemu[i] to newSemu[newSize-1]) have their
-	 * "un_proc" set to 0 (i.e. NULL) by the M_ZERO flag to MALLOC() above,
-	 * so they're already marked as "not in use".
-	 */
+       	for (i = seminfo.semmnu; i < newSize; i++)
+        {
+               	newSemu[i].un_proc = NULL;
+        }
 
 	/* Clean up the old array */
 	if (semu)
@@ -290,9 +336,8 @@ grow_sema_array(int newSize)
 #ifdef SEM_DEBUG
 	printf("growing sema[] from %d to %d\n", seminfo.semmni, newSize);
 #endif
-	MALLOC(newSema, struct user_semid_ds *,
-	       sizeof (struct user_semid_ds) * newSize,
-	       M_SYSVSEM, M_WAITOK | M_ZERO);
+	MALLOC(newSema, struct user_semid_ds *, sizeof(struct user_semid_ds) * newSize,
+		M_SYSVSEM, M_WAITOK);
 	if (NULL == newSema)
 	{
 #ifdef SEM_DEBUG
@@ -301,7 +346,7 @@ grow_sema_array(int newSize)
 		return 0;
 	}
 
-	/* copy over the old ids */
+	/* Initialize our new ids, and copy over the old ones */
 	for (i = 0; i < seminfo.semmni; i++)
 	{
 		newSema[i] = sema[i];
@@ -316,11 +361,12 @@ grow_sema_array(int newSize)
 		if (sema[i].sem_perm.mode & SEM_ALLOC)
 			wakeup((caddr_t)&sema[i]);
 	}
-	/*
-	 * The new elements (from newSema[i] to newSema[newSize-1]) have their
-	 * "sem_base" and "sem_perm.mode" set to 0 (i.e. NULL) by the M_ZERO
-	 * flag to MALLOC() above, so they're already marked as "not in use".
-	 */
+
+	for (i = seminfo.semmni; i < newSize; i++)
+	{
+		newSema[i].sem_base = NULL;
+		newSema[i].sem_perm.mode = 0;
+	}
 
 	/* Clean up the old array */
 	if (sema)
@@ -364,8 +410,8 @@ grow_sem_pool(int new_pool_size)
 #ifdef SEM_DEBUG
 	printf("growing sem_pool array from %d to %d\n", seminfo.semmns, new_pool_size);
 #endif
-	MALLOC(new_sem_pool, struct sem *, sizeof (struct sem) * new_pool_size,
-	       M_SYSVSEM, M_WAITOK | M_ZERO);
+	MALLOC(new_sem_pool, struct sem *, sizeof(struct sem) * new_pool_size,
+		M_SYSVSEM, M_WAITOK);
 	if (NULL == new_sem_pool) {
 #ifdef SEM_DEBUG
 		printf("allocation failed.  no changes made.\n");
@@ -489,9 +535,8 @@ semundo_adjust(struct proc *p, struct sem_undo **supptr, int semid,
 	register struct undo *sueptr, **suepptr, *new_sueptr;
 	int i;
 
-	/*
-	 * Look for and remember the sem_undo if the caller doesn't provide it
-	 */
+	/* Look for and remember the sem_undo if the caller doesn't provide
+	   it */
 
 	suptr = *supptr;
 	if (suptr == NULL) {
@@ -517,6 +562,7 @@ semundo_adjust(struct proc *p, struct sem_undo **supptr, int semid,
 	 * 0).
 	 */
 	new_sueptr = NULL;
+lookup:
 	for (i = 0, suepptr = &suptr->un_ent, sueptr = suptr->un_ent;
 	     i < suptr->un_cnt;
 	     i++, suepptr = &sueptr->une_next, sueptr = sueptr->une_next) {
@@ -532,36 +578,61 @@ semundo_adjust(struct proc *p, struct sem_undo **supptr, int semid,
 			FREE(sueptr, M_SYSVSEM);
 			sueptr = NULL;
 		}
-		return 0;
+		if (new_sueptr != NULL) {
+			/*
+			 * We lost the race: free the "undo" entry we allocated
+			 * and use the one that won.
+			 */
+			FREE(new_sueptr, M_SYSVSEM);
+			new_sueptr = NULL;
+		}
+		return(0);
 	}
 
 	/* Didn't find the right entry - create it */
 	if (adjval == 0) {
-		/* no adjustment: no need for a new entry */
+		if (new_sueptr != NULL) {
+			FREE(new_sueptr, M_SYSVSEM);
+			new_sueptr = NULL;
+		}
+		return(0);
+	}
+
+	if (new_sueptr != NULL) {
+		/*
+		 * Use the new "undo" entry we allocated in the previous pass
+		 */
+		new_sueptr->une_next = suptr->un_ent;
+		suptr->un_ent = new_sueptr;
+		suptr->un_cnt++;
+		new_sueptr->une_adjval = adjval;
+		new_sueptr->une_id = semid;
+		new_sueptr->une_num = semnum;
 		return 0;
 	}
 
-	if (suptr->un_cnt == limitseminfo.semume) {
-		/* reached the limit number of semaphore undo entries */
-		return EINVAL;
-	}
-
-	/* allocate a new semaphore undo entry */
-	MALLOC(new_sueptr, struct undo *, sizeof (struct undo),
-	       M_SYSVSEM, M_WAITOK);
-	if (new_sueptr == NULL) {
-		return ENOMEM;
-	}
-
-	/* fill in the new semaphore undo entry */
-	new_sueptr->une_next = suptr->un_ent;
-	suptr->un_ent = new_sueptr;
-	suptr->un_cnt++;
-	new_sueptr->une_adjval = adjval;
-	new_sueptr->une_id = semid;
-	new_sueptr->une_num = semnum;
-
-	return 0;
+	if (suptr->un_cnt != limitseminfo.semume) {
+		SYSV_SEM_SUBSYS_UNLOCK();
+		/*
+		 * Unlocking opens the door to race conditions.  Someone else
+		 * could be trying to allocate the same thing at this point,
+		 * so we'll have to check if we lost the race.
+		 */
+		MALLOC(new_sueptr, struct undo *, sizeof (struct undo),
+		       M_SYSVSEM, M_WAITOK);
+		SYSV_SEM_SUBSYS_LOCK();
+		if (new_sueptr == NULL) {
+			return ENOMEM;
+		}
+		/*
+		 * There might be other threads doing the same thing for this
+		 * process, so check again if an "undo" entry exists for that
+		 * semaphore.
+		 */
+		goto lookup;
+	} else
+		return(EINVAL);
+	return(0);
 }
 
 /* Assumes we already hold the subsystem lock.
@@ -671,6 +742,8 @@ semctl(struct proc *p, struct semctl_args *uap, register_t *retval)
 		if ((eval = ipcperm(cred, &semaptr->sem_perm, IPC_M)))
 				goto semctlout;
 
+		SYSV_SEM_SUBSYS_UNLOCK();
+
 		if (IS_64BIT_PROCESS(p)) {
 			eval = copyin(user_arg.buf, &sbuf, sizeof(struct user_semid_ds));
 		} else {
@@ -679,9 +752,10 @@ semctl(struct proc *p, struct semctl_args *uap, register_t *retval)
 			semid_ds_32to64((struct semid_ds *)&sbuf, &sbuf);
 		}
 		
-		if (eval != 0) {
-			goto semctlout;
-		}
+		if (eval != 0)
+			return(eval);
+
+		SYSV_SEM_SUBSYS_LOCK();
 
 		semaptr->sem_perm.uid = sbuf.sem_perm.uid;
 		semaptr->sem_perm.gid = sbuf.sem_perm.gid;
@@ -694,6 +768,7 @@ semctl(struct proc *p, struct semctl_args *uap, register_t *retval)
 		if ((eval = ipcperm(cred, &semaptr->sem_perm, IPC_R)))
 				goto semctlout;
 		bcopy(semaptr, &uds, sizeof(struct user_semid_ds));
+		SYSV_SEM_SUBSYS_UNLOCK();
 		if (IS_64BIT_PROCESS(p)) {
 			eval = copyout(&uds, user_arg.buf, sizeof(struct user_semid_ds));
 		} else {
@@ -701,6 +776,7 @@ semctl(struct proc *p, struct semctl_args *uap, register_t *retval)
 			semid_ds_64to32(&uds, &semid_ds32);
 			eval = copyout(&semid_ds32, user_arg.buf, sizeof(struct semid_ds));
 		}
+		SYSV_SEM_SUBSYS_LOCK();
 		break;
 
 	case GETNCNT:
@@ -828,7 +904,7 @@ semget(__unused struct proc *p, struct semget_args *uap, register_t *retval)
 #endif
 
 
-	SYSV_SEM_SUBSYS_LOCK();
+		SYSV_SEM_SUBSYS_LOCK();
 
     
 	if (key != IPC_PRIVATE) {
@@ -1114,44 +1190,42 @@ semop(struct proc *p, struct semop_args *uap, register_t *retval)
 #ifdef SEM_DEBUG
 		printf("semop:  good morning (eval=%d)!\n", eval);
 #endif
+		/* we need the lock here due to mods on semptr */
 		if (eval != 0) {
-			eval = EINTR;
-		}
+			if (sopptr->sem_op == 0)
+				semptr->semzcnt--;
+			else
+				semptr->semncnt--;
 
-		/*
-		 * IMPORTANT: while we were asleep, the semaphore array might
-		 * have been reallocated somewhere else (see grow_sema_array()).
-		 * When we wake up, we have to re-lookup the semaphore 
-		 * structures and re-validate them.
-		 */
+			eval = EINTR;
+			goto semopout;
+		}
 
 		suptr = NULL;	/* sem_undo may have been reallocated */
 	 	semaptr = &sema[semid];	   /* sema may have been reallocated */
+
+
+#ifdef SEM_DEBUG
+		printf("semop:  good morning!\n");
+#endif
 
 		/*
 		 * Make sure that the semaphore still exists
 		 */
 		if ((semaptr->sem_perm.mode & SEM_ALLOC) == 0 ||
-		    semaptr->sem_perm.seq != IPCID_TO_SEQ(uap->semid) ||
-		    sopptr->sem_num >= semaptr->sem_nsems) {
-			if (eval == EINTR) {
-				/*
-				 * EINTR takes precedence over the fact that
-				 * the semaphore disappeared while we were
-				 * sleeping...
-				 */
-			} else {
-				/*
-				 * The man page says to return EIDRM.
-				 * Unfortunately, BSD doesn't define that code!
-				 */
+		    semaptr->sem_perm.seq != IPCID_TO_SEQ(uap->semid)) {
+			/* The man page says to return EIDRM. */
+			/* Unfortunately, BSD doesn't define that code! */
+			if (sopptr->sem_op == 0)
+				semptr->semzcnt--;
+			else
+				semptr->semncnt--;
 #ifdef EIDRM
-				eval = EIDRM;
+		eval = EIDRM;
 #else
-				eval = EINVAL;
+		eval = EINVAL;
 #endif
-			}
-			goto semopout;
+		goto semopout;
 		}
 
 		/*
@@ -1165,10 +1239,6 @@ semop(struct proc *p, struct semop_args *uap, register_t *retval)
 			semptr->semzcnt--;
 		else
 			semptr->semncnt--;
-
-		if (eval != 0) { /* EINTR */
-			goto semopout;
-		}
 	}
 
 done:
@@ -1483,7 +1553,9 @@ IPCS_sem_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 			error = EINVAL;
 			break;
 		}
+		SYSV_SEM_SUBSYS_UNLOCK();
 		error = copyout(&seminfo, ipcs.u64.ipcs_data, ipcs.u64.ipcs_datalen);
+		SYSV_SEM_SUBSYS_LOCK();
 		break;
 
 	case IPCS_SEM_ITER:	/* Iterate over existing segments */
@@ -1516,12 +1588,14 @@ IPCS_sem_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1,
 			semid_ds_64to32(semid_dsp, &semid_ds32);
 			semid_dsp = &semid_ds32;
 		}
+		SYSV_SEM_SUBSYS_UNLOCK();
 		error = copyout(semid_dsp, ipcs.u64.ipcs_data, ipcs.u64.ipcs_datalen);
 		if (!error) {
 			/* update cursor */
 			ipcs.u64.ipcs_cursor = cursor + 1;
 			error = SYSCTL_OUT(req, &ipcs, ipcs_sz);
 		}
+		SYSV_SEM_SUBSYS_LOCK();
 		break;
 
 	default:

@@ -1,29 +1,23 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 
 #include <mach/mach_types.h>
@@ -45,7 +39,7 @@
 
 #include <vm/vm_page.h>
 
-unsigned int		LockTimeOut = 1250000000;
+unsigned int		LockTimeOut = 12500000;
 unsigned int		MutexSpin = 0;
 
 decl_mutex_data(static,mcpus_lock);
@@ -148,16 +142,8 @@ ml_io_map(
 	vm_offset_t phys_addr, 
 	vm_size_t size)
 {
-	return(io_map(phys_addr,size,VM_WIMG_IO));
+	return(io_map(phys_addr,size));
 }
-
-
-void ml_get_bouncepool_info(vm_offset_t *phys_addr, vm_size_t *size)
-{
-        *phys_addr = 0;
-	*size      = 0;
-}
-
 
 /*
  *	Routine:        ml_static_malloc
@@ -394,9 +380,9 @@ ml_processor_register(
 	else
 		proc_info->time_base_enable = (void(*)(cpu_id_t, boolean_t ))NULL;
 
-	if((proc_info->pf.pfPowerModes & pmType) == pmPowerTune) {
-		proc_info->pf.pfPowerTune0 = in_processor_info->power_mode_0;
-		proc_info->pf.pfPowerTune1 = in_processor_info->power_mode_1;
+	if (proc_info->pf.pfPowerModes & pmPowerTune) {
+	  proc_info->pf.pfPowerTune0 = in_processor_info->power_mode_0;
+	  proc_info->pf.pfPowerTune1 = in_processor_info->power_mode_1;
 	}
 
 	donap = in_processor_info->supports_nap;	/* Assume we use requested nap */
@@ -640,64 +626,57 @@ void
 ml_set_processor_speed(unsigned long speed)
 {
 	struct per_proc_info    *proc_info;
-	uint32_t                cpu;
+	uint32_t                powerModes, cpu;
 	kern_return_t           result;
  	boolean_t		current_state;
 	 unsigned int		i;
   
 	proc_info = PerProcTable[master_cpu].ppe_vaddr;
+	powerModes = proc_info->pf.pfPowerModes;
 
-	switch (proc_info->pf.pfPowerModes & pmType) {	/* Figure specific type */
-		case pmDualPLL:
+	if (powerModes & pmDualPLL) {
 
-			ml_set_processor_speed_dpll(speed);
-			break;
-			
-		case pmDFS:
+		ml_set_processor_speed_dpll(speed);
 
-			for (cpu = 0; cpu < real_ncpus; cpu++) {
-				/*
-				 * cpu_signal() returns after .5ms if it fails to signal a running cpu
-				 * retry cpu_signal() for .1s to deal with long interrupt latency at boot
-				 */
-				for (i=200; i>0; i--) {
-					current_state = ml_set_interrupts_enabled(FALSE);
-					if (cpu != cpu_number()) {
-							if (PerProcTable[cpu].ppe_vaddr->cpu_flags & SignalReady)
-							/*
-							 * Target cpu is off-line, skip
-							 */
-							result = KERN_SUCCESS;
-						else {
-							simple_lock(&spsLock);
-							result = cpu_signal(cpu, SIGPcpureq, CPRQsps, speed);	
-							if (result == KERN_SUCCESS) 
-								thread_sleep_simple_lock(&spsLock, &spsLock, THREAD_UNINT);
-							simple_unlock(&spsLock);
-						}
-					} else {
-						ml_set_processor_speed_dfs(speed);
+	} else if (powerModes & pmDFS) {
+
+		for (cpu = 0; cpu < real_ncpus; cpu++) {
+			/*
+			 * cpu_signal() returns after .5ms if it fails to signal a running cpu
+			 * retry cpu_signal() for .1s to deal with long interrupt latency at boot
+			 */
+			for (i=200; i>0; i--) {
+				current_state = ml_set_interrupts_enabled(FALSE);
+				if (cpu != cpu_number()) {
+				        if (PerProcTable[cpu].ppe_vaddr->cpu_flags & SignalReady)
+						/*
+						 * Target cpu is off-line, skip
+						 */
 						result = KERN_SUCCESS;
+					else {
+						simple_lock(&spsLock);
+						result = cpu_signal(cpu, SIGPcpureq, CPRQsps, speed);	
+						if (result == KERN_SUCCESS) 
+							thread_sleep_simple_lock(&spsLock, &spsLock, THREAD_UNINT);
+						simple_unlock(&spsLock);
 					}
-					(void) ml_set_interrupts_enabled(current_state);
-					if (result == KERN_SUCCESS)
-						break;
+				} else {
+					ml_set_processor_speed_dfs(speed);
+					result = KERN_SUCCESS;
 				}
-				if (result != KERN_SUCCESS)
-					panic("ml_set_processor_speed(): Fail to set cpu%d speed\n", cpu);
+				(void) ml_set_interrupts_enabled(current_state);
+				if (result == KERN_SUCCESS)
+					break;
 			}
-			break;
-			
-		case pmPowerTune:
-	
-			ml_set_processor_speed_powertune(speed);
-			break;
-			
-		default:					
-			break;
+			if (result != KERN_SUCCESS)
+				panic("ml_set_processor_speed(): Fail to set cpu%d speed\n", cpu);
+		}
+
+	} else if (powerModes & pmPowerTune) {
+
+		ml_set_processor_speed_powertune(speed);
 
 	}
-	return;
 }
 
 /*

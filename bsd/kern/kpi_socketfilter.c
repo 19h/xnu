@@ -1,29 +1,23 @@
 /*
  * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ * @APPLE_LICENSE_HEADER_START@
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. The rights granted to you under the License
- * may not be used to create, or enable the creation or redistribution of,
- * unlawful or unlicensed copies of an Apple operating system, or to
- * circumvent, violate, or enable the circumvention or violation of, any
- * terms of an Apple operating system software license agreement.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
- * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ * @APPLE_LICENSE_HEADER_END@
  */
 
 #include <sys/kpi_socketfilter.h>
@@ -39,8 +33,6 @@
 static struct socket_filter_list	sock_filter_head;
 static lck_mtx_t					*sock_filter_lock = 0;
 
-static void	sflt_detach_private(struct socket_filter_entry *entry, int unregistering);
-
 __private_extern__ void
 sflt_init(void)
 {
@@ -52,9 +44,12 @@ sflt_init(void)
 	
 	/* Allocate a spin lock */
 	grp_attrib = lck_grp_attr_alloc_init();
+	lck_grp_attr_setdefault(grp_attrib);
 	lck_group = lck_grp_alloc_init("socket filter lock", grp_attrib);
 	lck_grp_attr_free(grp_attrib);
 	lck_attrib = lck_attr_alloc_init();
+	lck_attr_setdefault(lck_attrib);
+	lck_attr_setdebug(lck_attrib);
 	sock_filter_lock = lck_mtx_alloc_init(lck_group, lck_attrib);
 	lck_grp_free(lck_group);
 	lck_attr_free(lck_attrib);
@@ -87,7 +82,6 @@ sflt_termsock(
 		filter_next = filter->sfe_next_onsocket;
 		sflt_detach_private(filter, 0);
 	}
-	so->so_filt = NULL;
 }
 
 __private_extern__ void
@@ -109,7 +103,7 @@ sflt_unuse(
 		for (filter = so->so_filt; filter; filter = next_filter) {
 			next_filter = filter->sfe_next_onsocket;
 			
-			if (filter->sfe_flags & SFEF_DETACHUSEZERO) {
+			if (filter->sfe_flags & SFEF_DETACHING) {
 				sflt_detach_private(filter, 0);
 			}
 		}
@@ -225,7 +219,6 @@ sflt_attach_private(
 		entry->sfe_filter = filter;
 		entry->sfe_socket = so;
 		entry->sfe_cookie = NULL;
-		entry->sfe_flags = 0;
 		if (entry->sfe_filter->sf_filter.sf_attach) {
 			filter->sf_usecount++;
 		
@@ -254,6 +247,9 @@ sflt_attach_private(
 		entry->sfe_next_onfilter = filter->sf_entry_head;
 		filter->sf_entry_head = entry;
 		
+		/* Increment the socket's usecount */
+		so->so_usecount++;
+		
 		/* Incremenet the parent filter's usecount */
 		filter->sf_usecount++;
 	}
@@ -274,17 +270,17 @@ sflt_attach_private(
  * list and the socket lock is not held.
  */
 
-static void
+__private_extern__ void
 sflt_detach_private(
 	struct socket_filter_entry *entry,
-	int	unregistering)
+	int	filter_detached)
 {
 	struct socket *so = entry->sfe_socket;
 	struct socket_filter_entry **next_ptr;
 	int				detached = 0;
 	int				found = 0;
 	
-	if (unregistering) {
+	if (filter_detached) {
 		socket_lock(entry->sfe_socket, 0);
 	}
 	
@@ -294,16 +290,7 @@ sflt_detach_private(
 	 * same time from attempting to remove the same entry.
 	 */
 	lck_mtx_lock(sock_filter_lock);
-	if (!unregistering) {
-		if ((entry->sfe_flags & SFEF_UNREGISTERING) != 0) {
-			/*
-			 * Another thread is unregistering the filter, we need to
-			 * avoid detaching the filter here so the socket won't go
-			 * away.
-			 */
-			lck_mtx_unlock(sock_filter_lock);
-			return;
-		}
+	if (!filter_detached) {
 		for (next_ptr = &entry->sfe_filter->sf_entry_head; *next_ptr;
 			 next_ptr = &((*next_ptr)->sfe_next_onfilter)) {
 			if (*next_ptr == entry) {
@@ -312,30 +299,24 @@ sflt_detach_private(
 				break;
 			}
 		}
-		
-		if (!found && (entry->sfe_flags & SFEF_DETACHUSEZERO) == 0) {
-			lck_mtx_unlock(sock_filter_lock);
-			return;
-		}
 	}
-	else {
-		/*
-		 * Clear the removing flag. We will perform the detach here or
-		 * request a delayed deatch.
-		 */
-		entry->sfe_flags &= ~SFEF_UNREGISTERING;
-	}
-
-	if (entry->sfe_socket->so_filteruse != 0) {
-		entry->sfe_flags |= SFEF_DETACHUSEZERO;
+	
+	if (!filter_detached && !found && (entry->sfe_flags & SFEF_DETACHING) == 0) {
 		lck_mtx_unlock(sock_filter_lock);
 		return;
 	}
-	else {
-		/*
-		 * Check if we are removing the last attached filter and
-		 * the parent filter is being unregistered.
-		 */
+
+	if (entry->sfe_socket->so_filteruse != 0) {
+		lck_mtx_unlock(sock_filter_lock);
+		entry->sfe_flags |= SFEF_DETACHING;
+		return;
+	}
+	
+	/*
+	 * Check if we are removing the last attached filter and
+	 * the parent filter is being unregistered.
+	 */
+	if (entry->sfe_socket->so_filteruse == 0) {
 		entry->sfe_filter->sf_usecount--;
 		if ((entry->sfe_filter->sf_usecount == 0) &&
 			(entry->sfe_filter->sf_flags & SFF_DETACHING) != 0)
@@ -359,10 +340,14 @@ sflt_detach_private(
 		entry->sfe_filter->sf_filter.sf_unregistered(entry->sfe_filter->sf_filter.sf_handle);
 		FREE(entry->sfe_filter, M_IFADDR);
 	}
-
-	if (unregistering) 
+	
+	if (filter_detached) {
 		socket_unlock(entry->sfe_socket, 1);
-
+	}
+	else {
+		// We need some better way to decrement the usecount
+		so->so_usecount--;
+	}
 	FREE(entry, M_IFADDR);
 }
 
@@ -400,7 +385,6 @@ sflt_detach(
 		sflt_detach_private(filter, 0);
 	}
 	else {
-		socket->so_filt = NULL;
 		result = ENOENT;
 	}
 	
@@ -469,7 +453,6 @@ sflt_unregister(
 {
 	struct socket_filter *filter;
 	struct socket_filter_entry *entry_head = NULL;
-	struct socket_filter_entry *next_entry = NULL;
 	
 	/* Find the entry and remove it from the global and protosw lists */
 	lck_mtx_lock(sock_filter_lock);
@@ -486,13 +469,6 @@ sflt_unregister(
 		entry_head = filter->sf_entry_head;
 		filter->sf_entry_head = NULL;
 		filter->sf_flags |= SFF_DETACHING;
-	
-		for (next_entry = entry_head; next_entry;
-			 next_entry = next_entry->sfe_next_onfilter) {
-			socket_lock(next_entry->sfe_socket, 1);
-			next_entry->sfe_flags |= SFEF_UNREGISTERING;
-			socket_unlock(next_entry->sfe_socket, 0);	/* Radar 4201550: prevents the socket from being deleted while being unregistered */
-		}
 	}
 	
 	lck_mtx_unlock(sock_filter_lock);
@@ -506,6 +482,7 @@ sflt_unregister(
 			filter->sf_filter.sf_unregistered(filter->sf_filter.sf_handle);
 	} else {
 		while (entry_head) {
+			struct socket_filter_entry *next_entry;
 			next_entry = entry_head->sfe_next_onfilter;
 			sflt_detach_private(entry_head, 1);
 			entry_head = next_entry;
