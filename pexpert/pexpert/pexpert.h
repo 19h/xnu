@@ -185,7 +185,11 @@ struct PE_Video {
 	unsigned char	v_rotate;	/* Rotation: 0:normal, 1:right 90, 2:left 180, 3:left 90 */
 	unsigned char	v_scale;	/* Scale Factor for both X & Y */
 	char		reserved1[2];
+#ifdef __LP64__
 	long		reserved2;
+#else
+	long		v_baseAddrHigh;
+#endif
 };
 
 typedef struct PE_Video       PE_Video;
@@ -211,6 +215,7 @@ extern int PE_initialize_console(
 #define kPEReleaseScreen	5
 #define kPEEnableScreen	 	6
 #define kPEDisableScreen	7
+#define kPEBaseAddressChange	8
 
 extern void PE_display_icon( unsigned int flags,
 			     const char * name );
@@ -248,6 +253,17 @@ extern boolean_t PE_parse_boot_argn(
 	const char	*arg_string,
 	void    	*arg_ptr,
 	int			max_arg);
+
+extern boolean_t PE_get_default(
+	const char	*property_name,
+	void		*property_ptr,
+	unsigned int max_property);
+
+#define PE_default_value(_key, _variable, _default)	\
+	do {															  \
+		if (!PE_get_default((_key), &(_variable), sizeof(_variable))) \
+			_variable = _default;									  \
+	} while(0)
 
 enum {
     kPEOptionKey	= 0x3a,
