@@ -131,7 +131,8 @@ enum {
     kIOPMSleepReasonLowPower                    = 106,
     kIOPMSleepReasonThermalEmergency            = 107,
     kIOPMSleepReasonMaintenance                 = 108,
-    kIOPMSleepReasonSleepServiceExit            = 109
+    kIOPMSleepReasonSleepServiceExit            = 109,
+    kIOPMSleepReasonDarkWakeThermalEmergency    = 110
 };
 
 /*
@@ -145,6 +146,7 @@ enum {
 #define kIOPMLowPowerSleepKey                       "Low Power Sleep"
 #define kIOPMThermalEmergencySleepKey               "Thermal Emergency Sleep"
 #define kIOPMSleepServiceExitKey                    "Sleep Service Back to Sleep"
+#define kIOPMDarkWakeThermalEmergencyKey            "Dark Wake Thermal Emergency"
 
 
 enum {
@@ -674,8 +676,16 @@ struct IOPMSystemSleepPolicyVariables
 
     uint32_t    standbyDelay;               // standby delay in seconds
     uint32_t    poweroffDelay;              // auto-poweroff delay in seconds
+    uint32_t    scheduledAlarms;            // bitmask of scheduled alarm types
 
-    uint32_t    reserved[51];               // pad sizeof 256 bytes
+    uint32_t    reserved[50];               // pad sizeof 256 bytes
+};
+
+enum {
+    kIOPMAlarmBitDebugWake                  = 0x01,
+    kIOPMAlarmBitCalendarWake               = 0x02,
+    kIOPMAlarmBitMaintenanceWake            = 0x04,
+    kIOPMAlarmBitSleepServiceWake           = 0x08
 };
 
 enum {
@@ -700,7 +710,8 @@ enum {
     kIOPMSleepFactorMagicPacketWakeEnabled  = 0x00001000ULL,
     kIOPMSleepFactorHibernateForced         = 0x00010000ULL,
     kIOPMSleepFactorAutoPowerOffDisabled    = 0x00020000ULL,
-    kIOPMSleepFactorAutoPowerOffForced      = 0x00040000ULL
+    kIOPMSleepFactorAutoPowerOffForced      = 0x00040000ULL,
+    kIOPMSleepFactorExternalDisplay         = 0x00080000ULL
 };
 
 // System Sleep Types
@@ -728,7 +739,12 @@ enum {
     kIOPMWakeEventLidClose                  = 0x00000002,
     kIOPMWakeEventACAttach                  = 0x00000004,
     kIOPMWakeEventACDetach                  = 0x00000008,
+    kIOPMWakeEventCDInsert                  = 0x00000010,
+    kIOPMWakeEventCDEject                   = 0x00000020,
+    kIOPMWakeEventHPDAttach                 = 0x00000040,
+    kIOPMWakeEventHPDDetach                 = 0x00000080,
     kIOPMWakeEventPowerButton               = 0x00000100,
+    kIOPMWakeEventG3PowerOn                 = 0x00000200,
     kIOPMWakeEventUserPME                   = 0x00000400,
     kIOPMWakeEventSleepTimer                = 0x00000800,
     kIOPMWakeEventBatteryLow                = 0x00001000,
@@ -757,7 +773,7 @@ struct IOPMSystemSleepParameters
     uint32_t    reserved2[10];
 } __attribute__((packed));
 
-#ifdef KERNEL
+#if defined(KERNEL) && defined(__cplusplus)
 
 /*!
  * @defined kIOPMInstallSystemSleepPolicyHandlerKey
@@ -771,7 +787,8 @@ struct IOPMSystemSleepParameters
         "IOPMInstallSystemSleepPolicyHandler"
 
 typedef IOReturn (*IOPMSystemSleepPolicyHandler)(
-        void * target, const IOPMSystemSleepPolicyVariables * vars,
+        void * target,
+        const IOPMSystemSleepPolicyVariables * vars,
         IOPMSystemSleepParameters * params );
 
 #endif /* KERNEL */

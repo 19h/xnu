@@ -19,15 +19,12 @@ _IOBSDNameMatching
 _IOBSDRegistryEntryForDeviceTree
 _IOBSDRegistryEntryGetData
 _IOBSDRegistryEntryRelease
-_IOCDMatching
 _IOCreateThread
 _IODTFreeLoaderInfo
 _IODTGetLoaderInfo
 _IODelay
-_IODiskMatching
 _IOExitThread
 _IOFindBSDRoot
-_IOFindMatchingChild
 _IOFindNameForValue
 _IOFindValueForName
 _IOFlushProcessorCache
@@ -69,7 +66,6 @@ _IOMapperInsertPPNPages
 _IOMapperInsertPage
 _IOMapperInsertUPLPages
 _IONDRVLibrariesInitialize
-_IONetworkMatching
 _IONetworkNamePrefixMatching
 _IOOFPathMatching
 _IOPageableMapForAddress
@@ -100,9 +96,7 @@ _IOSimpleLockTryLock:_lck_spin_try_lock
 _IOSimpleLockUnlock:_lck_spin_unlock
 _IOSizeToAlignment
 _IOSleep
-_IOSpinUnlock
 _IOSystemShutdownNotification
-_IOTrySpinLock
 _IOZeroTvalspec
 _KUNCExecute
 _KUNCGetNotificationID
@@ -1818,7 +1812,6 @@ __ZN8IOMapper10superClassE
 __ZN8IOMapper11NewARTTableEmPPvPj
 __ZN8IOMapper12FreeARTTableEP6OSDatam
 __ZN8IOMapper17setMapperRequiredEb
-__ZN8IOMapper18_RESERVEDIOMapper3Ev
 __ZN8IOMapper18_RESERVEDIOMapper4Ev
 __ZN8IOMapper18_RESERVEDIOMapper5Ev
 __ZN8IOMapper18_RESERVEDIOMapper6Ev
@@ -2877,8 +2870,6 @@ _device_data_action
 _devnode_free
 _disable_serial_output
 _ether_check_multi
-_ev_try_lock
-_ev_unlock
 _fatfile_getarch
 _fatfile_getarch_affinity
 _find_entry
@@ -3193,7 +3184,6 @@ _vm_protect
 _vm_region
 _vm_region_object_create
 _vsnprintf
-_vsprintf
 _vsscanf
 _zalloc
 _zfree

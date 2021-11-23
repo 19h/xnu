@@ -167,19 +167,20 @@ void IOInterruptEventSource::disable()
 
 void IOInterruptEventSource::setWorkLoop(IOWorkLoop *inWorkLoop)
 {
-    super::setWorkLoop(inWorkLoop);
+    if (inWorkLoop) super::setWorkLoop(inWorkLoop);
 
-    if (!provider)
-    	return;
-
-    if ( !inWorkLoop ) {
-	if (intIndex >= 0) {
-	    provider->unregisterInterrupt(intIndex);
+    if (provider) {
+	if (!inWorkLoop) {
+	    if (intIndex >= 0) {
+		provider->unregisterInterrupt(intIndex);
+		intIndex = ~intIndex;
+	    }
+	} else if ((intIndex < 0) && (kIOReturnSuccess == registerInterruptHandler(provider, ~intIndex))) {
 	    intIndex = ~intIndex;
 	}
-    } else if ((intIndex < 0) && (kIOReturnSuccess == registerInterruptHandler(provider, ~intIndex))) {
-	intIndex = ~intIndex;
     }
+
+    if (!inWorkLoop) super::setWorkLoop(inWorkLoop);
 }
 
 const IOService *IOInterruptEventSource::getProvider() const
@@ -210,14 +211,14 @@ bool IOInterruptEventSource::checkForWork()
 	{
 		if (trace)
 			IOTimeStampStartConstant(IODBG_INTES(IOINTES_ACTION),
-									 (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+						 VM_KERNEL_UNSLIDE(intAction), (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
 		
 		// Call the handler
 		(*intAction)(owner, this, numInts);
 		
 		if (trace)
 			IOTimeStampEndConstant(IODBG_INTES(IOINTES_ACTION),
-								   (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+					       VM_KERNEL_UNSLIDE(intAction), (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
 		
 		consumerCount = cacheProdCount;
 		if (autoDisable && !explicitDisable)
@@ -228,14 +229,14 @@ bool IOInterruptEventSource::checkForWork()
 	{
 		if (trace)
 			IOTimeStampStartConstant(IODBG_INTES(IOINTES_ACTION),
-									 (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+						 VM_KERNEL_UNSLIDE(intAction), (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
 		
 		// Call the handler
 		(*intAction)(owner, this, -numInts);
 		
 		if (trace)
 			IOTimeStampEndConstant(IODBG_INTES(IOINTES_ACTION),
-								   (uintptr_t) intAction, (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
+					       VM_KERNEL_UNSLIDE(intAction), (uintptr_t) owner, (uintptr_t) this, (uintptr_t) workLoop);
 		
 		consumerCount = cacheProdCount;
 		if (autoDisable && !explicitDisable)
