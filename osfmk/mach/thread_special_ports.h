@@ -73,7 +73,6 @@
 
 #define THREAD_READ_PORT        3       /* The read port for thread. */
 
-#define THREAD_MAX_SPECIAL_PORT THREAD_READ_PORT
 /*
  *	Definitions for ease of use
  */

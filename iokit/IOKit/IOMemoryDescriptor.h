@@ -840,7 +840,6 @@ class IOMemoryMap : public OSObject
 	OSDeclareDefaultStructorsWithDispatch(IOMemoryMap);
 #ifdef XNU_KERNEL_PRIVATE
 public:
-	IOOptionBits         fOptions;
 	OSPtr<IOMemoryDescriptor>  fMemory;
 	OSPtr<IOMemoryMap>         fSuperMap;
 	mach_vm_size_t       fOffset;
@@ -848,7 +847,10 @@ public:
 	mach_vm_size_t       fLength;
 	task_t               fAddressTask;
 	vm_map_t             fAddressMap;
+	IOOptionBits         fOptions;
 	upl_t                fRedirUPL;
+	ipc_port_t           fRedirEntry;
+	IOMemoryDescriptor * fOwner;
 	uint8_t              fUserClientUnmap;
 #if IOTRACKING
 	IOTrackingUser       fTracking;

@@ -28,5 +28,3 @@
 
 extern int IOMemoryDescriptorTest(int x);
 
-#define kIOServiceTestServiceManagementEntitlementKey "com.apple.iokit.test-service-management"
-

@@ -89,7 +89,7 @@ int merge_adaptive_coalitions;
 LCK_GRP_DECLARE(coalitions_lck_grp, "coalition");
 
 /* coalitions_list_lock protects coalition_count, coalitions queue, next_coalition_id. */
-static LCK_RW_DECLARE(coalitions_list_lock, &coalitions_lck_grp);
+static LCK_MTX_DECLARE(coalitions_list_lock, &coalitions_lck_grp);
 static uint64_t coalition_count;
 static uint64_t coalition_next_id = 1;
 static queue_head_t coalitions_q;
@@ -1198,7 +1198,7 @@ coalition_create_internal(int type, int role, boolean_t privileged, coalition_t 
 
 	lck_mtx_init(&new_coal->lock, &coalitions_lck_grp, LCK_ATTR_NULL);
 
-	lck_rw_lock_exclusive(&coalitions_list_lock);
+	lck_mtx_lock(&coalitions_list_lock);
 	new_coal->id = coalition_next_id++;
 	coalition_count++;
 	enqueue_tail(&coalitions_q, &new_coal->coalitions);
@@ -1215,7 +1215,7 @@ coalition_create_internal(int type, int role, boolean_t privileged, coalition_t 
 #endif
 	cid = new_coal->id;
 	ctype = new_coal->type;
-	lck_rw_unlock_exclusive(&coalitions_list_lock);
+	lck_mtx_unlock(&coalitions_list_lock);
 
 	coal_dbg("id:%llu, type:%s", cid, coal_type_str(ctype));
 
@@ -1281,29 +1281,22 @@ coalition_release(coalition_t coal)
  * coalition_find_by_id_internal
  * Returns: Coalition object with specified id, NOT referenced.
  *          If not found, returns COALITION_NULL.
- *          If found, returns a locked coalition.
- *
- * Condition: No locks held
+ * Condition: coalitions_list_lock must be LOCKED.
  */
 static coalition_t
 coalition_find_by_id_internal(uint64_t coal_id)
 {
-	coalition_t coal;
-
 	if (coal_id == 0) {
 		return COALITION_NULL;
 	}
 
-	lck_rw_lock_shared(&coalitions_list_lock);
+	lck_mtx_assert(&coalitions_list_lock, LCK_MTX_ASSERT_OWNED);
+	coalition_t coal;
 	qe_foreach_element(coal, &coalitions_q, coalitions) {
 		if (coal->id == coal_id) {
-			coalition_lock(coal);
-			lck_rw_unlock_shared(&coalitions_list_lock);
 			return coal;
 		}
 	}
-	lck_rw_unlock_shared(&coalitions_list_lock);
-
 	return COALITION_NULL;
 }
 
@@ -1315,16 +1308,23 @@ coalition_find_by_id_internal(uint64_t coal_id)
 coalition_t
 coalition_find_by_id(uint64_t cid)
 {
-	coalition_t coal = coalition_find_by_id_internal(cid);
-
-	if (coal == COALITION_NULL) {
+	if (cid == 0) {
 		return COALITION_NULL;
 	}
 
-	/* coal is locked */
+	lck_mtx_lock(&coalitions_list_lock);
+
+	coalition_t coal = coalition_find_by_id_internal(cid);
+	if (coal == COALITION_NULL) {
+		lck_mtx_unlock(&coalitions_list_lock);
+		return COALITION_NULL;
+	}
+
+	coalition_lock(coal);
 
 	if (coal->reaped) {
 		coalition_unlock(coal);
+		lck_mtx_unlock(&coalitions_list_lock);
 		return COALITION_NULL;
 	}
 
@@ -1338,6 +1338,7 @@ coalition_find_by_id(uint64_t cid)
 #endif
 
 	coalition_unlock(coal);
+	lck_mtx_unlock(&coalitions_list_lock);
 
 	coal_dbg("id:%llu type:%s ref_count:%u",
 	    coal->id, coal_type_str(coal->type), rc);
@@ -1356,18 +1357,25 @@ coalition_find_by_id(uint64_t cid)
 coalition_t
 coalition_find_and_activate_by_id(uint64_t cid)
 {
-	coalition_t coal = coalition_find_by_id_internal(cid);
-
-	if (coal == COALITION_NULL) {
+	if (cid == 0) {
 		return COALITION_NULL;
 	}
 
-	/* coal is locked */
+	lck_mtx_lock(&coalitions_list_lock);
+
+	coalition_t coal = coalition_find_by_id_internal(cid);
+	if (coal == COALITION_NULL) {
+		lck_mtx_unlock(&coalitions_list_lock);
+		return COALITION_NULL;
+	}
+
+	coalition_lock(coal);
 
 	if (coal->reaped || coal->terminated) {
 		/* Too late to put something new into this coalition, it's
 		 * already on its way out the door */
 		coalition_unlock(coal);
+		lck_mtx_unlock(&coalitions_list_lock);
 		return COALITION_NULL;
 	}
 
@@ -1385,6 +1393,7 @@ coalition_find_and_activate_by_id(uint64_t cid)
 #endif
 
 	coalition_unlock(coal);
+	lck_mtx_unlock(&coalitions_list_lock);
 
 	coal_dbg("id:%llu type:%s ref_count:%u, active_count:%u",
 	    coal->id, coal_type_str(coal->type), rc, ac);
@@ -1845,15 +1854,6 @@ coalitions_remove_task(task_t task)
 	kern_return_t kr;
 	int i;
 
-	task_lock(task);
-	if (!task_is_coalition_member(task)) {
-		task_unlock(task);
-		return KERN_SUCCESS;
-	}
-
-	task_clear_coalition_member(task);
-	task_unlock(task);
-
 	for (i = 0; i < COALITION_NUM_TYPES; i++) {
 		kr = coalition_remove_task_internal(task, i);
 		assert(kr == KERN_SUCCESS);
@@ -2003,10 +2003,10 @@ coalition_reap_internal(coalition_t coal)
 
 	coalition_unlock(coal);
 
-	lck_rw_lock_exclusive(&coalitions_list_lock);
+	lck_mtx_lock(&coalitions_list_lock);
 	coalition_count--;
 	remqueue(&coal->coalitions);
-	lck_rw_unlock_exclusive(&coalitions_list_lock);
+	lck_mtx_unlock(&coalitions_list_lock);
 
 	/* Release the list's reference and launchd's reference. */
 	coalition_release(coal);
@@ -2116,7 +2116,7 @@ coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, int list_sz)
 	int ncoals = 0;
 	struct coalition *coal;
 
-	lck_rw_lock_shared(&coalitions_list_lock);
+	lck_mtx_lock(&coalitions_list_lock);
 	qe_foreach_element(coal, &coalitions_q, coalitions) {
 		if (!coal->reaped && (type < 0 || type == (int)coal->type)) {
 			if (coal_list && ncoals < list_sz) {
@@ -2125,7 +2125,7 @@ coalitions_get_list(int type, struct procinfo_coalinfo *coal_list, int list_sz)
 			++ncoals;
 		}
 	}
-	lck_rw_unlock_shared(&coalitions_list_lock);
+	lck_mtx_unlock(&coalitions_list_lock);
 
 	return ncoals;
 }

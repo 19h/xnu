@@ -115,6 +115,7 @@
  */
 comp_t  encode_comp_t(uint32_t, uint32_t);
 void    acctwatch(void *);
+void    acct_init(void);
 
 /*
  * Accounting vnode pointer, and suspended accounting vnode pointer.  States
@@ -138,11 +139,18 @@ int     acctresume = 4;         /* resume when free space risen to > 4% */
 int     acctchkfreq = 15;       /* frequency (in seconds) to check space */
 
 
-static LCK_GRP_DECLARE(acct_subsys_lck_grp, "acct");
-static LCK_MTX_DECLARE(acct_subsys_mutex, &acct_subsys_lck_grp);
+static lck_grp_t       *acct_subsys_lck_grp;
+static lck_mtx_t       *acct_subsys_mutex;
 
-#define ACCT_SUBSYS_LOCK() lck_mtx_lock(&acct_subsys_mutex)
-#define ACCT_SUBSYS_UNLOCK() lck_mtx_unlock(&acct_subsys_mutex)
+#define ACCT_SUBSYS_LOCK() lck_mtx_lock(acct_subsys_mutex)
+#define ACCT_SUBSYS_UNLOCK() lck_mtx_unlock(acct_subsys_mutex)
+
+void
+acct_init(void)
+{
+	acct_subsys_lck_grp = lck_grp_alloc_init("acct", NULL);
+	acct_subsys_mutex = lck_mtx_alloc_init(acct_subsys_lck_grp, NULL);
+}
 
 
 /*

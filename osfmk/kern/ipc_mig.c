@@ -347,7 +347,7 @@ mach_msg_rpc_from_kernel(
 	mach_msg_size_t         send_size,
 	mach_msg_size_t         rcv_size)
 {
-	return kernel_mach_msg_rpc(msg, send_size, rcv_size, TRUE, TRUE, NULL);
+	return kernel_mach_msg_rpc(msg, send_size, rcv_size, TRUE, NULL);
 }
 #endif /* IKM_SUPPORT_LEGACY */
 
@@ -357,7 +357,7 @@ mach_msg_rpc_from_kernel_proper(
 	mach_msg_size_t         send_size,
 	mach_msg_size_t         rcv_size)
 {
-	return kernel_mach_msg_rpc(msg, send_size, rcv_size, FALSE, TRUE, NULL);
+	return kernel_mach_msg_rpc(msg, send_size, rcv_size, FALSE, NULL);
 }
 
 mach_msg_return_t
@@ -369,7 +369,6 @@ kernel_mach_msg_rpc(
 	__unused
 #endif
 	boolean_t           legacy,
-	boolean_t           interruptible,
 	boolean_t           *message_moved)
 {
 	thread_t self = current_thread();
@@ -450,7 +449,7 @@ kernel_mach_msg_rpc(
 		require_ip_active(reply);
 
 		/* JMM - why this check? */
-		if (interruptible && !self->active && !self->inspection) {
+		if (!self->active && !self->inspection) {
 			ipc_port_dealloc_reply(reply);
 			self->ith_rpc_reply = IP_NULL;
 			return MACH_RCV_INTERRUPTED;
@@ -463,7 +462,7 @@ kernel_mach_msg_rpc(
 		    MACH_MSG_OPTION_NONE,
 		    MACH_MSG_SIZE_MAX,
 		    MACH_MSG_TIMEOUT_NONE,
-		    interruptible ? THREAD_INTERRUPTIBLE : THREAD_UNINT);
+		    THREAD_INTERRUPTIBLE);
 
 		mr = self->ith_state;
 		kmsg = self->ith_kmsg;
@@ -476,7 +475,7 @@ kernel_mach_msg_rpc(
 		}
 
 		assert(mr == MACH_RCV_INTERRUPTED);
-		assert(interruptible);
+
 		assert(reply == self->ith_rpc_reply);
 
 		if (self->ast & AST_APC) {
@@ -1037,7 +1036,7 @@ convert_mig_object_to_port(
 	 * if this is the first send right
 	 */
 	if (!ipc_kobject_make_send_lazy_alloc_port(&mig_object->port,
-	    (ipc_kobject_t) mig_object, IKOT_MIG, IPC_KOBJECT_ALLOC_NONE, false, 0)) {
+	    (ipc_kobject_t) mig_object, IKOT_MIG, false, 0)) {
 		mig_object_deallocate(mig_object);
 	}
 

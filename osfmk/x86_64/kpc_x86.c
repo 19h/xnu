@@ -631,9 +631,9 @@ get_interrupted_pc(bool *kernel_out)
 }
 
 static void
-kpc_sample_kperf_x86(uint32_t ctr, uint32_t actionid, uint64_t count,
-    uint64_t config)
+kpc_sample_kperf_x86(uint32_t ctr, uint64_t count, uint64_t config)
 {
+	uint32_t actionid = FIXED_ACTIONID(ctr);
 	bool kernel = false;
 	uintptr_t pc = get_interrupted_pc(&kernel);
 	kperf_kpc_flags_t flags = kernel ? KPC_KERNEL_PC : 0;
@@ -666,15 +666,14 @@ kpc_pmi_handler(void)
 			FIXED_SHADOW(ctr)
 			        += (kpc_fixed_max() - FIXED_RELOAD(ctr) + 1 /* Wrap */) + extra;
 
-			uint32_t actionid = FIXED_ACTIONID(ctr);
-			BUF_INFO(PERF_KPC_FCOUNTER, ctr, FIXED_SHADOW(ctr), extra, actionid);
+			BUF_INFO(PERF_KPC_FCOUNTER, ctr, FIXED_SHADOW(ctr), extra, FIXED_ACTIONID(ctr));
 
-			if (actionid != 0) {
-				kpc_sample_kperf_x86(ctr, actionid, FIXED_SHADOW(ctr) + extra, 0);
+			if (FIXED_ACTIONID(ctr)) {
+				kpc_sample_kperf_x86(ctr, FIXED_SHADOW(ctr) + extra, 0);
 			}
 		}
 	}
-#endif // FIXED_COUNTER_SHADOW
+#endif
 
 	for (ctr = 0; ctr < kpc_configurable_count(); ctr++) {
 		if ((1ULL << ctr) & status) {
@@ -687,12 +686,11 @@ kpc_pmi_handler(void)
 			 * bits are in the correct state before the call to kperf_sample */
 			wrmsr64(MSR_IA32_PERF_GLOBAL_OVF_CTRL, 1ull << ctr);
 
-			unsigned int actionid = CONFIGURABLE_ACTIONID(ctr);
-			BUF_INFO(PERF_KPC_COUNTER, ctr, CONFIGURABLE_SHADOW(ctr), extra, actionid);
+			BUF_INFO(PERF_KPC_COUNTER, ctr, CONFIGURABLE_SHADOW(ctr), extra, CONFIGURABLE_ACTIONID(ctr));
 
-			if (actionid != 0) {
+			if (CONFIGURABLE_ACTIONID(ctr)) {
 				uint64_t config = IA32_PERFEVTSELx(ctr);
-				kpc_sample_kperf_x86(ctr + kpc_fixed_count(), actionid,
+				kpc_sample_kperf_x86(ctr + kpc_configurable_count(),
 				    CONFIGURABLE_SHADOW(ctr) + extra, config);
 			}
 		}

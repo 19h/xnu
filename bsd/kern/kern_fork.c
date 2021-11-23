@@ -841,13 +841,12 @@ fork_create_child(task_t parent_task,
 	}
 
 	/*
-	 * Create a new thread for the child process. Pin it and make it immovable.
+	 * Create a new thread for the child process
 	 * The new thread is waiting on the event triggered by 'task_clear_return_wait'
 	 */
 	result = thread_create_waiting(child_task,
 	    (thread_continue_t)task_wait_to_return,
 	    task_get_return_wait_event(child_task),
-	    TH_CREATE_WAITING_OPTION_PINNED | TH_CREATE_WAITING_OPTION_IMMOVABLE,
 	    &child_thread);
 
 	if (result != KERN_SUCCESS) {
@@ -1125,14 +1124,13 @@ forkproc_free(proc_t p)
 	/* Update the audit session proc count */
 	AUDIT_SESSION_PROCEXIT(p);
 
-	lck_mtx_destroy(&p->p_mlock, &proc_mlock_grp);
-	lck_mtx_destroy(&p->p_fdmlock, &proc_fdmlock_grp);
-	lck_mtx_destroy(&p->p_ucred_mlock, &proc_ucred_mlock_grp);
+	lck_mtx_destroy(&p->p_mlock, proc_mlock_grp);
+	lck_mtx_destroy(&p->p_fdmlock, proc_fdmlock_grp);
+	lck_mtx_destroy(&p->p_ucred_mlock, proc_ucred_mlock_grp);
 #if CONFIG_DTRACE
-	lck_mtx_destroy(&p->p_dtrace_sprlock, &proc_lck_grp);
+	lck_mtx_destroy(&p->p_dtrace_sprlock, proc_lck_grp);
 #endif
-	lck_spin_destroy(&p->p_slock, &proc_slock_grp);
-	lck_rw_destroy(&p->p_dirs_lock, &proc_dirslock_grp);
+	lck_spin_destroy(&p->p_slock, proc_slock_grp);
 
 	/* Release the credential reference */
 	kauth_cred_t tmp_ucred = p->p_ucred;
@@ -1155,9 +1153,8 @@ forkproc_free(proc_t p)
 	p->p_sigacts = NULL;
 	zfree(proc_stats_zone, p->p_stats);
 	p->p_stats = NULL;
-	if (p->p_subsystem_root_path) {
-		zfree(ZV_NAMEI, p->p_subsystem_root_path);
-	}
+	FREE(p->p_subsystem_root_path, M_SBUF);
+	p->p_subsystem_root_path = NULL;
 
 	proc_checkdeadrefs(p);
 	zfree(proc_zone, p);
@@ -1320,14 +1317,13 @@ retry:
 	/* update audit session proc count */
 	AUDIT_SESSION_PROCNEW(child_proc);
 
-	lck_mtx_init(&child_proc->p_mlock, &proc_mlock_grp, &proc_lck_attr);
-	lck_mtx_init(&child_proc->p_fdmlock, &proc_fdmlock_grp, &proc_lck_attr);
-	lck_mtx_init(&child_proc->p_ucred_mlock, &proc_ucred_mlock_grp, &proc_lck_attr);
+	lck_mtx_init(&child_proc->p_mlock, proc_mlock_grp, proc_lck_attr);
+	lck_mtx_init(&child_proc->p_fdmlock, proc_fdmlock_grp, proc_lck_attr);
+	lck_mtx_init(&child_proc->p_ucred_mlock, proc_ucred_mlock_grp, proc_lck_attr);
 #if CONFIG_DTRACE
-	lck_mtx_init(&child_proc->p_dtrace_sprlock, &proc_lck_grp, &proc_lck_attr);
+	lck_mtx_init(&child_proc->p_dtrace_sprlock, proc_lck_grp, proc_lck_attr);
 #endif
-	lck_spin_init(&child_proc->p_slock, &proc_slock_grp, &proc_lck_attr);
-	lck_rw_init(&child_proc->p_dirs_lock, &proc_dirslock_grp, &proc_lck_attr);
+	lck_spin_init(&child_proc->p_slock, proc_slock_grp, proc_lck_attr);
 
 	klist_init(&child_proc->p_klist);
 
@@ -1352,6 +1348,7 @@ retry:
 	 *
 	 * XXX may fail to copy descriptors to child
 	 */
+	lck_rw_init(&child_proc->p_dirs_lock, proc_dirslock_grp, proc_lck_attr);
 	child_proc->p_fd = fdcopy(parent_proc, parent_uthread->uu_cdir);
 
 #if SYSV_SHM
@@ -1465,9 +1462,7 @@ retry:
 
 	if (parent_proc->p_subsystem_root_path) {
 		size_t parent_length = strlen(parent_proc->p_subsystem_root_path) + 1;
-		assert(parent_length <= MAXPATHLEN);
-		child_proc->p_subsystem_root_path = zalloc_flags(ZV_NAMEI,
-		    Z_WAITOK | Z_ZERO);
+		MALLOC(child_proc->p_subsystem_root_path, char *, parent_length, M_SBUF, M_WAITOK | M_ZERO);
 		memcpy(child_proc->p_subsystem_root_path, parent_proc->p_subsystem_root_path, parent_length);
 	}
 
@@ -1478,7 +1473,7 @@ bad:
 void
 proc_lock(proc_t p)
 {
-	LCK_MTX_ASSERT(&proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(proc_list_mlock, LCK_MTX_ASSERT_NOTOWNED);
 	lck_mtx_lock(&p->p_mlock);
 }
 
@@ -1491,7 +1486,7 @@ proc_unlock(proc_t p)
 void
 proc_spinlock(proc_t p)
 {
-	lck_spin_lock_grp(&p->p_slock, &proc_slock_grp);
+	lck_spin_lock_grp(&p->p_slock, proc_slock_grp);
 }
 
 void
@@ -1503,13 +1498,13 @@ proc_spinunlock(proc_t p)
 void
 proc_list_lock(void)
 {
-	lck_mtx_lock(&proc_list_mlock);
+	lck_mtx_lock(proc_list_mlock);
 }
 
 void
 proc_list_unlock(void)
 {
-	lck_mtx_unlock(&proc_list_mlock);
+	lck_mtx_unlock(proc_list_mlock);
 }
 
 void
@@ -1639,6 +1634,7 @@ uthread_cleanup_name(void *uthread)
 void
 uthread_cleanup(task_t task, void *uthread, void * bsd_info)
 {
+	struct _select *sel;
 	uthread_t uth = (uthread_t)uthread;
 	proc_t p = (proc_t)bsd_info;
 
@@ -1673,8 +1669,12 @@ uthread_cleanup(task_t task, void *uthread, void * bsd_info)
 		kqueue_threadreq_unbind(p, uth->uu_kqr_bound);
 	}
 
-	if (uth->uu_select.nbytes) {
-		select_cleanup_uthread(&uth->uu_select);
+	sel = &uth->uu_select;
+	/* cleanup the select bit space */
+	if (sel->nbytes) {
+		FREE(sel->ibits, M_TEMP);
+		FREE(sel->obits, M_TEMP);
+		sel->nbytes = 0;
 	}
 
 	if (uth->uu_cdir) {
@@ -1686,7 +1686,7 @@ uthread_cleanup(task_t task, void *uthread, void * bsd_info)
 		if (waitq_set_is_valid(uth->uu_wqset)) {
 			waitq_set_deinit(uth->uu_wqset);
 		}
-		kheap_free(KHEAP_DEFAULT, uth->uu_wqset, uth->uu_wqstate_sz);
+		FREE(uth->uu_wqset, M_SELECT);
 		uth->uu_wqset = NULL;
 		uth->uu_wqstate_sz = 0;
 	}

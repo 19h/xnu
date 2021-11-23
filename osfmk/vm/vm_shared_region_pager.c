@@ -115,11 +115,6 @@ kern_return_t shared_region_pager_synchronize(memory_object_t mem_obj,
 kern_return_t shared_region_pager_map(memory_object_t mem_obj,
     vm_prot_t prot);
 kern_return_t shared_region_pager_last_unmap(memory_object_t mem_obj);
-boolean_t shared_region_pager_backing_object(
-	memory_object_t mem_obj,
-	memory_object_offset_t mem_obj_offset,
-	vm_object_t *backing_object,
-	vm_object_offset_t *backing_offset);
 
 /*
  * Vector of VM operations for this EMM.
@@ -138,7 +133,6 @@ const struct memory_object_pager_ops shared_region_pager_ops = {
 	.memory_object_map = shared_region_pager_map,
 	.memory_object_last_unmap = shared_region_pager_last_unmap,
 	.memory_object_data_reclaim = NULL,
-	.memory_object_backing_object = shared_region_pager_backing_object,
 	.memory_object_pager_name = "shared_region"
 };
 
@@ -291,15 +285,11 @@ done:
  * the "shared_region" EMM.
  */
 typedef struct shared_region_pager {
-	struct memory_object    srp_header;          /* mandatory generic header */
+	struct memory_object   srp_header;          /* mandatory generic header */
 
 	/* pager-specific data */
 	queue_chain_t           srp_queue;          /* next & prev pagers */
-#if MEMORY_OBJECT_HAS_REFCOUNT
-#define srp_ref_count           srp_header.mo_ref
-#else
-	os_ref_atomic_t         srp_ref_count;      /* active uses */
-#endif
+	uint32_t                srp_ref_count;      /* active uses */
 	bool                    srp_is_mapped;      /* has active mappings */
 	bool                    srp_is_ready;       /* is this pager ready? */
 	vm_object_t             srp_backing_object; /* VM object for shared cache */
@@ -524,7 +514,7 @@ shared_region_pager_data_request(
 
 	pager = shared_region_pager_lookup(mem_obj);
 	assert(pager->srp_is_ready);
-	assert(os_ref_get_count_raw(&pager->srp_ref_count) > 1); /* pager is alive */
+	assert(pager->srp_ref_count > 1); /* pager is alive */
 	assert(pager->srp_is_mapped); /* pager is mapped */
 
 	PAGER_DEBUG(PAGER_PAGEIN, ("shared_region_pager_data_request: %p, %llx, %x, %x, pager %p\n", mem_obj, offset, length, protection_required, pager));
@@ -549,7 +539,7 @@ shared_region_pager_data_request(
 		retval = kr;
 		goto done;
 	}
-	dst_object = memory_object_control_to_vm_object(mo_control);
+	dst_object = mo_control->moc_object;
 	assert(dst_object != VM_OBJECT_NULL);
 
 	/*
@@ -846,7 +836,8 @@ shared_region_pager_reference(
 	pager = shared_region_pager_lookup(mem_obj);
 
 	lck_mtx_lock(&shared_region_pager_lock);
-	os_ref_retain_locked_raw(&pager->srp_ref_count, NULL);
+	assert(pager->srp_ref_count > 0);
+	pager->srp_ref_count++;
 	lck_mtx_unlock(&shared_region_pager_lock);
 }
 
@@ -893,7 +884,7 @@ shared_region_pager_terminate_internal(
 {
 	assert(pager->srp_is_ready);
 	assert(!pager->srp_is_mapped);
-	assert(os_ref_get_count_raw(&pager->srp_ref_count) == 1);
+	assert(pager->srp_ref_count == 1);
 
 	if (pager->srp_backing_object != VM_OBJECT_NULL) {
 		vm_object_deallocate(pager->srp_backing_object);
@@ -917,7 +908,6 @@ shared_region_pager_deallocate_internal(
 {
 	boolean_t       needs_trimming;
 	int             count_unmapped;
-	os_ref_count_t  ref_count;
 
 	if (!locked) {
 		lck_mtx_lock(&shared_region_pager_lock);
@@ -928,9 +918,10 @@ shared_region_pager_deallocate_internal(
 	needs_trimming = (count_unmapped > shared_region_pager_cache_limit);
 
 	/* drop a reference on this pager */
-	ref_count = os_ref_release_locked_raw(&pager->srp_ref_count, NULL);
+	assert(pager->srp_ref_count > 0);
+	pager->srp_ref_count--;
 
-	if (ref_count == 1) {
+	if (pager->srp_ref_count == 1) {
 		/*
 		 * Only the "named" reference is left, which means that
 		 * no one is really holding on to this pager anymore.
@@ -940,7 +931,7 @@ shared_region_pager_deallocate_internal(
 		/* the pager is all ours: no need for the lock now */
 		lck_mtx_unlock(&shared_region_pager_lock);
 		shared_region_pager_terminate_internal(pager);
-	} else if (ref_count == 0) {
+	} else if (pager->srp_ref_count == 0) {
 		/*
 		 * Dropped the existence reference;  the memory object has
 		 * been terminated.  Do some final cleanup and release the
@@ -1055,10 +1046,10 @@ shared_region_pager_map(
 
 	lck_mtx_lock(&shared_region_pager_lock);
 	assert(pager->srp_is_ready);
-	assert(os_ref_get_count_raw(&pager->srp_ref_count) > 0); /* pager is alive */
+	assert(pager->srp_ref_count > 0); /* pager is alive */
 	if (!pager->srp_is_mapped) {
 		pager->srp_is_mapped = TRUE;
-		os_ref_retain_locked_raw(&pager->srp_ref_count, NULL);
+		pager->srp_ref_count++;
 		shared_region_pager_count_mapped++;
 	}
 	lck_mtx_unlock(&shared_region_pager_lock);
@@ -1104,26 +1095,6 @@ shared_region_pager_last_unmap(
 	return KERN_SUCCESS;
 }
 
-boolean_t
-shared_region_pager_backing_object(
-	memory_object_t         mem_obj,
-	memory_object_offset_t  offset,
-	vm_object_t             *backing_object,
-	vm_object_offset_t      *backing_offset)
-{
-	shared_region_pager_t   pager;
-
-	PAGER_DEBUG(PAGER_ALL,
-	    ("shared_region_pager_backing_object: %p\n", mem_obj));
-
-	pager = shared_region_pager_lookup(mem_obj);
-
-	*backing_object = pager->srp_backing_object;
-	*backing_offset = pager->srp_backing_offset + offset;
-
-	return TRUE;
-}
-
 
 /*
  *
@@ -1136,7 +1107,7 @@ shared_region_pager_lookup(
 
 	assert(mem_obj->mo_pager_ops == &shared_region_pager_ops);
 	pager = (shared_region_pager_t)(uintptr_t) mem_obj;
-	assert(os_ref_get_count_raw(&pager->srp_ref_count) > 0);
+	assert(pager->srp_ref_count > 0);
 	return pager;
 }
 
@@ -1176,8 +1147,8 @@ shared_region_pager_create(
 	pager->srp_header.mo_control = MEMORY_OBJECT_CONTROL_NULL;
 
 	pager->srp_is_ready = FALSE;/* not ready until it has a "name" */
-	/* existence reference (for the cache) + 1 for the caller */
-	os_ref_init_count_raw(&pager->srp_ref_count, NULL, 2);
+	pager->srp_ref_count = 1;   /* existence reference (for the cache) */
+	pager->srp_ref_count++;     /* for the caller */
 	pager->srp_is_mapped = FALSE;
 	pager->srp_backing_object = backing_object;
 	pager->srp_backing_offset = backing_offset;
@@ -1321,8 +1292,7 @@ shared_region_pager_match(
 		if (memcmp(si->si_slide_info_entry, slide_info->si_slide_info_entry, si->si_slide_info_size) != 0) {
 			continue;
 		}
-		/* the caller expects a reference on this */
-		os_ref_retain_locked_raw(&pager->srp_ref_count, NULL);
+		++pager->srp_ref_count; /* the caller expects a reference on this */
 		lck_mtx_unlock(&shared_region_pager_lock);
 		return (memory_object_t)pager;
 	}
@@ -1370,7 +1340,7 @@ shared_region_pager_trim(void)
 		/* get prev elt before we dequeue */
 		prev_pager = (shared_region_pager_t)queue_prev(&pager->srp_queue);
 
-		if (os_ref_get_count_raw(&pager->srp_ref_count) == 2 &&
+		if (pager->srp_ref_count == 2 &&
 		    pager->srp_is_ready &&
 		    !pager->srp_is_mapped) {
 			/* this pager can be trimmed */
@@ -1405,13 +1375,13 @@ shared_region_pager_trim(void)
 		    srp_queue);
 		pager->srp_queue.next = NULL;
 		pager->srp_queue.prev = NULL;
-		assert(os_ref_get_count_raw(&pager->srp_ref_count) == 2);
+		assert(pager->srp_ref_count == 2);
 		/*
 		 * We can't call deallocate_internal() because the pager
 		 * has already been dequeued, but we still need to remove
 		 * a reference.
 		 */
-		(void)os_ref_release_locked_raw(&pager->srp_ref_count, NULL);
+		pager->srp_ref_count--;
 		shared_region_pager_terminate_internal(pager);
 	}
 }

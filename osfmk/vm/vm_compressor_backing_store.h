@@ -37,19 +37,19 @@
 #include <libkern/crypto/aes.h>
 #include <kern/host_statistics.h>
 
-#if !XNU_TARGET_OS_OSX
+#if CONFIG_EMBEDDED
 
 #define MIN_SWAP_FILE_SIZE              (64 * 1024 * 1024ULL)
 
 #define MAX_SWAP_FILE_SIZE              (128 * 1024 * 1024ULL)
 
-#else /* !XNU_TARGET_OS_OSX */
+#else /* CONFIG_EMBEDDED */
 
 #define MIN_SWAP_FILE_SIZE              (256 * 1024 * 1024ULL)
 
 #define MAX_SWAP_FILE_SIZE              (1 * 1024 * 1024 * 1024ULL)
 
-#endif /* !XNU_TARGET_OS_OSX */
+#endif /* CONFIG_EMBEDDED */
 
 #define COMPRESSED_SWAP_CHUNK_SIZE      (C_SEG_BUFSIZE)
 

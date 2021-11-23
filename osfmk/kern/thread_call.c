@@ -56,6 +56,8 @@
 static ZONE_DECLARE(thread_call_zone, "thread_call",
     sizeof(thread_call_data_t), ZC_NOENCRYPT);
 
+static struct waitq daemon_waitq;
+
 typedef enum {
 	TCF_ABSOLUTE    = 0,
 	TCF_CONTINUOUS  = 1,
@@ -90,8 +92,6 @@ static struct thread_call_group {
 	uint32_t                target_thread_count;
 
 	thread_call_group_flags_t tcg_flags;
-
-	struct waitq            waiters_waitq;
 } thread_call_groups[THREAD_CALL_INDEX_MAX] = {
 	[THREAD_CALL_INDEX_HIGH] = {
 		.tcg_name               = "high",
@@ -458,8 +458,6 @@ thread_call_group_setup(thread_call_group_t group)
 
 	timer_call_setup(&group->dealloc_timer, thread_call_dealloc_timer, group);
 
-	waitq_init(&group->waiters_waitq, SYNC_POLICY_DISABLE_IRQ);
-
 	/* Reverse the wait order so we re-use the most recently parked thread from the pool */
 	waitq_init(&group->idle_waitq, SYNC_POLICY_REVERSED | SYNC_POLICY_DISABLE_IRQ);
 }
@@ -532,57 +530,23 @@ thread_call_initialize(void)
 }
 
 void
-thread_call_setup_with_options(
+thread_call_setup(
 	thread_call_t                   call,
 	thread_call_func_t              func,
-	thread_call_param_t             param0,
-	thread_call_priority_t          pri,
-	thread_call_options_t           options)
+	thread_call_param_t             param0)
 {
 	bzero(call, sizeof(*call));
 
 	*call = (struct thread_call) {
 		.tc_func = func,
 		.tc_param0 = param0,
+
+		/*
+		 * Thread calls default to the HIGH group
+		 * unless otherwise specified.
+		 */
+		.tc_index = THREAD_CALL_INDEX_HIGH,
 	};
-
-	switch (pri) {
-	case THREAD_CALL_PRIORITY_HIGH:
-		call->tc_index = THREAD_CALL_INDEX_HIGH;
-		break;
-	case THREAD_CALL_PRIORITY_KERNEL:
-		call->tc_index = THREAD_CALL_INDEX_KERNEL;
-		break;
-	case THREAD_CALL_PRIORITY_USER:
-		call->tc_index = THREAD_CALL_INDEX_USER;
-		break;
-	case THREAD_CALL_PRIORITY_LOW:
-		call->tc_index = THREAD_CALL_INDEX_LOW;
-		break;
-	case THREAD_CALL_PRIORITY_KERNEL_HIGH:
-		call->tc_index = THREAD_CALL_INDEX_KERNEL_HIGH;
-		break;
-	default:
-		panic("Invalid thread call pri value: %d", pri);
-		break;
-	}
-
-	if (options & THREAD_CALL_OPTIONS_ONCE) {
-		call->tc_flags |= THREAD_CALL_ONCE;
-	}
-	if (options & THREAD_CALL_OPTIONS_SIGNAL) {
-		call->tc_flags |= THREAD_CALL_SIGNAL | THREAD_CALL_ONCE;
-	}
-}
-
-void
-thread_call_setup(
-	thread_call_t                   call,
-	thread_call_func_t              func,
-	thread_call_param_t             param0)
-{
-	thread_call_setup_with_options(call, func, param0,
-	    THREAD_CALL_PRIORITY_HIGH, 0);
 }
 
 static void
@@ -628,8 +592,8 @@ _internal_call_allocate(thread_call_func_t func, thread_call_param_t param0)
 	thread_call_internal_queue_count--;
 
 	thread_call_setup(call, func, param0);
-	/* THREAD_CALL_ALLOC not set, do not free back to zone */
-	assert((call->tc_flags & THREAD_CALL_ALLOC) == 0);
+	call->tc_refs = 0;
+	call->tc_flags = 0; /* THREAD_CALL_ALLOC not set, do not free back to zone */
 	enable_ints_and_unlock(group, s);
 
 	return call;
@@ -989,11 +953,35 @@ thread_call_allocate_with_options(
 	thread_call_priority_t          pri,
 	thread_call_options_t           options)
 {
-	thread_call_t call = zalloc(thread_call_zone);
+	thread_call_t call = thread_call_allocate(func, param0);
 
-	thread_call_setup_with_options(call, func, param0, pri, options);
-	call->tc_refs = 1;
-	call->tc_flags |= THREAD_CALL_ALLOC;
+	switch (pri) {
+	case THREAD_CALL_PRIORITY_HIGH:
+		call->tc_index = THREAD_CALL_INDEX_HIGH;
+		break;
+	case THREAD_CALL_PRIORITY_KERNEL:
+		call->tc_index = THREAD_CALL_INDEX_KERNEL;
+		break;
+	case THREAD_CALL_PRIORITY_USER:
+		call->tc_index = THREAD_CALL_INDEX_USER;
+		break;
+	case THREAD_CALL_PRIORITY_LOW:
+		call->tc_index = THREAD_CALL_INDEX_LOW;
+		break;
+	case THREAD_CALL_PRIORITY_KERNEL_HIGH:
+		call->tc_index = THREAD_CALL_INDEX_KERNEL_HIGH;
+		break;
+	default:
+		panic("Invalid thread call pri value: %d", pri);
+		break;
+	}
+
+	if (options & THREAD_CALL_OPTIONS_ONCE) {
+		call->tc_flags |= THREAD_CALL_ONCE;
+	}
+	if (options & THREAD_CALL_OPTIONS_SIGNAL) {
+		call->tc_flags |= THREAD_CALL_SIGNAL | THREAD_CALL_ONCE;
+	}
 
 	return call;
 }
@@ -1051,8 +1039,13 @@ thread_call_allocate(
 	thread_call_func_t              func,
 	thread_call_param_t             param0)
 {
-	return thread_call_allocate_with_options(func, param0,
-	           THREAD_CALL_PRIORITY_HIGH, 0);
+	thread_call_t   call = zalloc(thread_call_zone);
+
+	thread_call_setup(call, func, param0);
+	call->tc_refs = 1;
+	call->tc_flags = THREAD_CALL_ALLOC;
+
+	return call;
 }
 
 /*
@@ -1429,7 +1422,7 @@ thread_call_wake(
 		if (group->idle_count) {
 			__assert_only kern_return_t kr;
 
-			kr = waitq_wakeup64_one(&group->idle_waitq, CAST_EVENT64_T(group),
+			kr = waitq_wakeup64_one(&group->idle_waitq, NO_EVENT64,
 			    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
 			assert(kr == KERN_SUCCESS);
 
@@ -1445,7 +1438,7 @@ thread_call_wake(
 			if (thread_call_group_should_add_thread(group) &&
 			    os_atomic_cmpxchg(&thread_call_daemon_awake,
 			    false, true, relaxed)) {
-				waitq_wakeup64_all(&daemon_waitq, CAST_EVENT64_T(&thread_call_daemon_awake),
+				waitq_wakeup64_all(&daemon_waitq, NO_EVENT64,
 				    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
 			}
 		}
@@ -1505,11 +1498,10 @@ thread_call_finish(thread_call_t call, thread_call_group_t group, spl_t *s)
 
 	bool repend = false;
 	bool signal = call->tc_flags & THREAD_CALL_SIGNAL;
-	bool alloc = call->tc_flags & THREAD_CALL_ALLOC;
 
 	call->tc_finish_count++;
 
-	if (!signal && alloc) {
+	if (!signal) {
 		/* The thread call thread owns a ref until the call is finished */
 		if (call->tc_refs <= 0) {
 			panic("thread_call_finish: detected over-released thread call: %p", call);
@@ -1520,8 +1512,7 @@ thread_call_finish(thread_call_t call, thread_call_group_t group, spl_t *s)
 	thread_call_flags_t old_flags = call->tc_flags;
 	call->tc_flags &= ~(THREAD_CALL_RESCHEDULE | THREAD_CALL_RUNNING | THREAD_CALL_WAIT);
 
-	if ((!alloc || call->tc_refs != 0) &&
-	    (old_flags & THREAD_CALL_RESCHEDULE) != 0) {
+	if (call->tc_refs != 0 && (old_flags & THREAD_CALL_RESCHEDULE) != 0) {
 		assert(old_flags & THREAD_CALL_ONCE);
 		thread_call_flavor_t flavor = thread_call_get_flavor(call);
 
@@ -1550,7 +1541,7 @@ thread_call_finish(thread_call_t call, thread_call_group_t group, spl_t *s)
 		}
 	}
 
-	if (!signal && alloc && call->tc_refs == 0) {
+	if (!signal && (call->tc_refs == 0)) {
 		if ((old_flags & THREAD_CALL_WAIT) != 0) {
 			panic("Someone waiting on a thread call that is scheduled for free: %p\n", call->tc_func);
 		}
@@ -1566,19 +1557,12 @@ thread_call_finish(thread_call_t call, thread_call_group_t group, spl_t *s)
 
 	if ((old_flags & THREAD_CALL_WAIT) != 0) {
 		/*
-		 * This may wake up a thread with a registered sched_call.
-		 * That call might need the group lock, so we drop the lock
-		 * to avoid deadlocking.
-		 *
-		 * We also must use a separate waitq from the idle waitq, as
-		 * this path goes waitq lock->thread lock->group lock, but
-		 * the idle wait goes group lock->waitq_lock->thread_lock.
+		 * Dropping lock here because the sched call for the
+		 * high-pri group can take the big lock from under
+		 * a thread lock.
 		 */
 		thread_call_unlock(group);
-
-		waitq_wakeup64_all(&group->waiters_waitq, CAST_EVENT64_T(call),
-		    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
-
+		thread_wakeup((event_t)call);
 		thread_call_lock_spin(group);
 		/* THREAD_CALL_SIGNAL call may have been freed */
 	}
@@ -1684,20 +1668,9 @@ thread_call_thread(
 		 */
 		bool needs_finish = false;
 		if (call->tc_flags & THREAD_CALL_ALLOC) {
-			call->tc_refs++;        /* Delay free until we're done */
-		}
-		if (call->tc_flags & (THREAD_CALL_ALLOC | THREAD_CALL_ONCE)) {
-			/*
-			 * If THREAD_CALL_ONCE is used, and the timer wasn't
-			 * THREAD_CALL_ALLOC, then clients swear they will use
-			 * thread_call_cancel_wait() before destroying
-			 * the thread call.
-			 *
-			 * Else, the storage for the thread call might have
-			 * disappeared when thread_call_invoke() ran.
-			 */
 			needs_finish = true;
 			call->tc_flags |= THREAD_CALL_RUNNING;
+			call->tc_refs++;        /* Delay free until we're done */
 		}
 
 		thc_state.thc_call = call;
@@ -1726,7 +1699,7 @@ thread_call_thread(
 		s = disable_ints_and_lock(group);
 
 		if (needs_finish) {
-			/* Release refcount, may free, may temporarily drop lock */
+			/* Release refcount, may free */
 			thread_call_finish(call, group, &s);
 		}
 	}
@@ -1767,7 +1740,7 @@ thread_call_thread(
 		}
 
 		/* Wait for more work (or termination) */
-		wres = waitq_assert_wait64(&group->idle_waitq, CAST_EVENT64_T(group), THREAD_INTERRUPTIBLE, 0);
+		wres = waitq_assert_wait64(&group->idle_waitq, NO_EVENT64, THREAD_INTERRUPTIBLE, 0);
 		if (wres != THREAD_WAITING) {
 			panic("kcall worker unable to assert wait?");
 		}
@@ -1779,7 +1752,7 @@ thread_call_thread(
 		if (group->idle_count < group->target_thread_count) {
 			group->idle_count++;
 
-			waitq_assert_wait64(&group->idle_waitq, CAST_EVENT64_T(group), THREAD_UNINT, 0); /* Interrupted means to exit */
+			waitq_assert_wait64(&group->idle_waitq, NO_EVENT64, THREAD_UNINT, 0); /* Interrupted means to exit */
 
 			enable_ints_and_unlock(group, s);
 
@@ -1842,7 +1815,7 @@ thread_call_daemon_continue(__unused void *arg)
 		}
 	} while (os_atomic_load(&thread_call_daemon_awake, relaxed));
 
-	waitq_assert_wait64(&daemon_waitq, CAST_EVENT64_T(&thread_call_daemon_awake), THREAD_UNINT, 0);
+	waitq_assert_wait64(&daemon_waitq, NO_EVENT64, THREAD_UNINT, 0);
 
 	if (os_atomic_load(&thread_call_daemon_awake, relaxed)) {
 		clear_wait(current_thread(), THREAD_AWAKENED);
@@ -2052,7 +2025,7 @@ thread_call_dealloc_timer(
 		if (now > group->idle_timestamp + thread_call_dealloc_interval_abs) {
 			terminated = true;
 			group->idle_count--;
-			res = waitq_wakeup64_one(&group->idle_waitq, CAST_EVENT64_T(group),
+			res = waitq_wakeup64_one(&group->idle_waitq, NO_EVENT64,
 			    THREAD_INTERRUPTED, WAITQ_ALL_PRIORITIES);
 			if (res != KERN_SUCCESS) {
 				panic("Unable to wake up idle thread for termination?");
@@ -2093,11 +2066,6 @@ thread_call_dealloc_timer(
  *
  * Takes the thread call lock locked, returns unlocked
  *      This lets us avoid a spurious take/drop after waking up from thread_block
- *
- * This thread could be a thread call thread itself, blocking and therefore making a
- * sched_call upcall into the thread call subsystem, needing the group lock.
- * However, we're saved from deadlock because the 'block' upcall is made in
- * thread_block, not in assert_wait.
  */
 static bool
 thread_call_wait_once_locked(thread_call_t call, spl_t s)
@@ -2115,7 +2083,7 @@ thread_call_wait_once_locked(thread_call_t call, spl_t s)
 	/* call is running, so we have to wait for it */
 	call->tc_flags |= THREAD_CALL_WAIT;
 
-	wait_result_t res = waitq_assert_wait64(&group->waiters_waitq, CAST_EVENT64_T(call), THREAD_UNINT, 0);
+	wait_result_t res = assert_wait(call, THREAD_UNINT);
 	if (res != THREAD_WAITING) {
 		panic("Unable to assert wait: %d", res);
 	}
@@ -2194,9 +2162,7 @@ thread_call_wait_locked(thread_call_t call, spl_t s)
 	while (call->tc_finish_count < submit_count) {
 		call->tc_flags |= THREAD_CALL_WAIT;
 
-		wait_result_t res = waitq_assert_wait64(&group->waiters_waitq,
-		    CAST_EVENT64_T(call), THREAD_UNINT, 0);
-
+		wait_result_t res = assert_wait(call, THREAD_UNINT);
 		if (res != THREAD_WAITING) {
 			panic("Unable to assert wait: %d", res);
 		}

@@ -111,8 +111,15 @@ fslog_extmod_msgtracer(proc_t caller, proc_t target)
  * Log information about floating point exception handling
  */
 
-static LCK_GRP_DECLARE(fpxlock_grp, "fpx");
-static LCK_MTX_DECLARE(fpxlock, &fpxlock_grp);
+static lck_mtx_t fpxlock;
+
+void
+fpxlog_init(void)
+{
+	lck_grp_attr_t *lck_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_t *lck_grp = lck_grp_alloc_init("fpx", lck_grp_attr);
+	lck_mtx_init(&fpxlock, lck_grp, LCK_ATTR_NULL);
+}
 
 struct fpx_event {
 	uuid_t fe_uuid;
@@ -260,6 +267,13 @@ fpxlog(
 	    /* 3 */ "com.apple.message.value", csrstr,
 	    /* 4 */ "com.apple.message.summarize", "YES",
 	    NULL);
+}
+
+#else
+
+void
+fpxlog_init(void)
+{
 }
 
 #endif /* __x86_64__ */

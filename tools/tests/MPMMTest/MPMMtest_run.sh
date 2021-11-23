@@ -27,11 +27,8 @@ then
 	then
 		# If 32-bit support appears to be present OR if this is not
 		# a 64-bit environment, run the test.
-		
-		echo "Disable the test on 32-bit platforms until 37721005 is fixed"
-		exit 0;
-		# echo ""; echo " Running $MPMMTEST";
-		# $MPMMTEST -perf || { x=$?; echo "$MPMMTEST failed $x "; exit $x; }
+		echo ""; echo " Running $MPMMTEST";
+		$MPMMTEST -perf || { x=$?; echo "$MPMMTEST failed $x "; exit $x; }
 	fi
 fi
 
@@ -50,12 +47,8 @@ then
 	then
 		# If 32-bit support appears to be present OR if this is not
 		# a 64-bit environment, run the test.
-
-		echo "Disable the test on 32-bit platforms until 37721005 is fixed"
-		exit 0;
-
-		# echo ""; echo " Running $KQMPMMTEST"
-		# $KQMPMMTEST -perf || { x=$?; echo "$KQMPMMTEST failed $x"; exit $x; }
+		echo ""; echo " Running $KQMPMMTEST"
+		$KQMPMMTEST -perf || { x=$?; echo "$KQMPMMTEST failed $x"; exit $x; }
 	fi
 fi
 

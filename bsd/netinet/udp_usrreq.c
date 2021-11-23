@@ -2346,8 +2346,12 @@ udp_disconnect(struct socket *so)
 	struct inpcb *inp;
 
 	inp = sotoinpcb(so);
-	if (inp == NULL) {
-		return EINVAL;
+	if (inp == NULL
+#if NECP
+	    || (necp_socket_should_use_flow_divert(inp))
+#endif /* NECP */
+	    ) {
+		return inp == NULL ? EINVAL : EPROTOTYPE;
 	}
 	if (inp->inp_faddr.s_addr == INADDR_ANY) {
 		return ENOTCONN;

@@ -246,10 +246,11 @@ notdot:
 		if (error == 0) {
 			*ap->a_vpp = vp;
 		}
-		/* if we got lvp, drop the iocount from VNOP_LOOKUP */
-		if (lvp != NULL) {
-			vnode_put(lvp);
-		}
+	}
+
+	/* if we got lvp, drop the iocount from VNOP_LOOKUP */
+	if (lvp != NULL) {
+		vnode_put(lvp);
 	}
 
 	return error;
@@ -333,7 +334,7 @@ bindfs_readdir(struct vnop_readdir_args * ap)
 		struct dirent *dep;
 		size_t bytesread;
 		bufsize = 3 * MIN((user_size_t)uio_resid(uio), 87371u) / 8;
-		bufptr = kheap_alloc(KHEAP_TEMP, bufsize, Z_WAITOK);
+		MALLOC(bufptr, void *, bufsize, M_TEMP, M_WAITOK);
 		if (bufptr == NULL) {
 			return ENOMEM;
 		}
@@ -376,7 +377,7 @@ bindfs_readdir(struct vnop_readdir_args * ap)
 			uio_setoffset(uio, uio_offset(auio));
 		}
 		uio_free(auio);
-		kheap_free(KHEAP_TEMP, bufptr, bufsize);
+		FREE(bufptr, M_TEMP);
 	} else {
 		error = VNOP_READDIR(lvp, ap->a_uio, ap->a_flags, ap->a_eofflag, ap->a_numdirent, ap->a_context);
 		vnode_put(lvp);

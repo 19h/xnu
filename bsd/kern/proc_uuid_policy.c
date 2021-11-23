@@ -49,10 +49,10 @@
 #define dprintf(...) do { } while(0)
 #endif
 
-static LCK_GRP_DECLARE(proc_uuid_policy_subsys_lck_grp,
-    "proc_uuid_policy_subsys_lock");
-static LCK_MTX_DECLARE(proc_uuid_policy_subsys_mutex,
-    &proc_uuid_policy_subsys_lck_grp);
+static lck_grp_attr_t  *proc_uuid_policy_subsys_lck_grp_attr;
+static lck_grp_t       *proc_uuid_policy_subsys_lck_grp;
+static lck_attr_t      *proc_uuid_policy_subsys_lck_attr;
+static lck_mtx_t        proc_uuid_policy_subsys_mutex;
 
 #define PROC_UUID_POLICY_SUBSYS_LOCK() lck_mtx_lock(&proc_uuid_policy_subsys_mutex)
 #define PROC_UUID_POLICY_SUBSYS_UNLOCK() lck_mtx_unlock(&proc_uuid_policy_subsys_mutex)
@@ -85,12 +85,6 @@ struct proc_uuid_policy_entry {
 	uint32_t        flags;  /* policy flag for that UUID */
 };
 
-/*
- * If you need accounting for KM_PROC_UUID_POLICY consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_PROC_UUID_POLICY KHEAP_DEFAULT
-
 static int
 proc_uuid_policy_insert(uuid_t uuid, uint32_t flags);
 
@@ -109,6 +103,11 @@ proc_uuid_policy_clear(uint32_t flags);
 void
 proc_uuid_policy_init(void)
 {
+	proc_uuid_policy_subsys_lck_grp_attr = lck_grp_attr_alloc_init();
+	proc_uuid_policy_subsys_lck_grp = lck_grp_alloc_init("proc_uuid_policy_subsys_lock", proc_uuid_policy_subsys_lck_grp_attr);
+	proc_uuid_policy_subsys_lck_attr = lck_attr_alloc_init();
+	lck_mtx_init(&proc_uuid_policy_subsys_mutex, proc_uuid_policy_subsys_lck_grp, proc_uuid_policy_subsys_lck_attr);
+
 	proc_uuid_policy_hashtbl = hashinit(PROC_UUID_POLICY_HASH_SIZE, M_PROC_UUID_POLICY, &proc_uuid_policy_hash_mask);
 	proc_uuid_policy_table_gencount = 1;
 	proc_uuid_policy_count = 0;
@@ -129,8 +128,7 @@ proc_uuid_policy_insert(uuid_t uuid, uint32_t flags)
 		return EINVAL;
 	}
 
-	entry = kheap_alloc(KM_PROC_UUID_POLICY, sizeof(struct proc_uuid_policy_entry),
-	    Z_WAITOK | Z_ZERO);
+	MALLOC(entry, struct proc_uuid_policy_entry *, sizeof(*entry), M_PROC_UUID_POLICY, M_WAITOK | M_ZERO);
 
 	memcpy(entry->uuid, uuid, sizeof(uuid_t));
 	entry->flags = flags;
@@ -142,7 +140,7 @@ proc_uuid_policy_insert(uuid_t uuid, uint32_t flags)
 		/* The UUID is already in the list. Update the flags. */
 		foundentry->flags |= flags;
 		error = 0;
-		kheap_free(KM_PROC_UUID_POLICY, entry, sizeof(struct proc_uuid_policy_entry));
+		FREE(entry, M_PROC_UUID_POLICY);
 		entry = NULL;
 		BUMP_PROC_UUID_POLICY_GENERATION_COUNT();
 	} else {
@@ -160,7 +158,7 @@ proc_uuid_policy_insert(uuid_t uuid, uint32_t flags)
 	PROC_UUID_POLICY_SUBSYS_UNLOCK();
 
 	if (error) {
-		kheap_free(KM_PROC_UUID_POLICY, entry, sizeof(struct proc_uuid_policy_entry));
+		FREE(entry, M_PROC_UUID_POLICY);
 		dprintf("Failed to insert proc uuid policy (%s,0x%08x), table full\n", uuidstr, flags);
 	} else {
 		dprintf("Inserted proc uuid policy (%s,0x%08x)\n", uuidstr, flags);
@@ -224,7 +222,7 @@ proc_uuid_policy_remove(uuid_t uuid, uint32_t flags)
 
 	/* If we had found a pre-existing entry, deallocate its memory now */
 	if (delentry && should_delete) {
-		kheap_free(KM_PROC_UUID_POLICY, delentry, sizeof(struct proc_uuid_policy_entry));
+		FREE(delentry, M_PROC_UUID_POLICY);
 	}
 
 	if (error) {
@@ -334,8 +332,7 @@ proc_uuid_policy_clear(uint32_t flags)
 	/* Memory deallocation happens after the hash lock is dropped */
 	LIST_FOREACH_SAFE(searchentry, &deletehead, entries, tmpentry) {
 		LIST_REMOVE(searchentry, entries);
-		kheap_free(KM_PROC_UUID_POLICY, searchentry,
-		    sizeof(struct proc_uuid_policy_entry));
+		FREE(searchentry, M_PROC_UUID_POLICY);
 	}
 
 	dprintf("Clearing proc uuid policy table\n");

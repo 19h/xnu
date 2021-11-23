@@ -76,6 +76,7 @@
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_machdep.h>
 
+#include <kern/counters.h>
 #include <kern/ipc_tt.h>
 #include <kern/task.h>
 #include <kern/thread.h>

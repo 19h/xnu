@@ -365,7 +365,7 @@ __doprnt(
 
 		if (c == 'z' || c == 'Z') {
 			c = *++fmt;
-			if (sizeof(size_t) == sizeof(unsigned long long)) {
+			if (sizeof(size_t) == sizeof(unsigned long)) {
 				long_long = 1;
 			}
 		}

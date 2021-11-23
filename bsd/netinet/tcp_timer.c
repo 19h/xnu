@@ -1052,8 +1052,7 @@ retransmit_packet:
 		    (so->so_flags & SOF_MP_SUBFLOW)) {
 			struct mptses *mpte = tptomptp(tp)->mpt_mpte;
 
-			if (mpte->mpte_svctype == MPTCP_SVCTYPE_HANDOVER ||
-			    mpte->mpte_svctype == MPTCP_SVCTYPE_PURE_HANDOVER) {
+			if (mpte->mpte_svctype == MPTCP_SVCTYPE_HANDOVER) {
 				mptcp_check_subflows_and_add(mpte);
 			}
 		}

@@ -78,13 +78,11 @@
 #include <sys/conf.h>
 #include <sys/vm.h>
 #include <sys/uio_internal.h>
-
-#include <kern/zalloc.h>
+#include <sys/malloc.h>
 
 #include <mach/vm_types.h>
 #include <mach/vm_param.h>
 #include <vm/vm_kern.h>         /* for kernel_map */
-#include <libkern/section_keywords.h>
 
 #include <pexpert/pexpert.h>    /* for PE_parse_boot_argn */
 
@@ -105,7 +103,7 @@ extern boolean_t kernacc(off_t, size_t );
 
 #endif
 
-static SECURITY_READ_ONLY_LATE(caddr_t) devzerobuf;
+static caddr_t devzerobuf;
 
 int mmread(dev_t dev, struct uio *uio);
 int mmwrite(dev_t dev, struct uio *uio);
@@ -221,8 +219,10 @@ mmrw(dev_t dev, struct uio *uio, enum uio_rw rw)
 			error = 0; /* Always succeeds, always consumes all input */
 			break;
 		case 3:
-			assert(devzerobuf != NULL);
-
+			if (devzerobuf == NULL) {
+				MALLOC(devzerobuf, caddr_t, PAGE_SIZE, M_TEMP, M_WAITOK);
+				bzero(devzerobuf, PAGE_SIZE);
+			}
 			if (uio->uio_rw == UIO_WRITE) {
 				c = uio_curriovlen(uio);
 
@@ -253,14 +253,6 @@ fault:
 	return EFAULT;
 #endif
 }
-
-__startup_func
-static void
-devzerobuf_init(void)
-{
-	devzerobuf = zalloc_permanent(PAGE_SIZE, ZALIGN_NONE); /* zeroed */
-}
-STARTUP(ZALLOC, STARTUP_RANK_LAST, devzerobuf_init);
 
 #if CONFIG_DEV_KMEM
 void

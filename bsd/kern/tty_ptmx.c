@@ -290,14 +290,13 @@ ptmx_get_ioctl(int minor, int open_flag)
 		}
 		DEVFS_UNLOCK();
 
-		new_ptmx_ioctl = kheap_alloc(KM_TTYS, sizeof(struct ptmx_ioctl),
-		    Z_WAITOK | Z_ZERO);
+		MALLOC(new_ptmx_ioctl, struct ptmx_ioctl *, sizeof(struct ptmx_ioctl), M_TTYS, M_WAITOK | M_ZERO);
 		if (new_ptmx_ioctl == NULL) {
 			return NULL;
 		}
 
 		if ((new_ptmx_ioctl->pt_tty = ttymalloc()) == NULL) {
-			kheap_free(KM_TTYS, new_ptmx_ioctl, sizeof(struct ptmx_ioctl));
+			FREE(new_ptmx_ioctl, M_TTYS);
 			return NULL;
 		}
 
@@ -316,7 +315,7 @@ ptmx_get_ioctl(int minor, int open_flag)
 		if ((_state.pis_total - _state.pis_free) >= ptmx_max) {
 			ttyfree(new_ptmx_ioctl->pt_tty);
 			DEVFS_UNLOCK();
-			kheap_free(KM_TTYS, new_ptmx_ioctl, sizeof(struct ptmx_ioctl));
+			FREE(new_ptmx_ioctl, M_TTYS);
 			return NULL;
 		}
 
@@ -324,42 +323,39 @@ ptmx_get_ioctl(int minor, int open_flag)
 		if (_state.pis_free == 0) {
 			struct ptmx_ioctl **new_pis_ioctl_list;
 			struct ptmx_ioctl **old_pis_ioctl_list = NULL;
-			size_t old_pis_total = 0;
 
 			/* Yes. */
-			new_pis_ioctl_list = kheap_alloc(KM_TTYS,
-			    sizeof(struct ptmx_ioctl *) * (_state.pis_total + PTMX_GROW_VECTOR),
-			    Z_WAITOK | Z_ZERO);
+			MALLOC(new_pis_ioctl_list, struct ptmx_ioctl **, sizeof(struct ptmx_ioctl *) * (_state.pis_total + PTMX_GROW_VECTOR), M_TTYS, M_WAITOK | M_ZERO);
 			if (new_pis_ioctl_list == NULL) {
 				ttyfree(new_ptmx_ioctl->pt_tty);
 				DEVFS_UNLOCK();
-				kheap_free(KM_TTYS, new_ptmx_ioctl, sizeof(struct ptmx_ioctl));
+				FREE(new_ptmx_ioctl, M_TTYS);
 				return NULL;
 			}
 
 			/* If this is not the first time, copy the old over */
 			bcopy(_state.pis_ioctl_list, new_pis_ioctl_list, sizeof(struct ptmx_ioctl *) * _state.pis_total);
 			old_pis_ioctl_list = _state.pis_ioctl_list;
-			old_pis_total = _state.pis_total;
 			_state.pis_ioctl_list = new_pis_ioctl_list;
 			_state.pis_free += PTMX_GROW_VECTOR;
 			_state.pis_total += PTMX_GROW_VECTOR;
-			kheap_free(KM_TTYS, old_pis_ioctl_list,
-			    sizeof(struct ptmx_ioctl *) * old_pis_total);
+			if (old_pis_ioctl_list) {
+				FREE(old_pis_ioctl_list, M_TTYS);
+			}
 		}
 
 		/* is minor in range now? */
 		if (minor < 0 || minor >= _state.pis_total) {
 			ttyfree(new_ptmx_ioctl->pt_tty);
 			DEVFS_UNLOCK();
-			kheap_free(KM_TTYS, new_ptmx_ioctl, sizeof(struct ptmx_ioctl));
+			FREE(new_ptmx_ioctl, M_TTYS);
 			return NULL;
 		}
 
 		if (_state.pis_ioctl_list[minor] != NULL) {
 			ttyfree(new_ptmx_ioctl->pt_tty);
 			DEVFS_UNLOCK();
-			kheap_free(KM_TTYS, new_ptmx_ioctl, sizeof(struct ptmx_ioctl));
+			FREE(new_ptmx_ioctl, M_TTYS);
 
 			/* Special error value so we know to redrive the open, we've been raced */
 			return (struct ptmx_ioctl*)-1;
@@ -441,7 +437,7 @@ ptmx_free_ioctl(int minor, int open_flag)
 			devfs_remove(old_ptmx_ioctl->pt_devhandle);
 		}
 		ttyfree(old_ptmx_ioctl->pt_tty);
-		kheap_free(KM_TTYS, old_ptmx_ioctl, sizeof(struct ptmx_ioctl));
+		FREE(old_ptmx_ioctl, M_TTYS);
 	}
 
 	return 0;     /* Success */

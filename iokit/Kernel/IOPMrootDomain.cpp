@@ -54,10 +54,12 @@
 #include <IOKit/IOReportMacros.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOKitKeys.h>
-#include <IOKit/IOUserServer.h>
 #include "IOKitKernelInternal.h"
 #if HIBERNATION
 #include <IOKit/IOHibernatePrivate.h>
+#if __arm64__
+#include <arm64/ppl/ppl_hib.h>
+#endif /* __arm64__ */
 #endif /* HIBERNATION */
 #include <console/video_console.h>
 #include <sys/syslog.h>
@@ -520,8 +522,8 @@ static UInt32           gWillShutdown = 0;
 static UInt32           gPagingOff = 0;
 static UInt32           gSleepWakeUUIDIsSet = false;
 static uint32_t         gAggressivesState = 0;
-uint32_t                gHaltTimeMaxLog;
-uint32_t                gHaltTimeMaxPanic;
+static uint32_t         gHaltTimeMaxLog;
+static uint32_t         gHaltTimeMaxPanic;
 IOLock *                gHaltLogLock;
 static char *           gHaltLog;
 enum                  { kHaltLogSize = 2048 };
@@ -548,7 +550,6 @@ static uint32_t         gDarkWakeFlags = kDarkWakeFlagPromotionEarly;
 #endif /* !defined(XNU_TARGET_OS_OSX) */
 
 static uint32_t         gNoIdleFlag = 0;
-static uint32_t         gSleepDisabledFlag = 0;
 static uint32_t         gSwdPanic = 1;
 static uint32_t         gSwdSleepTimeout = 0;
 static uint32_t         gSwdWakeTimeout = 0;
@@ -577,6 +578,7 @@ defaultSleepPolicyHandler(void *ctx, const IOPMSystemSleepPolicyVariables *vars,
 
 	// Hibernation enabled and either user forced hibernate or low battery sleep
 	if ((vars->hibernateMode & kIOHibernateModeOn) &&
+	    ppl_hib_hibernation_supported() &&
 	    (((vars->hibernateMode & kIOHibernateModeSleep) == 0) ||
 	    (vars->sleepFactors & kIOPMSleepFactorBatteryLow))) {
 		sleepType = kIOPMSleepTypeHibernate;
@@ -607,7 +609,6 @@ static char gShutdownReasonString[80];
 static bool gWakeReasonSysctlRegistered = false;
 static bool gBootReasonSysctlRegistered = false;
 static bool gShutdownReasonSysctlRegistered = false;
-static bool gWillShutdownSysctlRegistered = false;
 static AbsoluteTime gUserActiveAbsTime;
 static AbsoluteTime gUserInactiveAbsTime;
 
@@ -980,18 +981,6 @@ IOSystemShutdownNotification(int stage)
 		return;
 	}
 
-	if (kIOSystemShutdownNotificationTerminateDEXTs == stage) {
-		uint64_t nano, millis;
-		startTime = mach_absolute_time();
-		IOServicePH::systemHalt();
-		absolutetime_to_nanoseconds(mach_absolute_time() - startTime, &nano);
-		millis = nano / NSEC_PER_MSEC;
-		if (true || (gHaltTimeMaxLog && (millis >= gHaltTimeMaxLog))) {
-			printf("IOServicePH::systemHalt took %qd ms\n", millis);
-		}
-		return;
-	}
-
 	assert(kIOSystemShutdownNotificationStageProcessExit == stage);
 
 	IOLockLock(gHaltLogLock);
@@ -1016,6 +1005,7 @@ IOSystemShutdownNotification(int stage)
 		gRootDomain->handlePlatformHaltRestart(kPEPagingOff);
 	}
 }
+
 
 extern "C" int sync_internal(void);
 
@@ -1185,11 +1175,11 @@ sysctl_sleepwaketime SYSCTL_HANDLER_ARGS
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, sleeptime,
-    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     &gIOLastUserSleepTime, 0, sysctl_sleepwaketime, "S,timeval", "");
 
 static SYSCTL_PROC(_kern, OID_AUTO, waketime,
-    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     &gIOLastWakeTime, 0, sysctl_sleepwaketime, "S,timeval", "");
 
 SYSCTL_QUAD(_kern, OID_AUTO, wake_abs_time, CTLFLAG_RD | CTLFLAG_LOCKED, &gIOLastWakeAbsTime, "");
@@ -1198,15 +1188,11 @@ SYSCTL_QUAD(_kern, OID_AUTO, useractive_abs_time, CTLFLAG_RD | CTLFLAG_LOCKED, &
 SYSCTL_QUAD(_kern, OID_AUTO, userinactive_abs_time, CTLFLAG_RD | CTLFLAG_LOCKED, &gUserInactiveAbsTime, "");
 
 static int
-sysctl_willshutdown SYSCTL_HANDLER_ARGS
+sysctl_willshutdown
+(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
-	int new_value, changed, error;
-
-	if (!gWillShutdownSysctlRegistered) {
-		return ENOENT;
-	}
-
-	error = sysctl_io_number(req, gWillShutdown, sizeof(int), &new_value, &changed);
+	int new_value, changed;
+	int error = sysctl_io_number(req, gWillShutdown, sizeof(int), &new_value, &changed);
 	if (changed) {
 		if (!gWillShutdown && (new_value == 1)) {
 			IOPMRootDomainWillShutdown();
@@ -1218,8 +1204,11 @@ sysctl_willshutdown SYSCTL_HANDLER_ARGS
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, willshutdown,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_willshutdown, "I", "");
+
+extern struct sysctl_oid sysctl__kern_iokittest;
+extern struct sysctl_oid sysctl__debug_iokit;
 
 #if defined(XNU_TARGET_OS_OSX)
 
@@ -1256,11 +1245,11 @@ sysctl_progressmeter
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, progressmeterenable,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_progressmeterenable, "I", "");
 
 static SYSCTL_PROC(_kern, OID_AUTO, progressmeter,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_progressmeter, "I", "");
 
 #endif /* defined(XNU_TARGET_OS_OSX) */
@@ -1284,7 +1273,7 @@ sysctl_consoleoptions
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, consoleoptions,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_consoleoptions, "I", "");
 
 
@@ -1295,7 +1284,7 @@ sysctl_progressoptions SYSCTL_HANDLER_ARGS
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, progressoptions,
-    CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+    CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
     NULL, 0, sysctl_progressoptions, "S,vc_progress_user_options", "");
 
 
@@ -1305,32 +1294,20 @@ sysctl_wakereason SYSCTL_HANDLER_ARGS
 	char wr[sizeof(gWakeReasonString)];
 
 	wr[0] = '\0';
-	if (gRootDomain && gWakeReasonSysctlRegistered) {
+	if (gRootDomain) {
 		gRootDomain->copyWakeReasonString(wr, sizeof(wr));
-	} else {
-		return ENOENT;
 	}
 
 	return sysctl_io_string(req, wr, 0, 0, NULL);
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, wakereason,
-    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_wakereason, "A", "wakereason");
 
-static int
-sysctl_bootreason SYSCTL_HANDLER_ARGS
-{
-	if (!os_atomic_load(&gBootReasonSysctlRegistered, acquire)) {
-		return ENOENT;
-	}
-
-	return sysctl_io_string(req, gBootReasonString, 0, 0, NULL);
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, bootreason,
-    CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
-    NULL, 0, sysctl_bootreason, "A", "");
+SYSCTL_STRING(_kern, OID_AUTO, bootreason,
+    CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    gBootReasonString, sizeof(gBootReasonString), "");
 
 static int
 sysctl_shutdownreason SYSCTL_HANDLER_ARGS
@@ -1338,17 +1315,15 @@ sysctl_shutdownreason SYSCTL_HANDLER_ARGS
 	char sr[sizeof(gShutdownReasonString)];
 
 	sr[0] = '\0';
-	if (gRootDomain && gShutdownReasonSysctlRegistered) {
+	if (gRootDomain) {
 		gRootDomain->copyShutdownReasonString(sr, sizeof(sr));
-	} else {
-		return ENOENT;
 	}
 
 	return sysctl_io_string(req, sr, 0, 0, NULL);
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, shutdownreason,
-    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_shutdownreason, "A", "shutdownreason");
 
 static int
@@ -1370,7 +1345,7 @@ sysctl_targettype SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_hw, OID_AUTO, targettype,
-    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_targettype, "A", "targettype");
 
 static SYSCTL_INT(_debug, OID_AUTO, noidle, CTLFLAG_RW, &gNoIdleFlag, 0, "");
@@ -1402,7 +1377,7 @@ sysctl_aotmetrics SYSCTL_HANDLER_ARGS
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, aotmetrics,
-    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
     NULL, 0, sysctl_aotmetrics, "S,IOPMAOTMetrics", "");
 
 
@@ -1451,7 +1426,7 @@ sysctl_aotmodebits
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, aotmodebits,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_aotmodebits, "I", "");
 
 static int
@@ -1476,7 +1451,7 @@ sysctl_aotmode
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, aotmode,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
     NULL, 0, sysctl_aotmode, "I", "");
 
 //******************************************************************************
@@ -1777,10 +1752,30 @@ IOPMrootDomain::start( IOService * nub )
 
 	// read swd_panic boot-arg
 	PE_parse_boot_argn("swd_panic", &gSwdPanic, sizeof(gSwdPanic));
-	gWillShutdownSysctlRegistered = true;
+	sysctl_register_oid(&sysctl__kern_sleeptime);
+	sysctl_register_oid(&sysctl__kern_waketime);
+	sysctl_register_oid(&sysctl__kern_willshutdown);
+	sysctl_register_oid(&sysctl__kern_iokittest);
+	sysctl_register_oid(&sysctl__debug_iokit);
+	sysctl_register_oid(&sysctl__hw_targettype);
+
+#if defined(XNU_TARGET_OS_OSX)
+	sysctl_register_oid(&sysctl__kern_progressmeterenable);
+	sysctl_register_oid(&sysctl__kern_progressmeter);
+	sysctl_register_oid(&sysctl__kern_wakereason);
+#endif /* defined(XNU_TARGET_OS_OSX) */
+	sysctl_register_oid(&sysctl__kern_consoleoptions);
+	sysctl_register_oid(&sysctl__kern_progressoptions);
+
+	sysctl_register_oid(&sysctl__kern_aotmode);
+	sysctl_register_oid(&sysctl__kern_aotmodebits);
+	sysctl_register_oid(&sysctl__kern_aotmetrics);
 
 #if HIBERNATION
 #if defined(__arm64__)
+	if (ppl_hib_hibernation_supported()) {
+		publishFeature(kIOHibernateFeatureKey);
+	}
 #endif /* defined(__arm64__) */
 	IOHibernateSystemInit(this);
 #endif
@@ -2983,9 +2978,6 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 			// Until the platform driver can claim its wake reasons
 			strlcat(gWakeReasonString, wakeReason->getCStringNoCopy(),
 			    sizeof(gWakeReasonString));
-			if (!gWakeReasonSysctlRegistered) {
-				gWakeReasonSysctlRegistered = true;
-			}
 			WAKEEVENT_UNLOCK();
 		}
 
@@ -3075,15 +3067,6 @@ IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 			isRTCAlarmWake = true;
 			fullWakeReason = kFullWakeReasonLocalUser;
 			requestUserActive(this, "RTC debug alarm");
-		} else {
-#if HIBERNATION
-			OSSharedPtr<OSObject> hibOptionsProp = copyProperty(kIOHibernateOptionsKey);
-			OSNumber * hibOptions = OSDynamicCast(OSNumber, hibOptionsProp.get());
-			if (hibOptions && !(hibOptions->unsigned32BitValue() & kIOHibernateOptionDarkWake)) {
-				fullWakeReason = kFullWakeReasonLocalUser;
-				requestUserActive(this, "hibernate user wake");
-			}
-#endif
 		}
 
 		// stay awake for at least 30 seconds
@@ -6017,27 +6000,6 @@ IOPMrootDomain::overrideOurPowerChange(
 	    _currentCapability, changeFlags,
 	    request->getTag());
 
-
-#if defined(XNU_TARGET_OS_OSX) && !DISPLAY_WRANGLER_PRESENT
-	/*
-	 * ASBM send lowBattery notifications every 1 second until the device
-	 * enters hibernation. This queues up multiple sleep requests.
-	 * After the device wakes from hibernation, none of these previously
-	 * queued sleep requests are valid.
-	 * lowBattteryCondition variable is set when ASBM notifies rootDomain
-	 * and is cleared at the very last point in sleep.
-	 * Any attempt to sleep with reason kIOPMSleepReasonLowPower without
-	 * lowBatteryCondition is invalid
-	 */
-	if (REQUEST_TAG_TO_REASON(request->getTag()) == kIOPMSleepReasonLowPower) {
-		if (!lowBatteryCondition) {
-			DLOG("Duplicate lowBattery sleep");
-			*inOutChangeFlags |= kIOPMNotDone;
-			return;
-		}
-	}
-#endif
-
 	if ((AOT_STATE == desiredPowerState) && (ON_STATE == currentPowerState)) {
 		// Assertion may have been taken in AOT leading to changePowerStateTo(AOT)
 		*inOutChangeFlags |= kIOPMNotDone;
@@ -6050,6 +6012,15 @@ IOPMrootDomain::overrideOurPowerChange(
 		*inOutChangeFlags |= kIOPMNotDone;
 		return;
 	}
+
+#if defined(XNU_TARGET_OS_OSX) && !DISPLAY_WRANGLER_PRESENT
+	if (lowBatteryCondition && (desiredPowerState < currentPowerState)) {
+		// Reject sleep requests when lowBatteryCondition is TRUE to
+		// avoid racing with the impending system shutdown.
+		*inOutChangeFlags |= kIOPMNotDone;
+		return;
+	}
+#endif
 
 	if (desiredPowerState < currentPowerState) {
 		if (CAP_CURRENT(kIOPMSystemCapabilityGraphics)) {
@@ -7305,11 +7276,6 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 	// Conditions that prevent idle and demand system sleep.
 
 	do {
-		if (gSleepDisabledFlag) {
-			err = kPMConfigPreventSystemSleep;
-			break;
-		}
-
 		if (userDisabledAllSleep) {
 			err = kPMUserDisabledAllSleep; // 1. user-space sleep kill switch
 			break;
@@ -7830,11 +7796,14 @@ IOPMrootDomain::dispatchPowerEvent(
 			systemBooting = false;
 
 			// read noidle setting from Device Tree
-			if (PE_get_default("no-idle", &gNoIdleFlag, sizeof(gNoIdleFlag))) {
-				DLOG("Setting gNoIdleFlag to %u from device tree\n", gNoIdleFlag);
-			}
-			if (PE_get_default("sleep-disabled", &gSleepDisabledFlag, sizeof(gSleepDisabledFlag))) {
-				DLOG("Setting gSleepDisabledFlag to %u from device tree\n", gSleepDisabledFlag);
+			OSSharedPtr<IORegistryEntry> defaults = IORegistryEntry::fromPath("IODeviceTree:/defaults");
+			if (defaults != NULL) {
+				OSSharedPtr<OSObject> noIdleProp = defaults->copyProperty("no-idle");
+				OSData *data = OSDynamicCast(OSData, noIdleProp.get());
+				if ((data != NULL) && (data->getLength() == 4)) {
+					gNoIdleFlag = *(uint32_t*)data->getBytesNoCopy();
+					DLOG("Setting gNoIdleFlag to %u from device tree\n", gNoIdleFlag);
+				}
 			}
 			if (lowBatteryCondition || thermalEmergencyState) {
 				if (lowBatteryCondition) {
@@ -8185,9 +8154,23 @@ IOPMrootDomain::handlePowerNotification( UInt32 msg )
 	 * Power Emergency
 	 */
 	if (msg & kIOPMPowerEmergency) {
-		DLOG("Received kIOPMPowerEmergency");
+		DLOG("Low battery notification received\n");
+#if defined(XNU_TARGET_OS_OSX) && !DISPLAY_WRANGLER_PRESENT
+		// Wait for the next low battery notification if the system state is
+		// in transition.
+		if ((_systemTransitionType == kSystemTransitionNone) &&
+		    CAP_CURRENT(kIOPMSystemCapabilityCPU) &&
+		    !systemBooting && !systemShutdown && !gWillShutdown) {
+			// Setting lowBatteryCondition will prevent system sleep
+			lowBatteryCondition = true;
+
+			// Notify userspace to initiate system shutdown
+			messageClients(kIOPMMessageRequestSystemShutdown);
+		}
+#else
 		lowBatteryCondition = true;
 		privateSleepSystem(kIOPMSleepReasonLowPower);
+#endif
 	}
 
 	/*
@@ -10707,6 +10690,9 @@ IOPMrootDomain::claimSystemWakeEvent(
 		// Lazy registration until the platform driver stops registering
 		// the same name.
 		gWakeReasonSysctlRegistered = true;
+#if !defined(XNU_TARGET_OS_OSX)
+		sysctl_register_oid(&sysctl__kern_wakereason);
+#endif /* !defined(XNU_TARGET_OS_OSX) */
 	}
 	if (addWakeReason) {
 		_systemWakeEventsArray->setObject(dict.get());
@@ -10749,7 +10735,8 @@ IOPMrootDomain::claimSystemBootEvent(
 	if (!gBootReasonSysctlRegistered) {
 		// Lazy sysctl registration after setting gBootReasonString
 		strlcat(gBootReasonString, reason, sizeof(gBootReasonString));
-		os_atomic_store(&gBootReasonSysctlRegistered, true, release);
+		sysctl_register_oid(&sysctl__kern_bootreason);
+		gBootReasonSysctlRegistered = true;
 	}
 	WAKEEVENT_UNLOCK();
 }
@@ -10778,7 +10765,10 @@ IOPMrootDomain::claimSystemShutdownEvent(
 	}
 	strlcat(gShutdownReasonString, reason, sizeof(gShutdownReasonString));
 
-	gShutdownReasonSysctlRegistered = true;
+	if (!gShutdownReasonSysctlRegistered) {
+		sysctl_register_oid(&sysctl__kern_shutdownreason);
+		gShutdownReasonSysctlRegistered = true;
+	}
 	WAKEEVENT_UNLOCK();
 }
 

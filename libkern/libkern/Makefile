@@ -10,8 +10,7 @@ INSTINC_SUBDIRS = \
     machine \
     c++ \
     crypto \
-    img4 \
-	coretrust
+    img4
 INSTINC_SUBDIRS_X86_64 = \
         i386
 INSTINC_SUBDIRS_X86_64H = \

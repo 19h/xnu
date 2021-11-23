@@ -38,23 +38,25 @@
 #ifndef _KERN_HOST_STATISTICS_H_
 #define _KERN_HOST_STATISTICS_H_
 
-#include <kern/counter.h>
+#include <libkern/OSAtomic.h>
+#include <mach/vm_statistics.h>
+#include <kern/percpu.h>
+#include <os/atomic_private.h>
 
-SCALABLE_COUNTER_DECLARE(vm_statistics_zero_fill_count);        /* # of zero fill pages */
-SCALABLE_COUNTER_DECLARE(vm_statistics_reactivations);          /* # of pages reactivated */
-SCALABLE_COUNTER_DECLARE(vm_statistics_pageins);                /* # of pageins */
-SCALABLE_COUNTER_DECLARE(vm_statistics_pageouts);               /* # of pageouts */
-SCALABLE_COUNTER_DECLARE(vm_statistics_faults);                 /* # of faults */
-SCALABLE_COUNTER_DECLARE(vm_statistics_cow_faults);             /* # of copy-on-writes */
-SCALABLE_COUNTER_DECLARE(vm_statistics_lookups);                /* object cache lookups */
-SCALABLE_COUNTER_DECLARE(vm_statistics_hits);                   /* object cache hits */
-SCALABLE_COUNTER_DECLARE(vm_statistics_purges);                 /* # of pages purged */
-SCALABLE_COUNTER_DECLARE(vm_statistics_decompressions);         /* # of pages decompressed */
-SCALABLE_COUNTER_DECLARE(vm_statistics_compressions);           /* # of pages compressed */
-SCALABLE_COUNTER_DECLARE(vm_statistics_swapins);                /* # of pages swapped in (via compression segments) */
-SCALABLE_COUNTER_DECLARE(vm_statistics_swapouts);               /* # of pages swapped out (via compression segments) */
-SCALABLE_COUNTER_DECLARE(vm_statistics_total_uncompressed_pages_in_compressor); /* # of pages (uncompressed) held within the compressor. */
+extern
+uint64_t get_pages_grabbed_count(void);
 
-SCALABLE_COUNTER_DECLARE(vm_page_grab_count);
+PERCPU_DECL(vm_statistics64_data_t, vm_stat);
+PERCPU_DECL(uint64_t, vm_page_grab_count);
+
+#define VM_STAT_INCR(event)                                             \
+MACRO_BEGIN                                                             \
+	os_atomic_inc(&PERCPU_GET(vm_stat)->event, relaxed);            \
+MACRO_END
+
+#define VM_STAT_INCR_BY(event, amount)                                  \
+MACRO_BEGIN                                                             \
+	os_atomic_add(&PERCPU_GET(vm_stat)->event, amount, relaxed);    \
+MACRO_END
 
 #endif  /* _KERN_HOST_STATISTICS_H_ */

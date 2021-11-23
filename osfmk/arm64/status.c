@@ -101,13 +101,7 @@ saved_state_to_thread_state64(const arm_saved_state_t * saved_state,
 }
 
 /*
- * Copy values from ts64 to saved_state.
- *
- * For safety, CPSR is sanitized as follows:
- *
- * - ts64->cpsr.{N,Z,C,V} are copied as-is into saved_state->cpsr
- * - ts64->cpsr.M is ignored, and saved_state->cpsr.M is reset to EL0
- * - All other saved_state->cpsr bits are preserved as-is
+ * Copy values from ts64 to saved_state
  */
 void
 thread_state64_to_saved_state(const arm_thread_state64_t * ts64,
@@ -120,32 +114,25 @@ thread_state64_to_saved_state(const arm_thread_state64_t * ts64,
 
 	assert(is_saved_state64(saved_state));
 
-	const uint32_t CPSR_COPY_MASK = PSR64_USER_MASK;
-	const uint32_t CPSR_ZERO_MASK = PSR64_MODE_MASK;
-	const uint32_t CPSR_PRESERVE_MASK = ~(CPSR_COPY_MASK | CPSR_ZERO_MASK);
 #if __has_feature(ptrauth_calls)
-	/* BEGIN IGNORE CODESTYLE */
 	MANIPULATE_SIGNED_THREAD_STATE(saved_state,
-		"and	w2, w2, %w[preserve_mask]"	"\n"
-		"mov	w6, %w[cpsr]"			"\n"
-		"and	w6, w6, %w[copy_mask]"		"\n"
-		"orr	w2, w2, w6"			"\n"
-		"str	w2, [x0, %[SS64_CPSR]]"		"\n",
-		[cpsr] "r"(ts64->cpsr),
-		[preserve_mask] "i"(CPSR_PRESERVE_MASK),
-		[copy_mask] "i"(CPSR_COPY_MASK)
-	);
-	/* END IGNORE CODESTYLE */
+	    "and	w2, w2, %w[not_psr64_user_mask]	\n"
+	    "mov	w6, %w[cpsr]					\n"
+	    "and	w6, w6, %w[psr64_user_mask]		\n"
+	    "orr	w2, w2, w6						\n"
+	    "str	w2, [x0, %[SS64_CPSR]]			\n",
+	    [cpsr] "r"(ts64->cpsr),
+	    [psr64_user_mask] "i"(PSR64_USER_MASK),
+	    [not_psr64_user_mask] "i"(~PSR64_USER_MASK)
+	    );
 	/*
 	 * Make writes to ts64->cpsr visible first, since it's useful as a
 	 * canary to detect thread-state corruption.
 	 */
 	__builtin_arm_dmb(DMB_ST);
 #else
-	uint32_t new_cpsr = get_saved_state_cpsr(saved_state);
-	new_cpsr &= CPSR_PRESERVE_MASK;
-	new_cpsr |= (ts64->cpsr & CPSR_COPY_MASK);
-	set_saved_state_cpsr(saved_state, new_cpsr);
+	set_saved_state_cpsr(saved_state,
+	    (get_saved_state_cpsr(saved_state) & ~PSR64_USER_MASK) | (ts64->cpsr & PSR64_USER_MASK));
 #endif /* __has_feature(ptrauth_calls) */
 	set_saved_state_fp(saved_state, ts64->fp);
 	set_saved_state_lr(saved_state, ts64->lr);
@@ -333,8 +320,8 @@ machine_thread_state_convert_to_user(
 
 	// Note that kernel threads never have disable_user_jop set
 	if (current_thread()->machine.disable_user_jop || !thread_is_64bit_addr(current_thread()) ||
-	    thread->machine.disable_user_jop || !thread_is_64bit_addr(thread)
-	    ) {
+	    thread->machine.disable_user_jop || !thread_is_64bit_addr(thread) ||
+	    (BootArgs->bootFlags & kBootFlagsDisableUserThreadStateJOP)) {
 		ts64->flags = __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
 		return KERN_SUCCESS;
 	}
@@ -433,8 +420,8 @@ machine_thread_state_convert_from_user(
 	}
 
 	if (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH) {
-		if (thread->machine.disable_user_jop || !thread_is_64bit_addr(thread)
-		    ) {
+		if (thread->machine.disable_user_jop || !thread_is_64bit_addr(thread) ||
+		    (BootArgs->bootFlags & kBootFlagsDisableUserThreadStateJOP)) {
 			return KERN_SUCCESS;
 		}
 		// Disallow setting unsigned thread state on JOP-enabled processes.
@@ -1378,10 +1365,6 @@ machine_thread_dup(thread_t self,
 		check_and_sign_copied_thread_state(target_saved_state, self_saved_state);
 	}
 #endif /* defined(HAS_APPLE_PAC) */
-
-	arm_neon_saved_state_t *self_neon_state = self->machine.uNeon;
-	arm_neon_saved_state_t *target_neon_state = target->machine.uNeon;
-	bcopy(self_neon_state, target_neon_state, sizeof(*target_neon_state));
 
 	return KERN_SUCCESS;
 }

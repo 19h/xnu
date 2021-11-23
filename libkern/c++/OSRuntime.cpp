@@ -330,14 +330,7 @@ finish:
 }
 
 #if defined(HAS_APPLE_PAC)
-#if !KASAN
-/*
- * Place this function in __KLD,__text on non-kasan builds so it gets unmapped
- * after CTRR lockdown.
- */
-__attribute__((noinline, section("__KLD,__text")))
-#endif
-static void
+static inline void
 OSRuntimeSignStructorsInSegment(kernel_segment_command_t *segment)
 {
 	kernel_section_t         * section;

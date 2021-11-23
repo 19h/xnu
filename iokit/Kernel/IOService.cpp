@@ -370,7 +370,6 @@ IOService           * fSystemPowerAckTo;
 uint32_t              fSystemPowerAckRef;
 uint8_t               fSystemOff;
 uint8_t               fUserServerOff;
-uint8_t               fWaitingUserServers;
 
 void lock();
 void unlock();
@@ -4151,12 +4150,6 @@ IOServicePH::serverRemove(IOUserServer * server)
 	if (idx != -1U) {
 		fUserServers->removeObject(idx);
 	}
-
-	if (fWaitingUserServers) {
-		fWaitingUserServers = false;
-		IOLockWakeup(gJobsLock, &fWaitingUserServers, /* one-thread */ false);
-	}
-
 	unlock();
 }
 
@@ -4280,41 +4273,6 @@ IOServicePH::matchingEnd(IOService * service)
 	}
 
 	serverAck(NULL);
-}
-
-
-void
-IOServicePH::systemHalt(void)
-{
-	OSArray * notifyServers;
-	uint64_t  deadline;
-
-	lock();
-	notifyServers = OSArray::withArray(fUserServers);
-	unlock();
-
-	if (notifyServers) {
-		notifyServers->iterateObjects(^bool (OSObject * obj) {
-			IOUserServer * us;
-			us = (typeof(us))obj;
-			us->systemHalt();
-			return false;
-		});
-		OSSafeReleaseNULL(notifyServers);
-	}
-
-	lock();
-	clock_interval_to_deadline(1000, kMillisecondScale, &deadline);
-	while (0 < fUserServers->getCount()) {
-		fWaitingUserServers = true;
-		__assert_only int waitResult =
-		    IOLockSleepDeadline(gJobsLock, &fWaitingUserServers, deadline, THREAD_UNINT);
-		assert((THREAD_AWAKENED == waitResult) || (THREAD_TIMED_OUT == waitResult));
-		if (THREAD_TIMED_OUT == waitResult) {
-			break;
-		}
-	}
-	unlock();
 }
 
 bool

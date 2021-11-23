@@ -69,6 +69,10 @@
 struct vnop_advlock_args;
 struct vnode;
 
+#ifdef MALLOC_DECLARE
+MALLOC_DECLARE(M_LOCKF);
+#endif
+
 #if IMPORTANCE_INHERITANCE
 #define LF_NOT_BOOSTED  0
 #define LF_BOOSTED      1

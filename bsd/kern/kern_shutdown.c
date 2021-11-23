@@ -67,7 +67,6 @@
 #include <kern/clock.h>                 /* for delay_for_interval() */
 #include <libkern/OSAtomic.h>
 #include <IOKit/IOPlatformExpert.h>
-#include <IOKit/IOMessage.h>
 
 #include <sys/kdebug.h>
 
@@ -83,7 +82,7 @@ unsigned int proc_shutdown_exitcount = 0;
 static int  sd_openlog(vfs_context_t);
 static int  sd_closelog(vfs_context_t);
 static void sd_log(vfs_context_t, const char *, ...);
-static void proc_shutdown(int only_non_dext);
+static void proc_shutdown(void);
 static void zprint_panic_info(void);
 extern void halt_log_enter(const char * what, const void * pc, uint64_t time);
 
@@ -94,7 +93,6 @@ extern boolean_t kdp_has_polled_corefile(void);
 struct sd_filterargs {
 	int delayterm;
 	int shutdownstate;
-	int only_non_dext;
 };
 
 
@@ -115,7 +113,7 @@ static int sd_callback1(proc_t p, void * arg);
 static int sd_callback2(proc_t p, void * arg);
 static int sd_callback3(proc_t p, void * arg);
 
-extern bool panic_include_zprint;
+extern boolean_t panic_include_zprint;
 extern mach_memory_info_t *panic_kext_memory_info;
 extern vm_size_t panic_kext_memory_size;
 
@@ -219,7 +217,7 @@ reboot_kernel(int howto, char *message)
 		/* handle live procs (deallocate their root and current directories), suspend initproc */
 
 		startTime = mach_absolute_time();
-		proc_shutdown(TRUE);
+		proc_shutdown();
 		halt_log_enter("proc_shutdown", 0, mach_absolute_time() - startTime);
 
 #if CONFIG_AUDIT
@@ -254,26 +252,9 @@ reboot_kernel(int howto, char *message)
 #endif /* DEVELOPMENT || DEBUG */
 		{
 			startTime = mach_absolute_time();
-			vfs_unmountall(TRUE);
+			vfs_unmountall();
 			halt_log_enter("vfs_unmountall", 0, mach_absolute_time() - startTime);
 		}
-
-		IOSystemShutdownNotification(kIOSystemShutdownNotificationTerminateDEXTs);
-
-		startTime = mach_absolute_time();
-		proc_shutdown(FALSE);
-		halt_log_enter("proc_shutdown", 0, mach_absolute_time() - startTime);
-
-#if DEVELOPMENT || DEBUG
-		if (!(howto & RB_PANIC) || !kdp_has_polled_corefile())
-#endif /* DEVELOPMENT || DEBUG */
-		{
-			startTime = mach_absolute_time();
-			vfs_unmountall(FALSE);
-			halt_log_enter("vfs_unmountall", 0, mach_absolute_time() - startTime);
-		}
-
-
 
 		/* Wait for the buffer cache to clean remaining dirty buffers */
 		startTime = mach_absolute_time();
@@ -353,7 +334,6 @@ sd_closelog(vfs_context_t ctx)
 	if (sd_logvp != NULLVP) {
 		VNOP_FSYNC(sd_logvp, MNT_WAIT, ctx);
 		error = vnode_close(sd_logvp, FWRITE, ctx);
-		sd_logvp = NULLVP;
 	}
 
 	return error;
@@ -385,8 +365,6 @@ sd_log(vfs_context_t ctx, const char *fmt, ...)
 	va_end(arglist);
 }
 
-#define proc_is_driver(p) (task_is_driver((p)->task))
-
 static int
 sd_filt1(proc_t p, void * args)
 {
@@ -394,10 +372,6 @@ sd_filt1(proc_t p, void * args)
 	struct sd_filterargs * sf = (struct sd_filterargs *)args;
 	int delayterm = sf->delayterm;
 	int shutdownstate = sf->shutdownstate;
-
-	if (sf->only_non_dext && proc_is_driver(p)) {
-		return 0;
-	}
 
 	if (((p->p_flag & P_SYSTEM) != 0) || (p->p_ppid == 0)
 	    || (p == self) || (p->p_stat == SZOMB)
@@ -429,9 +403,7 @@ sd_callback1(proc_t p, void * args)
 			proc_shutdown_exitcount++;
 			proc_list_unlock();
 		}
-		if (proc_is_driver(p)) {
-			printf("lingering dext %s signal(%d)\n", p->p_name, signo);
-		}
+
 		psignal(p, signo);
 		if (countproc != 0) {
 			sd->activecount++;
@@ -450,10 +422,6 @@ sd_filt2(proc_t p, void * args)
 	struct sd_filterargs * sf = (struct sd_filterargs *)args;
 	int delayterm = sf->delayterm;
 	int shutdownstate = sf->shutdownstate;
-
-	if (sf->only_non_dext && proc_is_driver(p)) {
-		return 0;
-	}
 
 	if (((p->p_flag & P_SYSTEM) != 0) || (p->p_ppid == 0)
 	    || (p == self) || (p->p_stat == SZOMB)
@@ -482,9 +450,6 @@ sd_callback2(proc_t p, void * args)
 			p->p_listflag |= P_LIST_EXITCOUNT;
 			proc_shutdown_exitcount++;
 			proc_list_unlock();
-		}
-		if (proc_is_driver(p)) {
-			printf("lingering dext %s signal(%d)\n", p->p_name, signo);
 		}
 		psignal(p, signo);
 		if (countproc != 0) {
@@ -552,7 +517,7 @@ sd_callback3(proc_t p, void * args)
  */
 
 static void
-proc_shutdown(int only_non_dext)
+proc_shutdown(void)
 {
 	vfs_context_t ctx = vfs_context_current();
 	struct proc *p, *self;
@@ -585,7 +550,6 @@ sigterm_loop:
 	 */
 	sfargs.delayterm = delayterm;
 	sfargs.shutdownstate = 0;
-	sfargs.only_non_dext = only_non_dext;
 	sdargs.signo = SIGTERM;
 	sdargs.setsdstate = 1;
 	sdargs.countproc = 1;
@@ -605,7 +569,7 @@ sigterm_loop:
 			 */
 			ts.tv_sec = 3;
 			ts.tv_nsec = 0;
-			error = msleep(&proc_shutdown_exitcount, &proc_list_mlock, PWAIT, "shutdownwait", &ts);
+			error = msleep(&proc_shutdown_exitcount, proc_list_mlock, PWAIT, "shutdownwait", &ts);
 			if (error != 0) {
 				for (p = allproc.lh_first; p; p = p->p_list.le_next) {
 					if ((p->p_listflag & P_LIST_EXITCOUNT) == P_LIST_EXITCOUNT) {
@@ -664,7 +628,7 @@ sigterm_loop:
 			 */
 			ts.tv_sec = 10;
 			ts.tv_nsec = 0;
-			error = msleep(&proc_shutdown_exitcount, &proc_list_mlock, PWAIT, "shutdownwait", &ts);
+			error = msleep(&proc_shutdown_exitcount, proc_list_mlock, PWAIT, "shutdownwait", &ts);
 			if (error != 0) {
 				for (p = allproc.lh_first; p; p = p->p_list.le_next) {
 					if ((p->p_listflag & P_LIST_EXITCOUNT) == P_LIST_EXITCOUNT) {
@@ -721,10 +685,6 @@ sigterm_loop:
 	}
 
 	sd_closelog(ctx);
-
-	if (only_non_dext) {
-		return;
-	}
 
 	/*
 	 * Now that all other processes have been terminated, suspend init

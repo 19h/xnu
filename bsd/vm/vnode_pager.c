@@ -56,6 +56,7 @@
 
 #include <mach/mach_types.h>
 #include <mach/memory_object_types.h>
+#include <mach/memory_object_control.h>
 #include <mach/vm_map.h>
 #include <mach/mach_vm.h>
 #include <mach/upl.h>

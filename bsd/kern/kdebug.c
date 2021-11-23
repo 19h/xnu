@@ -440,9 +440,8 @@ unsigned int kdlog_value2 = 0;
 unsigned int kdlog_value3 = 0;
 unsigned int kdlog_value4 = 0;
 
-static LCK_GRP_DECLARE(kdebug_lck_grp, "kdebug");
-static LCK_SPIN_DECLARE(kdw_spin_lock, &kdebug_lck_grp);
-static LCK_SPIN_DECLARE(kds_spin_lock, &kdebug_lck_grp);
+static lck_spin_t * kdw_spin_lock;
+static lck_spin_t * kds_spin_lock;
 
 kd_threadmap *kd_mapptr = 0;
 vm_size_t kd_mapsize = 0;
@@ -666,6 +665,8 @@ kdbg_iop_list_callback(kd_iop_t* iop, kd_callback_type type, void* arg)
 	}
 }
 
+static lck_grp_t *kdebug_lck_grp = NULL;
+
 static void
 kdbg_set_tracing_enabled(bool enabled, uint32_t trace_type)
 {
@@ -678,7 +679,7 @@ kdbg_set_tracing_enabled(bool enabled, uint32_t trace_type)
 	    NULL);
 
 	int s = ml_set_interrupts_enabled(false);
-	lck_spin_lock_grp(&kds_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kds_spin_lock, kdebug_lck_grp);
 
 	if (enabled) {
 		/*
@@ -695,7 +696,7 @@ kdbg_set_tracing_enabled(bool enabled, uint32_t trace_type)
 		kd_ctrl_page.enabled = 0;
 		commpage_update_kdebug_state();
 	}
-	lck_spin_unlock(&kds_spin_lock);
+	lck_spin_unlock(kds_spin_lock);
 	ml_set_interrupts_enabled(s);
 
 	if (enabled) {
@@ -711,7 +712,7 @@ static void
 kdbg_set_flags(int slowflag, int enableflag, bool enabled)
 {
 	int s = ml_set_interrupts_enabled(false);
-	lck_spin_lock_grp(&kds_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kds_spin_lock, kdebug_lck_grp);
 
 	if (enabled) {
 		kd_ctrl_page.kdebug_slowcheck |= slowflag;
@@ -721,7 +722,7 @@ kdbg_set_flags(int slowflag, int enableflag, bool enabled)
 		kdebug_enable &= ~enableflag;
 	}
 
-	lck_spin_unlock(&kds_spin_lock);
+	lck_spin_unlock(kds_spin_lock);
 	ml_set_interrupts_enabled(s);
 }
 
@@ -733,7 +734,7 @@ disable_wrap(uint32_t *old_slowcheck, uint32_t *old_flags)
 {
 	bool wrapped;
 	int s = ml_set_interrupts_enabled(false);
-	lck_spin_lock_grp(&kds_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kds_spin_lock, kdebug_lck_grp);
 
 	*old_slowcheck = kd_ctrl_page.kdebug_slowcheck;
 	*old_flags = kd_ctrl_page.kdebug_flags;
@@ -742,7 +743,7 @@ disable_wrap(uint32_t *old_slowcheck, uint32_t *old_flags)
 	kd_ctrl_page.kdebug_flags &= ~KDBG_WRAPPED;
 	kd_ctrl_page.kdebug_flags |= KDBG_NOWRAP;
 
-	lck_spin_unlock(&kds_spin_lock);
+	lck_spin_unlock(kds_spin_lock);
 	ml_set_interrupts_enabled(s);
 
 	return wrapped;
@@ -752,7 +753,7 @@ static void
 enable_wrap(uint32_t old_slowcheck)
 {
 	int s = ml_set_interrupts_enabled(false);
-	lck_spin_lock_grp(&kds_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kds_spin_lock, kdebug_lck_grp);
 
 	kd_ctrl_page.kdebug_flags &= ~KDBG_NOWRAP;
 
@@ -760,7 +761,7 @@ enable_wrap(uint32_t old_slowcheck)
 		kd_ctrl_page.kdebug_slowcheck &= ~SLOW_NOLOG;
 	}
 
-	lck_spin_unlock(&kds_spin_lock);
+	lck_spin_unlock(kds_spin_lock);
 	ml_set_interrupts_enabled(s);
 }
 
@@ -934,7 +935,7 @@ release_storage_unit(int cpu, uint32_t kdsp_raw)
 	kdsp.raw = kdsp_raw;
 
 	s = ml_set_interrupts_enabled(false);
-	lck_spin_lock_grp(&kds_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kds_spin_lock, kdebug_lck_grp);
 
 	kdbp = &kdbip[cpu];
 
@@ -957,7 +958,7 @@ release_storage_unit(int cpu, uint32_t kdsp_raw)
 
 		kd_ctrl_page.kds_inuse_count--;
 	}
-	lck_spin_unlock(&kds_spin_lock);
+	lck_spin_unlock(kds_spin_lock);
 	ml_set_interrupts_enabled(s);
 }
 
@@ -972,7 +973,7 @@ allocate_storage_unit(int cpu)
 	int s = 0;
 
 	s = ml_set_interrupts_enabled(false);
-	lck_spin_lock_grp(&kds_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kds_spin_lock, kdebug_lck_grp);
 
 	kdbp = &kdbip[cpu];
 
@@ -1080,7 +1081,7 @@ allocate_storage_unit(int cpu)
 	}
 	kdbp->kd_list_tail = kdsp;
 out:
-	lck_spin_unlock(&kds_spin_lock);
+	lck_spin_unlock(kds_spin_lock);
 	ml_set_interrupts_enabled(s);
 
 	return retval;
@@ -2065,6 +2066,27 @@ kdebug_trace_string(__unused struct proc *p,
 	return 0;
 }
 
+static void
+kdbg_lock_init(void)
+{
+	static lck_grp_attr_t *kdebug_lck_grp_attr = NULL;
+	static lck_attr_t     *kdebug_lck_attr     = NULL;
+
+	if (kd_ctrl_page.kdebug_flags & KDBG_LOCKINIT) {
+		return;
+	}
+
+	assert(kdebug_lck_grp_attr == NULL);
+	kdebug_lck_grp_attr = lck_grp_attr_alloc_init();
+	kdebug_lck_grp = lck_grp_alloc_init("kdebug", kdebug_lck_grp_attr);
+	kdebug_lck_attr = lck_attr_alloc_init();
+
+	kds_spin_lock = lck_spin_alloc_init(kdebug_lck_grp, kdebug_lck_attr);
+	kdw_spin_lock = lck_spin_alloc_init(kdebug_lck_grp, kdebug_lck_attr);
+
+	kd_ctrl_page.kdebug_flags |= KDBG_LOCKINIT;
+}
+
 int
 kdbg_bootstrap(bool early_trace)
 {
@@ -2402,6 +2424,8 @@ void
 kdebug_reset(void)
 {
 	ktrace_assert_lock_held();
+
+	kdbg_lock_init();
 
 	kdbg_clear();
 	if (kdbg_typefilter) {
@@ -3330,7 +3354,7 @@ kdbg_wait(uint64_t timeout_ms, bool locked_wait)
 	if (!s) {
 		panic("kdbg_wait() called with interrupts disabled");
 	}
-	lck_spin_lock_grp(&kdw_spin_lock, &kdebug_lck_grp);
+	lck_spin_lock_grp(kdw_spin_lock, kdebug_lck_grp);
 
 	if (!locked_wait) {
 		/* drop the mutex to allow others to access trace */
@@ -3342,9 +3366,9 @@ kdbg_wait(uint64_t timeout_ms, bool locked_wait)
 		kds_waiter = 1;
 
 		if (abstime) {
-			wait_result = lck_spin_sleep_deadline(&kdw_spin_lock, 0, &kds_waiter, THREAD_ABORTSAFE, abstime);
+			wait_result = lck_spin_sleep_deadline(kdw_spin_lock, 0, &kds_waiter, THREAD_ABORTSAFE, abstime);
 		} else {
-			wait_result = lck_spin_sleep(&kdw_spin_lock, 0, &kds_waiter, THREAD_ABORTSAFE);
+			wait_result = lck_spin_sleep(kdw_spin_lock, 0, &kds_waiter, THREAD_ABORTSAFE);
 		}
 
 		kds_waiter = 0;
@@ -3353,7 +3377,7 @@ kdbg_wait(uint64_t timeout_ms, bool locked_wait)
 	/* check the count under the spinlock */
 	bool threshold_exceeded = (kd_ctrl_page.kds_inuse_count >= n_storage_threshold);
 
-	lck_spin_unlock(&kdw_spin_lock);
+	lck_spin_unlock(kdw_spin_lock);
 	ml_set_interrupts_enabled(s);
 
 	if (!locked_wait) {
@@ -3384,13 +3408,13 @@ kdbg_wakeup(void)
 	 */
 	bool s = ml_set_interrupts_enabled(false);
 
-	if (lck_spin_try_lock(&kdw_spin_lock)) {
+	if (lck_spin_try_lock(kdw_spin_lock)) {
 		if (kds_waiter &&
 		    (kd_ctrl_page.kds_inuse_count >= n_storage_threshold)) {
 			kds_waiter = 0;
 			need_kds_wakeup = true;
 		}
-		lck_spin_unlock(&kdw_spin_lock);
+		lck_spin_unlock(kdw_spin_lock);
 	}
 
 	ml_set_interrupts_enabled(s);
@@ -3423,6 +3447,9 @@ kdbg_control(int *name, u_int namelen, user_addr_t where, size_t *sizep)
 		}
 		value = name[1];
 	}
+
+	kdbg_lock_init();
+	assert(kd_ctrl_page.kdebug_flags & KDBG_LOCKINIT);
 
 	ktrace_lock();
 
@@ -4254,6 +4281,8 @@ kdebug_trace_start(unsigned int n_events, const char *filter_desc,
 	}
 
 	ktrace_start_single_threaded();
+
+	kdbg_lock_init();
 
 	ktrace_kernel_configure(KTRACE_KDEBUG);
 

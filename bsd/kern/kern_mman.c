@@ -273,7 +273,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 
 
 	/* make sure mapping fits into numeric range etc */
-	if (os_add3_overflow(file_pos, user_size, vm_map_page_size(user_map) - 1, &sum)) {
+	if (os_add3_overflow(file_pos, user_size, PAGE_SIZE_64 - 1, &sum)) {
 		return EINVAL;
 	}
 
@@ -850,10 +850,10 @@ bad:
 	}
 
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_mmap) | DBG_FUNC_NONE), fd, (uint32_t)(*retval), (uint32_t)user_size, error, 0);
-#if XNU_TARGET_OS_OSX
+#ifndef CONFIG_EMBEDDED
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO2, SYS_mmap) | DBG_FUNC_NONE), (uint32_t)(*retval >> 32), (uint32_t)(user_size >> 32),
 	    (uint32_t)(file_pos >> 32), (uint32_t)file_pos, 0);
-#endif /* XNU_TARGET_OS_OSX */
+#endif
 	return error;
 }
 
@@ -877,9 +877,9 @@ msync_nocancel(__unused proc_t p, struct msync_nocancel_args *uap, __unused int3
 	user_map = current_map();
 	addr = (mach_vm_offset_t) uap->addr;
 	size = (mach_vm_size_t) uap->len;
-#if XNU_TARGET_OS_OSX
+#ifndef CONFIG_EMBEDDED
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_msync) | DBG_FUNC_NONE), (uint32_t)(addr >> 32), (uint32_t)(size >> 32), 0, 0, 0);
-#endif /* XNU_TARGET_OS_OSX */
+#endif
 	if (mach_vm_range_overflows(addr, size)) {
 		return EINVAL;
 	}
@@ -1272,9 +1272,8 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 
 	req_vec_size_pages = (end - addr) >> effective_page_shift;
 	cur_vec_size_pages = MIN(req_vec_size_pages, (MAX_PAGE_RANGE_QUERY >> effective_page_shift));
-	size_t kernel_vec_size = cur_vec_size_pages;
 
-	kernel_vec = kheap_alloc(KHEAP_TEMP, kernel_vec_size, Z_WAITOK | Z_ZERO);
+	kernel_vec = (void*) _MALLOC(cur_vec_size_pages * sizeof(char), M_TEMP, M_WAITOK | M_ZERO);
 
 	if (kernel_vec == NULL) {
 		return ENOMEM;
@@ -1286,11 +1285,10 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 	vec = uap->vec;
 
 	pqueryinfo_vec_size = cur_vec_size_pages * sizeof(struct vm_page_info_basic);
-
-	info = kheap_alloc(KHEAP_TEMP, pqueryinfo_vec_size, Z_WAITOK);
+	info = (void*) _MALLOC(pqueryinfo_vec_size, M_TEMP, M_WAITOK);
 
 	if (info == NULL) {
-		kheap_free(KHEAP_TEMP, kernel_vec, kernel_vec_size);
+		FREE(kernel_vec, M_TEMP);
 		return ENOMEM;
 	}
 
@@ -1368,8 +1366,8 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 		first_addr = addr;
 	}
 
-	kheap_free(KHEAP_TEMP, info, pqueryinfo_vec_size);
-	kheap_free(KHEAP_TEMP, kernel_vec, kernel_vec_size);
+	FREE(kernel_vec, M_TEMP);
+	FREE(info, M_TEMP);
 
 	if (error) {
 		return EFAULT;

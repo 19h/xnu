@@ -63,11 +63,7 @@
 
 #ifndef _NETINET_IN_SYSTM_H_
 #define _NETINET_IN_SYSTM_H_
-
-#ifndef DRIVERKIT
 #include <sys/appleapiopts.h>
-#endif /* DRIVERKIT */
-
 #include <sys/_types.h>
 
 /*

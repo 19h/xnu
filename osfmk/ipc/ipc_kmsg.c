@@ -90,6 +90,7 @@
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <kern/misc_protos.h>
+#include <kern/counters.h>
 #include <kern/cpu_data.h>
 #include <kern/policy_internal.h>
 #include <kern/mach_filter.h>
@@ -227,7 +228,7 @@ ikm_finalize_sig(
 	return *scratchp;
 }
 
-#elif defined(CRYPTO_SHA2) && !defined(__x86_64__) && !defined(__arm__)
+#elif defined(CRYPTO_SHA2) && !defined(__x86_64__)
 
 typedef SHA256_CTX ikm_sig_scratch_t;
 
@@ -268,7 +269,7 @@ ikm_finalize_sig(
 }
 
 #else
-/* Stubbed out implementation (for __x86_64__, __arm__ for now) */
+/* Stubbed out implementation (for __x86_64__ for now) */
 
 typedef uintptr_t ikm_sig_scratch_t;
 
@@ -1174,8 +1175,7 @@ ipc_kmsg_trace_send(ipc_kmsg_t kmsg,
 #endif
 
 /* zone for cached ipc_kmsg_t structures */
-ZONE_DECLARE(ipc_kmsg_zone, "ipc kmsgs", IKM_SAVED_KMSG_SIZE,
-    ZC_CACHING | ZC_ZFREE_CLEARMEM);
+ZONE_DECLARE(ipc_kmsg_zone, "ipc kmsgs", IKM_SAVED_KMSG_SIZE, ZC_CACHING);
 static TUNABLE(bool, enforce_strict_reply, "ipc_strict_reply", false);
 
 /*
@@ -1311,21 +1311,19 @@ ipc_kmsg_alloc(
 		max_expanded_size = msg_and_trailer_size;
 	}
 
-	if (max_expanded_size > IKM_SAVED_MSG_SIZE) {
-		data = kheap_alloc(KHEAP_DATA_BUFFERS, max_expanded_size, Z_WAITOK);
-		if (data == NULL) {
-			return IKM_NULL;
-		}
-	} else {
+	kmsg = (ipc_kmsg_t)zalloc(ipc_kmsg_zone);
+
+	if (max_expanded_size < IKM_SAVED_MSG_SIZE) {
+		max_expanded_size = IKM_SAVED_MSG_SIZE;         /* round up for ikm_cache */
 		data = NULL;
-		max_expanded_size = IKM_SAVED_MSG_SIZE;
+	} else if (max_expanded_size > IKM_SAVED_MSG_SIZE) {
+		data = kheap_alloc(KHEAP_DATA_BUFFERS, max_expanded_size, Z_WAITOK);
 	}
 
-	kmsg = zalloc_flags(ipc_kmsg_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	kmsg->ikm_size = max_expanded_size;
-	ikm_qos_init(kmsg);
-	ikm_set_header(kmsg, data, msg_and_trailer_size);
-	assert((kmsg->ikm_prev = kmsg->ikm_next = IKM_BOGUS));
+	if (kmsg != IKM_NULL) {
+		ikm_init(kmsg, max_expanded_size);
+		ikm_set_header(kmsg, data, msg_and_trailer_size);
+	}
 
 	return kmsg;
 }
@@ -2607,6 +2605,21 @@ ipc_kmsg_set_qos(
 	return kr;
 }
 
+static inline void
+ipc_kmsg_allow_immovable_send(
+	ipc_kmsg_t   kmsg,
+	ipc_entry_t  dest_entry)
+{
+	ipc_object_t object = dest_entry->ie_object;
+	/*
+	 *	If the dest port is a kobject, allow copyin of immovable send
+	 *	rights in the message body to succeed
+	 */
+	if (IO_VALID(object) && io_is_kobject(object)) {
+		kmsg->ikm_flags |= IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND;
+	}
+}
+
 /*
  *	Routine:	ipc_kmsg_link_reply_context_locked
  *	Purpose:
@@ -2921,6 +2934,8 @@ ipc_kmsg_copyin_header(
 		if (dest_entry == IE_NULL) {
 			goto invalid_dest;
 		}
+		/* Check if dest port allows immovable send rights to be sent in the kmsg body */
+		ipc_kmsg_allow_immovable_send(kmsg, dest_entry);
 
 		/*
 		 *	Make sure a future copyin of the reply port will succeed.
@@ -2974,7 +2989,7 @@ ipc_kmsg_copyin_header(
 		 */
 		if (reply_entry != IE_NULL) {
 			kr = ipc_right_copyin(space, reply_name, reply_entry,
-			    reply_type, IPC_OBJECT_COPYIN_FLAGS_DEADOK,
+			    reply_type, IPC_RIGHT_COPYIN_FLAGS_DEADOK,
 			    &reply_port, &reply_soright,
 			    &release_port, &assertcnt, 0, NULL);
 			assert(assertcnt == 0);
@@ -2993,6 +3008,7 @@ ipc_kmsg_copyin_header(
 			if (dest_entry == IE_NULL) {
 				goto invalid_dest;
 			}
+			ipc_kmsg_allow_immovable_send(kmsg, dest_entry);
 
 			reply_entry = dest_entry;
 			assert(reply_type != 0); /* because name not null */
@@ -3049,6 +3065,7 @@ ipc_kmsg_copyin_header(
 				goto invalid_dest;
 			}
 			assert(dest_entry != voucher_entry);
+			ipc_kmsg_allow_immovable_send(kmsg, dest_entry);
 
 			/*
 			 *	Make sure reply port entry is valid before dest copyin.
@@ -3073,8 +3090,8 @@ ipc_kmsg_copyin_header(
 			 *	copyin the destination.
 			 */
 			kr = ipc_right_copyin(space, dest_name, dest_entry,
-			    dest_type, (IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND |
-			    IPC_OBJECT_COPYIN_FLAGS_ALLOW_DEAD_SEND_ONCE),
+			    dest_type, (IPC_RIGHT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND |
+			    IPC_RIGHT_COPYIN_FLAGS_ALLOW_DEAD_SEND_ONCE),
 			    &dest_port, &dest_soright,
 			    &release_port, &assertcnt, 0, NULL);
 			assert(assertcnt == 0);
@@ -3090,7 +3107,7 @@ ipc_kmsg_copyin_header(
 			 */
 			if (MACH_PORT_VALID(reply_name)) {
 				kr = ipc_right_copyin(space, reply_name, reply_entry,
-				    reply_type, IPC_OBJECT_COPYIN_FLAGS_DEADOK,
+				    reply_type, IPC_RIGHT_COPYIN_FLAGS_DEADOK,
 				    &reply_port, &reply_soright,
 				    &release_port, &assertcnt, 0, NULL);
 				assert(assertcnt == 0);
@@ -3107,7 +3124,7 @@ ipc_kmsg_copyin_header(
 		 */
 		if (IE_NULL != voucher_entry) {
 			kr = ipc_right_copyin(space, voucher_name, voucher_entry,
-			    voucher_type, IPC_OBJECT_COPYIN_FLAGS_NONE,
+			    voucher_type, IPC_RIGHT_COPYIN_FLAGS_NONE,
 			    (ipc_object_t *)&voucher_port,
 			    &voucher_soright,
 			    &voucher_release_port,
@@ -3158,19 +3175,6 @@ ipc_kmsg_copyin_header(
 
 	dest_type = ipc_object_copyin_type(dest_type);
 	reply_type = ipc_object_copyin_type(reply_type);
-
-	/*
-	 *	If the dest port is a kobject AND its receive right belongs to kernel, allow
-	 *  copyin of immovable send rights in the message body (port descriptor) to
-	 *  succeed since those send rights are simply "moved" or "copied" into kernel.
-	 *
-	 *  See: ipc_object_copyin().
-	 */
-	if (io_is_kobject(dest_port) &&
-	    ip_object_to_port(dest_port)->ip_receiver == ipc_space_kernel) {
-		assert(io_kotype(dest_port) != IKOT_HOST_NOTIFY && io_kotype(dest_port) != IKOT_TIMER);
-		kmsg->ikm_flags |= IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND;
-	}
 
 	/*
 	 * JMM - Without rdar://problem/6275821, this is the last place we can
@@ -4598,7 +4602,6 @@ ipc_kmsg_copyout_header(
 
 		uint32_t entries_held = 0;
 		boolean_t need_write_lock = FALSE;
-		ipc_object_copyout_flags_t reply_copyout_options = IPC_OBJECT_COPYOUT_FLAGS_NONE;
 		kern_return_t kr;
 
 		/*
@@ -4619,7 +4622,6 @@ ipc_kmsg_copyout_header(
 		}
 
 		if (need_write_lock) {
-handle_reply_again:
 			is_write_lock(space);
 
 			while (entries_held) {
@@ -4644,48 +4646,32 @@ handle_reply_again:
 
 			/* Handle reply port. */
 			if (IP_VALID(reply)) {
-				ipc_port_t reply_subst = IP_NULL;
 				ipc_entry_t entry;
-
-				ip_lock(reply);
-
-				/* Is the reply port still active and allowed to be copied out? */
-				if (!ip_active(reply) ||
-				    !ip_label_check(space, reply, reply_type,
-				    &reply_copyout_options, &reply_subst)) {
-					/* clear the context value */
-					reply->ip_reply_context = 0;
-					ip_unlock(reply);
-
-					assert(reply_subst == IP_NULL);
-					release_reply_port = reply;
-					reply = IP_DEAD;
-					reply_name = MACH_PORT_DEAD;
-					goto done_with_reply;
-				}
-
-				/* is the kolabel requesting a substitution */
-				if (reply_subst != IP_NULL) {
-					/*
-					 * port is unlocked, its right consumed
-					 * space is unlocked
-					 */
-					assert(reply_type == MACH_MSG_TYPE_PORT_SEND);
-					msg->msgh_local_port = reply = reply_subst;
-					goto handle_reply_again;
-				}
-
 
 				/* Is there already an entry we can use? */
 				if ((reply_type != MACH_MSG_TYPE_PORT_SEND_ONCE) &&
 				    ipc_right_reverse(space, ip_to_object(reply), &reply_name, &entry)) {
+					/* reply port is locked and active */
 					assert(entry->ie_bits & MACH_PORT_TYPE_SEND_RECEIVE);
 				} else {
+					ip_lock(reply);
+					/* Is the reply port still active and allowed to be copied out? */
+					if (!ip_active(reply) || !ip_label_check(space, reply, reply_type)) {
+						/* clear the context value */
+						reply->ip_reply_context = 0;
+						ip_unlock(reply);
+
+						release_reply_port = reply;
+						reply = IP_DEAD;
+						reply_name = MACH_PORT_DEAD;
+						goto done_with_reply;
+					}
+
 					/* claim a held entry for the reply port */
 					assert(entries_held > 0);
 					entries_held--;
 					ipc_entry_claim(space, &reply_name, &entry);
-					assert(!ipc_right_inuse(entry));
+					assert(IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE);
 					assert(entry->ie_object == IO_NULL);
 					entry->ie_object = ip_to_object(reply);
 				}
@@ -4722,8 +4708,7 @@ handle_reply_again:
 				}
 
 				kr = ipc_right_copyout(space, reply_name, entry,
-				    reply_type, IPC_OBJECT_COPYOUT_FLAGS_NONE, NULL, NULL,
-				    ip_to_object(reply));
+				    reply_type, NULL, NULL, ip_to_object(reply));
 				assert(kr == KERN_SUCCESS);
 				/* reply port is unlocked */
 			} else {
@@ -4750,25 +4735,25 @@ done_with_reply:
 				if ((option & MACH_RCV_VOUCHER) != 0) {
 					ipc_entry_t entry;
 
-					ip_lock(voucher);
-
 					if (ipc_right_reverse(space, ip_to_object(voucher),
 					    &voucher_name, &entry)) {
+						/* voucher port locked */
 						assert(entry->ie_bits & MACH_PORT_TYPE_SEND);
 					} else {
 						assert(entries_held > 0);
 						entries_held--;
 						ipc_entry_claim(space, &voucher_name, &entry);
-						assert(!ipc_right_inuse(entry));
+						assert(IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE);
 						assert(entry->ie_object == IO_NULL);
 						entry->ie_object = ip_to_object(voucher);
+						ip_lock(voucher);
 					}
 					/* space is locked and active */
-
+					require_ip_active(voucher);
 					assert(ip_kotype(voucher) == IKOT_VOUCHER);
 					kr = ipc_right_copyout(space, voucher_name, entry,
-					    MACH_MSG_TYPE_MOVE_SEND, IPC_OBJECT_COPYOUT_FLAGS_NONE,
-					    NULL, NULL, ip_to_object(voucher));
+					    MACH_MSG_TYPE_MOVE_SEND, NULL, NULL,
+					    ip_to_object(voucher));
 					/* voucher port is unlocked */
 				} else {
 					voucher_type = MACH_MSGH_BITS_ZERO;
@@ -4943,7 +4928,8 @@ done_with_voucher:
  *		MACH_MSG_IPC_KERNEL	Kernel resource shortage.
  *			(Name is MACH_PORT_NULL.)
  */
-static mach_msg_return_t
+
+mach_msg_return_t
 ipc_kmsg_copyout_object(
 	ipc_space_t             space,
 	ipc_object_t            object,
@@ -4959,9 +4945,10 @@ ipc_kmsg_copyout_object(
 		return MACH_MSG_SUCCESS;
 	}
 
-	kr = ipc_object_copyout(space, object, msgt_name, IPC_OBJECT_COPYOUT_FLAGS_NONE,
-	    context, guard_flags, namep);
+	kr = ipc_object_copyout(space, object, msgt_name, context, guard_flags, namep);
 	if (kr != KERN_SUCCESS) {
+		ipc_object_destroy(object, msgt_name);
+
 		if (kr == KERN_INVALID_CAPABILITY) {
 			*namep = MACH_PORT_DEAD;
 		} else {
@@ -4979,15 +4966,14 @@ ipc_kmsg_copyout_object(
 }
 
 static mach_msg_descriptor_t *
-ipc_kmsg_copyout_port_descriptor(
-	mach_msg_descriptor_t   *dsc,
-	mach_msg_descriptor_t   *dest_dsc,
-	ipc_space_t             space,
-	kern_return_t           *mr)
+ipc_kmsg_copyout_port_descriptor(mach_msg_descriptor_t *dsc,
+    mach_msg_descriptor_t *dest_dsc,
+    ipc_space_t space,
+    kern_return_t *mr)
 {
-	mach_port_t             port;
-	mach_port_name_t        name;
-	mach_msg_type_name_t    disp;
+	mach_port_t                 port;
+	mach_port_name_t            name;
+	mach_msg_type_name_t                disp;
 
 	/* Copyout port right carried in the message */
 	port = dsc->port.name;
@@ -5016,20 +5002,17 @@ ipc_kmsg_copyout_port_descriptor(
 	return (mach_msg_descriptor_t *)dest_dsc;
 }
 
-static mach_msg_descriptor_t *
-ipc_kmsg_copyout_ool_descriptor(
-	mach_msg_ool_descriptor_t   *dsc,
-	mach_msg_descriptor_t       *user_dsc,
-	int                         is_64bit,
-	vm_map_t                    map,
-	mach_msg_return_t           *mr)
+mach_msg_descriptor_t *
+ipc_kmsg_copyout_ool_descriptor(mach_msg_ool_descriptor_t *dsc, mach_msg_descriptor_t *user_dsc, int is_64bit, vm_map_t map, mach_msg_return_t *mr);
+mach_msg_descriptor_t *
+ipc_kmsg_copyout_ool_descriptor(mach_msg_ool_descriptor_t *dsc, mach_msg_descriptor_t *user_dsc, int is_64bit, vm_map_t map, mach_msg_return_t *mr)
 {
-	vm_map_copy_t               copy;
-	vm_map_address_t            rcv_addr;
-	mach_msg_copy_options_t     copy_options;
-	vm_map_size_t               size;
+	vm_map_copy_t                       copy;
+	vm_map_address_t                    rcv_addr;
+	mach_msg_copy_options_t             copy_options;
+	vm_map_size_t                       size;
 	mach_msg_descriptor_type_t  dsc_type;
-	boolean_t                   misaligned = FALSE;
+	boolean_t                           misaligned = FALSE;
 
 	//SKIP_PORT_DESCRIPTORS(saddr, sdsc_count);
 
@@ -5455,24 +5438,20 @@ ipc_kmsg_copyout_body(
 	for (i = dsc_count - 1; i >= 0; i--) {
 		switch (kern_dsc[i].type.type) {
 		case MACH_MSG_PORT_DESCRIPTOR:
-			user_dsc = ipc_kmsg_copyout_port_descriptor(&kern_dsc[i],
-			    user_dsc, space, &mr);
+			user_dsc = ipc_kmsg_copyout_port_descriptor(&kern_dsc[i], user_dsc, space, &mr);
 			break;
 		case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
 		case MACH_MSG_OOL_DESCRIPTOR:
 			user_dsc = ipc_kmsg_copyout_ool_descriptor(
-				(mach_msg_ool_descriptor_t *)&kern_dsc[i],
-				user_dsc, is_task_64bit, map, &mr);
+				(mach_msg_ool_descriptor_t *)&kern_dsc[i], user_dsc, is_task_64bit, map, &mr);
 			break;
 		case MACH_MSG_OOL_PORTS_DESCRIPTOR:
 			user_dsc = ipc_kmsg_copyout_ool_ports_descriptor(
-				(mach_msg_ool_ports_descriptor_t *)&kern_dsc[i],
-				user_dsc, is_task_64bit, map, space, kmsg, &mr);
+				(mach_msg_ool_ports_descriptor_t *)&kern_dsc[i], user_dsc, is_task_64bit, map, space, kmsg, &mr);
 			break;
 		case MACH_MSG_GUARDED_PORT_DESCRIPTOR:
 			user_dsc = ipc_kmsg_copyout_guarded_port_descriptor(
-				(mach_msg_guarded_port_descriptor_t *)&kern_dsc[i],
-				user_dsc, is_task_64bit, kmsg, space, option, &mr);
+				(mach_msg_guarded_port_descriptor_t *)&kern_dsc[i], user_dsc, is_task_64bit, kmsg, space, option, &mr);
 			break;
 		default: {
 			panic("untyped IPC copyout body: invalid message descriptor");

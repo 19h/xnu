@@ -160,8 +160,10 @@ struct vm_allocation_total {
 };
 
 struct vm_allocation_zone_total {
-	vm_size_t vazt_total;
-	vm_size_t vazt_peak;
+	uint64_t  total;
+	uint64_t  peak;
+	uint32_t  waste;
+	uint32_t  wastediv;
 };
 typedef struct vm_allocation_zone_total vm_allocation_zone_total_t;
 

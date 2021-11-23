@@ -64,8 +64,7 @@ MACH_PRIVATE_DEFS = \
 	sysdiagnose_notification.defs \
 	upl.defs \
 	vfs_nspace.defs \
-	vm32_map.defs \
-	iocompressionstats_notification.defs
+	vm32_map.defs
 
 #
 # MIG-generated headers that are traditionally used by user
@@ -84,7 +83,6 @@ MIG_USHDRS = \
 	task_access_server.h \
 	telemetry_notification_server.h \
 	sysdiagnose_notification_server.h \
-	iocompressionstats_notification_server.h \
 	vfs_nspace_server.h
 
 MIG_UUHDRS = \
@@ -185,7 +183,6 @@ PRIVATE_DATAFILES = \
 	coalition.h \
 	coalition_notification.defs \
 	fairplayd_notification.defs \
-	iocompressionstats_notification.defs \
 	arcade_upcall.defs \
 	host_info.h \
 	ktrace_background.defs \
@@ -308,7 +305,6 @@ MIG_KUSRC = \
 	resource_notify_user.c \
 	task_access_user.c \
 	telemetry_notification_user.c \
-	iocompressionstats_notification_user.c \
 	upl_user.c \
 	vfs_nspace_user.c \
 	vm_map_user.c \

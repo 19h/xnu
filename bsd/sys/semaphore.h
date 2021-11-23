@@ -62,6 +62,7 @@ int sem_wait(sem_t *) __DARWIN_ALIAS_C(sem_wait);
 __END_DECLS
 
 #else   /* KERNEL */
+void psem_lock_init(void);
 void psem_cache_init(void);
 #endif  /* KERNEL */
 

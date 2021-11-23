@@ -315,7 +315,6 @@ private:
 		unsigned int CPPInitialized:1;
 		unsigned int jettisonLinkeditSeg:1;
 		unsigned int resetSegmentsFromImmutableCopy:1;
-		unsigned int unloadUnsupported:1;
 	} flags;
 
 	uint32_t matchingRefCount;

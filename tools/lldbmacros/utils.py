@@ -305,38 +305,25 @@ def WriteInt8ToMemoryAddress(intval, addr):
     return False 
 
 _enum_cache = {}
-def GetEnumValue(enum_name_or_combined, member_name = None):
+def GetEnumValue(name):
     """ Finds the value of a particular enum define. Ex kdp_req_t::KDP_VERSION  => 0x3
         params:
-            enum_name_or_combined: str
-                name of an enum of the format type::name (legacy)
-                name of an enum type
-            member_name: None, or the name of an enum member
-                   (then enum_name_or_combined is a type name).
+            name : str - name of enum in the format type::name
         returns:
             int - value of the particular enum.
         raises:
             TypeError - if the enum is not found
     """
+    name = name.strip()
     global _enum_cache
-    if member_name is None:
-        enum_name, member_name = enum_name_or_combined.strip().split("::")
-    else:
-        enum_name = enum_name_or_combined
-
-    if enum_name not in _enum_cache:
-        ty = GetType(enum_name)
-        d  = {}
-
-        for e in ty.get_enum_members_array():
-            if ty.GetTypeFlags() & lldb.eTypeIsSigned:
-                d[e.GetName()] = e.GetValueAsSigned()
-            else:
-                d[e.GetName()] = e.GetValueAsUnsigned()
-
-        _enum_cache[enum_name] = d
-
-    return _enum_cache[enum_name][member_name]
+    if name not in _enum_cache:
+        res = lldb.SBCommandReturnObject()
+        lldb.debugger.GetCommandInterpreter().HandleCommand("p/x (`%s`)" % name, res)
+        if not res.Succeeded():
+            raise TypeError("Enum not found with name: " + name)
+        # the result is of format '(int) $481 = 0x00000003\n'
+        _enum_cache[name] = int( res.GetOutput().split('=')[-1].strip(), 16)
+    return _enum_cache[name]
 
 def ResolveFSPath(path):
     """ expand ~user directories and return absolute path.
@@ -455,13 +442,12 @@ def IsAppleInternal():
         retval = False
     return retval
 
-def print_hex_data(data, begin_offset=0, desc="", marks={}):
+def print_hex_data(data, begin_offset=0, desc=""):
     """ print on stdout "hexdump -C < data" like output
         params:
             data - bytearray or array of int where each int < 255
             begin_offset - int offset that should be printed in left column
             desc - str optional description to print on the first line to describe data
-            mark - dictionary of markers
     """
     if desc:
         print "{}:".format(desc)
@@ -470,11 +456,7 @@ def print_hex_data(data, begin_offset=0, desc="", marks={}):
     hex_buf = ""
     char_buf = ""
     while index < total_len:
-        if marks.has_key(begin_offset + index):
-            hex_buf += marks[begin_offset + index]
-            hex_buf += "{:02x}".format(data[index])
-        else:
-            hex_buf += " {:02x}".format(data[index])
+        hex_buf += " {:02x}".format(data[index])
         if data[index] < 0x20 or data[index] > 0x7e:
             char_buf += "."
         else:

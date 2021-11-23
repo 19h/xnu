@@ -141,6 +141,7 @@ SYSCTL_INT(_net_inet_icmp, OID_AUTO, log_redirect,
 const static int icmp_datalen = 8;
 
 #if ICMP_BANDLIM
+
 /* Default values in case CONFIG_ICMP_BANDLIM is not defined in the MASTER file */
 #ifndef CONFIG_ICMP_BANDLIM
 #if XNU_TARGET_OS_OSX
@@ -158,15 +159,14 @@ const static int icmp_datalen = 8;
 static int      icmplim = CONFIG_ICMP_BANDLIM;
 SYSCTL_INT(_net_inet_icmp, ICMPCTL_ICMPLIM, icmplim, CTLFLAG_RW | CTLFLAG_LOCKED,
     &icmplim, 0, "");
+
 #else /* ICMP_BANDLIM */
+
 static int      icmplim = -1;
 SYSCTL_INT(_net_inet_icmp, ICMPCTL_ICMPLIM, icmplim, CTLFLAG_RD | CTLFLAG_LOCKED,
     &icmplim, 0, "");
-#endif /* ICMP_BANDLIM */
 
-static int      icmplim_random_incr = CONFIG_ICMP_BANDLIM;
-SYSCTL_INT(_net_inet_icmp, ICMPCTL_ICMPLIM_INCR, icmplim_random_incr, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &icmplim_random_incr, 0, "");
+#endif /* ICMP_BANDLIM */
 
 /*
  * ICMP broadcast echo sysctl
@@ -1074,8 +1074,11 @@ ip_next_mtu(int mtu, int dir)
 
 /*
  * badport_bandlim() - check for ICMP bandwidth limit
- *	Returns false when it is ok to send ICMP error and true to limit sending
- *	of ICMP error.
+ *
+ *	Return 0 if it is ok to send an ICMP error response, -1 if we have
+ *	hit our bandwidth limit and it is not ok.
+ *
+ *	If icmplim is <= 0, the feature is disabled and 0 is returned.
  *
  *	For now we separate the TCP and UDP subsystems w/ different 'which'
  *	values.  We may eventually remove this separation (and simplify the
@@ -1095,8 +1098,7 @@ badport_bandlim(int which)
 	static int lpackets[BANDLIM_MAX + 1];
 	uint64_t time;
 	uint64_t secs;
-	static boolean_t is_initialized = FALSE;
-	static int icmplim_random;
+
 	const char *bandlimittype[] = {
 		"Limiting icmp unreach response",
 		"Limiting icmp ping response",
@@ -1111,14 +1113,6 @@ badport_bandlim(int which)
 		return false;
 	}
 
-	if (is_initialized == FALSE) {
-		if (icmplim_random_incr > 0 &&
-		    icmplim <= INT32_MAX - (icmplim_random_incr + 1)) {
-			icmplim_random = icmplim + (random() % icmplim_random_incr) + 1;
-		}
-		is_initialized = TRUE;
-	}
-
 	time = net_uptime();
 	secs = time - lticks[which];
 
@@ -1127,11 +1121,11 @@ badport_bandlim(int which)
 	 */
 
 	if (secs > 1) {
-		if (lpackets[which] > icmplim_random) {
+		if (lpackets[which] > icmplim) {
 			printf("%s from %d to %d packets per second\n",
 			    bandlimittype[which],
 			    lpackets[which],
-			    icmplim_random
+			    icmplim
 			    );
 		}
 		lticks[which] = time;
@@ -1141,16 +1135,9 @@ badport_bandlim(int which)
 	/*
 	 * bump packet count
 	 */
-	if (++lpackets[which] > icmplim_random) {
-		/*
-		 * After hitting the randomized limit, we further randomize the
-		 * behavior of how we apply rate limitation.
-		 * We rate limit based on probability that increases with the
-		 * increase in lpackets[which] count.
-		 */
-		if ((random() % (lpackets[which] - icmplim_random)) != 0) {
-			return true;
-		}
+
+	if (++lpackets[which] > icmplim) {
+		return true;
 	}
 	return false;
 }

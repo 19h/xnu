@@ -79,13 +79,10 @@ class IODTNVRAM : public IOService
 	OSDeclareDefaultStructors(IODTNVRAM);
 
 private:
-	friend class IODTNVRAMVariables;
-
 	IONVRAMController      *_nvramController;
 	OSPtr<const OSSymbol>  _registryPropertiesKey;
 	UInt8                  *_nvramImage;
-	IORWLock               *_variableLock;
-	IOLock                 *_controllerLock;
+	IOLock                 *_variableLock;
 	UInt32                 _commonPartitionOffset;
 	UInt32                 _commonPartitionSize;
 	UInt8                  *_commonImage;
@@ -148,16 +145,12 @@ private:
 	UInt32 getNVRAMSize(void);
 	void initNVRAMImage(void);
 	void initProxyData(void);
-	IOReturn serializeVariables(void);
+	IOReturn syncVariables(void);
 	IOReturn setPropertyInternal(const OSSymbol *aKey, OSObject *anObject);
 	IOReturn removePropertyInternal(const OSSymbol *aKey);
 	IOReturn chooseDictionary(IONVRAMOperation operation, const uuid_t *varGuid,
 	    const char *variableName, OSDictionary **dict) const;
-	IOReturn flushDict(const uuid_t *guid, IONVRAMOperation op);
-	bool handleSpecialVariables(const char *name, const uuid_t *guid, const OSObject *obj, IOReturn *error);
-	OSSharedPtr<OSObject> copyPropertyWithGUIDAndName(const uuid_t *guid, const char *name) const;
-	IOReturn removePropertyWithGUIDAndName(const uuid_t *guid, const char *name);
-	IOReturn setPropertyWithGUIDAndName(const uuid_t *guid, const char *name, OSObject *anObject);
+	bool handleSpecialVariables(const char *name, uuid_t *guid, OSObject *obj, IOReturn *error);
 
 public:
 	virtual bool init(IORegistryEntry *old, const IORegistryPlane *plane) APPLE_KEXT_OVERRIDE;

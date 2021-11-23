@@ -65,6 +65,8 @@
 
 int evh_debug = 0;
 
+MALLOC_DEFINE(M_EVENTHANDLER, "eventhandler", "Event handler records");
+
 SYSCTL_NODE(_kern, OID_AUTO, eventhandler, CTLFLAG_RW | CTLFLAG_LOCKED,
     0, "Eventhandler");
 SYSCTL_INT(_kern_eventhandler, OID_AUTO, debug, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -74,7 +76,9 @@ struct eventhandler_entry_arg eventhandler_entry_dummy_arg = { .ee_fm_uuid = { 0
 
 /* List of 'slow' lists */
 static struct eventhandler_lists_ctxt evthdlr_lists_ctxt_glb;
-static LCK_GRP_DECLARE(eventhandler_mutex_grp, "eventhandler");
+static lck_grp_attr_t   *eventhandler_mutex_grp_attr;
+static lck_grp_t        *eventhandler_mutex_grp;
+static lck_attr_t       *eventhandler_mutex_attr;
 
 static unsigned int eg_size;    /* size of eventhandler_entry_generic */
 static struct mcache *eg_cache; /* mcache for eventhandler_entry_generic */
@@ -82,8 +86,9 @@ static struct mcache *eg_cache; /* mcache for eventhandler_entry_generic */
 static unsigned int el_size;    /* size of eventhandler_list */
 static struct mcache *el_cache; /* mcache for eventhandler_list */
 
-LCK_GRP_DECLARE(el_lock_grp, "eventhandler list");
-LCK_ATTR_DECLARE(el_lock_attr, 0, 0);
+static lck_grp_attr_t   *el_lock_grp_attr;
+lck_grp_t        *el_lock_grp;
+lck_attr_t       *el_lock_attr;
 
 struct eventhandler_entry_generic {
 	struct eventhandler_entry       ee;
@@ -101,7 +106,7 @@ eventhandler_lists_ctxt_init(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt)
 	TAILQ_INIT(&evthdlr_lists_ctxt->eventhandler_lists);
 	evthdlr_lists_ctxt->eventhandler_lists_initted = 1;
 	lck_mtx_init(&evthdlr_lists_ctxt->eventhandler_mutex,
-	    &eventhandler_mutex_grp, LCK_ATTR_NULL);
+	    eventhandler_mutex_grp, eventhandler_mutex_attr);
 }
 
 /*
@@ -110,6 +115,16 @@ eventhandler_lists_ctxt_init(struct eventhandler_lists_ctxt *evthdlr_lists_ctxt)
 void
 eventhandler_init(void)
 {
+	eventhandler_mutex_grp_attr = lck_grp_attr_alloc_init();
+	eventhandler_mutex_grp = lck_grp_alloc_init("eventhandler",
+	    eventhandler_mutex_grp_attr);
+	eventhandler_mutex_attr = lck_attr_alloc_init();
+
+	el_lock_grp_attr = lck_grp_attr_alloc_init();
+	el_lock_grp = lck_grp_alloc_init("eventhandler list",
+	    el_lock_grp_attr);
+	el_lock_attr = lck_attr_alloc_init();
+
 	eventhandler_lists_ctxt_init(&evthdlr_lists_ctxt_glb);
 
 	eg_size = sizeof(struct eventhandler_entry_generic);
@@ -370,6 +385,6 @@ eventhandler_lists_ctxt_destroy(struct eventhandler_lists_ctxt *evthdlr_lists_ct
 	}
 	lck_mtx_unlock(&evthdlr_lists_ctxt->eventhandler_mutex);
 	lck_mtx_destroy(&evthdlr_lists_ctxt->eventhandler_mutex,
-	    &eventhandler_mutex_grp);
+	    eventhandler_mutex_grp);
 	return;
 }

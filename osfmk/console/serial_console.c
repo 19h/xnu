@@ -317,15 +317,7 @@ get_cons_ops_index(void)
 static inline void
 _cnputs(char * c, int size)
 {
-	extern int disableConsoleOutput;
-
-	if (disableConsoleOutput) {
-		return;
-	}
-
-	assert(c != NULL);
-
-	const uint32_t idx = get_cons_ops_index();
+	uint32_t idx = get_cons_ops_index();
 
 	while (size-- > 0) {
 		if (*c == '\n') {

@@ -133,7 +133,6 @@ const struct memory_object_pager_ops compressor_pager_ops = {
 	.memory_object_map = compressor_memory_object_map,
 	.memory_object_last_unmap = compressor_memory_object_last_unmap,
 	.memory_object_data_reclaim = compressor_memory_object_data_reclaim,
-	.memory_object_backing_object = NULL,
 	.memory_object_pager_name = "compressor pager"
 };
 
@@ -157,11 +156,7 @@ typedef struct compressor_pager {
 
 	/* pager-specific data */
 	lck_mtx_t                       cpgr_lock;
-#if MEMORY_OBJECT_HAS_REFCOUNT
-#define cpgr_references                 cpgr_hdr.mo_ref
-#else
-	os_ref_atomic_t                 cpgr_references;
-#endif
+	unsigned int                    cpgr_references;
 	unsigned int                    cpgr_num_slots;
 	unsigned int                    cpgr_num_slots_occupied;
 	union {
@@ -344,7 +339,8 @@ compressor_memory_object_reference(
 	}
 
 	compressor_pager_lock(pager);
-	os_ref_retain_locked_raw(&pager->cpgr_references, NULL);
+	assert(pager->cpgr_references > 0);
+	pager->cpgr_references++;
 	compressor_pager_unlock(pager);
 }
 
@@ -368,7 +364,7 @@ compressor_memory_object_deallocate(
 	}
 
 	compressor_pager_lock(pager);
-	if (os_ref_release_locked_raw(&pager->cpgr_references, NULL) > 0) {
+	if (--pager->cpgr_references > 0) {
 		compressor_pager_unlock(pager);
 		return;
 	}
@@ -582,7 +578,7 @@ compressor_memory_object_create(
 	}
 
 	compressor_pager_lock_init(pager);
-	os_ref_init_raw(&pager->cpgr_references, NULL);
+	pager->cpgr_references = 1;
 	pager->cpgr_num_slots = (uint32_t)(new_size / PAGE_SIZE);
 	pager->cpgr_num_slots_occupied = 0;
 
@@ -730,7 +726,7 @@ vm_compressor_pager_init(void)
 	    sizeof(struct compressor_pager), ZC_NOENCRYPT,
 	    ZONE_ID_ANY, ^(zone_t z){
 #if defined(__LP64__)
-		zone_set_submap_idx(z, Z_SUBMAP_IDX_VA_RESTRICTED);
+		zone_set_submap_idx(z, Z_SUBMAP_IDX_VA_RESTRICTED_MAP);
 #else
 		(void)z;
 #endif /* defined(__LP64__) */
@@ -742,7 +738,7 @@ vm_compressor_pager_init(void)
 			compressor_slots_zones_names[idx],
 			compressor_slots_zones_sizes[idx], ZC_NONE,
 			ZONE_ID_ANY, ^(zone_t z){
-			zone_set_submap_idx(z, Z_SUBMAP_IDX_VA_RESTRICTED);
+			zone_set_submap_idx(z, Z_SUBMAP_IDX_VA_RESTRICTED_MAP);
 		});
 	}
 #endif /* defined(__LP64__) */

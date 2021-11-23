@@ -61,8 +61,6 @@ COMP_SUBDIRS = \
 
 %OBJS
 
-%LIBOBJS
-
 %CFILES
 
 %CXXFILES
@@ -132,6 +130,7 @@ uat.o_CFLAGS_ADD += -Wno-implicit-int-conversion
 video_console.o_CFLAGS_ADD += -Wno-implicit-int-conversion
 xcpm_dvfs.o_CFLAGS_ADD += -Wno-implicit-int-conversion
 xcpm_ioctl.o_CFLAGS_ADD += -Wno-implicit-int-conversion
+zalloc.o_CFLAGS_ADD += -Wno-implicit-int-conversion
 # -Wno-shorten-64-to-32
 arm_vm_init.o_CFLAGS_ADD += -Wno-shorten-64-to-32
 backtrace.o_CFLAGS_ADD += -Wno-shorten-64-to-32
@@ -165,6 +164,7 @@ vm_object.o_CFLAGS_ADD += -Wno-shorten-64-to-32
 vm_shared_region_pager.o_CFLAGS_ADD += -Wno-shorten-64-to-32
 vm_swapfile_pager.o_CFLAGS_ADD += -Wno-shorten-64-to-32
 vm_user.o_CFLAGS_ADD += -Wno-shorten-64-to-32
+zalloc.o_CFLAGS_ADD += -Wno-shorten-64-to-32
 # -Wno-sign-conversion
 Diagnostics.o_CFLAGS_ADD += -Wno-sign-conversion
 acpi.o_CFLAGS_ADD += -Wno-sign-conversion
@@ -366,6 +366,8 @@ xcpm_dvfs.o_CFLAGS_ADD += -Wno-sign-conversion
 xcpm_fi.o_CFLAGS_ADD += -Wno-sign-conversion
 xcpm_idle.o_CFLAGS_ADD += -Wno-sign-conversion
 xcpm_ioctl.o_CFLAGS_ADD += -Wno-sign-conversion
+zalloc.o_CFLAGS_ADD += -Wno-sign-conversion
+zcache.o_CFLAGS_ADD += -Wno-sign-conversion
 
 # Rebuild if per-file overrides change
 ${OBJS}: $(firstword $(MAKEFILE_LIST))
@@ -392,17 +394,7 @@ $(COMPONENT).filelist: $(OBJS)
 		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
 	done > $(COMPONENT).filelist
 
-$(COMPONENT).libfilelist: $(LIBOBJS)
-	@$(LOG_LDFILELIST) "lib$(COMPONENT)"
-	$(_v)for obj in ${LIBOBJS}; do	\
-		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
-	done > $(COMPONENT).libfilelist
-
-ifeq ($(RC_ProjectName),xnu_libraries)
-do_all: $(COMPONENT).libfilelist
-else
 do_all: $(COMPONENT).filelist
-endif
 
 do_build_all:: do_all
 

@@ -302,17 +302,11 @@ convert_port_to_host_priv(
 {
 	host_t host = HOST_NULL;
 
-	/* reject translation if itk_host is not host_priv */
-	if (port != current_task()->itk_host) {
-		return HOST_NULL;
-	}
-
 	if (IP_VALID(port)) {
 		ip_lock(port);
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_HOST_PRIV)) {
-			assert(ip_get_kobject(port) == &realhost);
-			host = &realhost;
+			host = (host_t) ip_get_kobject(port);
 		}
 		ip_unlock(port);
 	}
@@ -608,6 +602,8 @@ host_set_exception_ports(
 	}
 #endif
 
+	assert(host_priv == &realhost);
+
 	host_lock(host_priv);
 
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
@@ -700,6 +696,8 @@ host_get_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	assert(host_priv == &realhost);
+
 	host_lock(host_priv);
 
 	count = 0;
@@ -718,13 +716,16 @@ host_get_exception_ports(
 					break;
 				}
 			}/* for */
-			if (j == count && count < *CountCnt) {
+			if (j == count) {
 				masks[j] = (1 << i);
 				ports[j] =
 				    ipc_port_copy_send(host_priv->exc_actions[i].port);
 				behaviors[j] = host_priv->exc_actions[i].behavior;
 				flavors[j] = host_priv->exc_actions[i].flavor;
 				count++;
+				if (count > *CountCnt) {
+					break;
+				}
 			}
 		}
 	}/* for */

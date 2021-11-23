@@ -157,11 +157,9 @@ thread_start_in_assert_wait(
  */
 kern_return_t
 thread_terminate_internal(
-	thread_t                        thread,
-	thread_terminate_options_t      options)
+	thread_t                        thread)
 {
 	kern_return_t           result = KERN_SUCCESS;
-	boolean_t               test_pin_bit = false;
 
 	thread_mtx_lock(thread);
 
@@ -175,8 +173,6 @@ thread_terminate_internal(
 		} else {
 			thread_start(thread);
 		}
-		/* This bit can be reliably tested only if the thread is still active */
-		test_pin_bit = (options == TH_TERMINATE_OPTION_UNPIN) ? true : false;
 	} else {
 		result = KERN_TERMINATED;
 	}
@@ -184,13 +180,6 @@ thread_terminate_internal(
 	if (thread->affinity_set != NULL) {
 		thread_affinity_terminate(thread);
 	}
-
-	/*
-	 * <rdar://problem/53562036> thread_terminate shouldn't be allowed on pthread
-	 * Until thread_terminate is disallowed for pthreads, always unpin the pinned port
-	 * when the thread is being terminated.
-	 */
-	ipc_thread_port_unpin(thread->ith_self, test_pin_bit);
 
 	thread_mtx_unlock(thread);
 
@@ -217,7 +206,7 @@ thread_terminate(
 		return KERN_FAILURE;
 	}
 
-	kern_return_t result = thread_terminate_internal(thread, TH_TERMINATE_OPTION_NONE);
+	kern_return_t result = thread_terminate_internal(thread);
 
 	/*
 	 * If a kernel thread is terminating itself, force handle the APC_AST here.
@@ -233,20 +222,6 @@ thread_terminate(
 		/* NOTREACHED */
 	}
 
-	return result;
-}
-
-kern_return_t
-thread_terminate_pinned(
-	thread_t                thread)
-{
-	if (thread == THREAD_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	assert(thread->task != kernel_task);
-
-	kern_return_t result = thread_terminate_internal(thread, TH_TERMINATE_OPTION_UNPIN);
 	return result;
 }
 

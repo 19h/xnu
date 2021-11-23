@@ -182,7 +182,6 @@ __BEGIN_DECLS
 #define DBG_MACH_SCHED_CLUTCH   0xA9 /* Clutch scheduler */
 #define DBG_MACH_IO             0xAA /* I/O */
 #define DBG_MACH_WORKGROUP      0xAB /* Workgroup subsystem */
-#define DBG_MACH_HV             0xAC /* Hypervisor subsystem */
 
 /* Codes for DBG_MACH_IO */
 #define DBC_MACH_IO_MMIO_READ           0x1
@@ -261,8 +260,6 @@ __BEGIN_DECLS
 #define MACH_TURNSTILE_KERNEL_CHANGE 0x40 /* sched priority change because of turnstile */
 #define MACH_SCHED_WI_AUTO_JOIN      0x41 /* work interval auto join events */
 #define MACH_SCHED_WI_DEFERRED_FINISH 0x42 /* work interval pending finish events for auto-join thread groups */
-#define MACH_SET_RT_DEADLINE       0x43 /* set thread->realtime.deadline */
-#define MACH_CANCEL_RT_DEADLINE    0x44 /* cancel thread->realtime.deadline */
 #define MACH_PSET_AVG_EXEC_TIME    0x50
 
 /* Codes for Clutch/Edge Scheduler (DBG_MACH_SCHED_CLUTCH) */
@@ -363,13 +360,6 @@ __BEGIN_DECLS
 #define PMAP__UPDATE_CACHING    0x15
 #define PMAP__ATTRIBUTE_CLEAR_RANGE 0x16
 #define PMAP__CLEAR_USER_TTB    0x17
-#define PMAP__IOMMU_INIT        0x18
-#define PMAP__IOMMU_IOVMALLOC   0x19
-#define PMAP__IOMMU_IOVMFREE    0x1a
-#define PMAP__IOMMU_MAP         0x1b
-#define PMAP__IOMMU_UNMAP       0x1c
-#define PMAP__IOMMU_IOCTL       0x1d
-#define PMAP__IOMMU_GRANT_PAGE  0x1e
 
 /* Codes for clock (DBG_MACH_CLOCK) */
 #define MACH_EPOCH_CHANGE       0x0     /* wake epoch change */
@@ -429,10 +419,6 @@ __BEGIN_DECLS
 #define RMON_LOGWRITES_VIOLATED_K32A    0x024
 #define RMON_LOGWRITES_VIOLATED_K32B    0x025
 #define RMON_DISABLE_IO_MONITOR         0x02f
-
-/* Codes for Hypervisor (DBG_MACH_HV) */
-#define HV_GUEST_ENTER                  0x000
-#define HV_GUEST_ERROR                  0x001
 
 /* **** The Kernel Debug Sub Classes for Network (DBG_NETWORK) **** */
 #define DBG_NETIP       1       /* Internet Protocol */
@@ -583,11 +569,6 @@ __BEGIN_DECLS
 #define DBG_HFS_UPDATE_DATEADDED 0x20
 #define DBG_HFS_UPDATE_MINOR     0x40
 #define DBG_HFS_UPDATE_SKIPPED   0x80
-
-/*
- * Codes for Kernel Debug Sub Class DBG_VFS
- */
-#define DBG_VFS_IO_COMPRESSION_STATS 0x1000
 
 /* The Kernel Debug Sub Classes for BSD */
 #define DBG_BSD_PROC              0x01 /* process/signals related */

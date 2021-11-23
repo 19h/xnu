@@ -33,7 +33,6 @@
 #include <libkern/OSAtomic.h>
 #include <vm/vm_pageout.h>
 #include <mach/sdt.h>
-#include <sys/kdebug.h>
 
 #if defined(__x86_64__) && CONFIG_VMX
 #include <i386/vmx/vmx_cpu.h>
@@ -53,8 +52,6 @@ hv_callbacks_t hv_callbacks = {
 	.thread_destroy = NULL, /* thread is being destroyed */
 	.task_destroy = NULL,   /* task is being destroyed */
 	.volatile_state = NULL, /* thread state is becoming volatile */
-	.resume = NULL,         /* system is being resumed */
-	.memory_pressure = NULL,/* (unused) */
 };
 
 /* trap tables for hv_*_trap syscalls */
@@ -195,8 +192,7 @@ hv_release_callbacks(void)
 		.suspend = NULL,
 		.thread_destroy = NULL,
 		.task_destroy = NULL,
-		.volatile_state = NULL,
-		.resume = NULL,
+		.volatile_state = NULL
 	};
 
 	hv_callbacks_enabled = 0;
@@ -209,15 +205,6 @@ hv_suspend(void)
 {
 	if (hv_callbacks_enabled) {
 		hv_callbacks.suspend();
-	}
-}
-
-/* system resume notification */
-void
-hv_resume(void)
-{
-	if (hv_callbacks_enabled && hv_callbacks.resume) {
-		hv_callbacks.resume();
 	}
 }
 
@@ -257,30 +244,10 @@ void
 hv_trace_guest_enter(uint32_t vcpu_id, uint64_t *vcpu_regs)
 {
 	DTRACE_HV2(guest__enter, uint32_t, vcpu_id, uint64_t *, vcpu_regs);
-
-	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_GUEST_ENTER) | DBG_FUNC_START, vcpu_id);
 }
 
 void
-hv_trace_guest_exit(uint32_t vcpu_id, uint64_t *vcpu_regs, uint32_t reason)
+hv_trace_guest_exit(uint32_t vcpu_id, uint64_t *vcpu_regs)
 {
-	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_GUEST_ENTER) | DBG_FUNC_END, vcpu_id,
-	    reason);
-
 	DTRACE_HV2(guest__exit, uint32_t, vcpu_id, uint64_t *, vcpu_regs);
-}
-
-void
-hv_trace_guest_error(uint32_t vcpu_id, uint64_t *vcpu_regs, uint32_t failure,
-    uint32_t error)
-{
-	/*
-	 * An error indicates that the guest enter failed so there will be no
-	 * guest exit. Close the guest enter interval.
-	 */
-	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_GUEST_ENTER) | DBG_FUNC_END, vcpu_id,
-	    -1, failure, error);
-	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_GUEST_ERROR), vcpu_id, failure, error);
-
-	DTRACE_HV3(guest__error, uint32_t, vcpu_id, uint64_t *, vcpu_regs, uint32_t, failure);
 }

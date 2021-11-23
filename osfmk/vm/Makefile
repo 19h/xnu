@@ -11,9 +11,6 @@ DATAFILES =
 EXPORT_ONLY_FILES = \
 	memory_types.h \
 	pmap.h \
-	lz4.h \
-	lz4_constants.h \
-	lz4_assembly_select.h \
 	vm_fault.h \
 	vm_kern.h \
 	vm_map.h \

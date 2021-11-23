@@ -468,14 +468,14 @@ load_machfile(
 		ledger_task = task;
 	}
 
-#if XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGES
+#if defined(PMAP_CREATE_FORCE_4K_PAGES) && (DEBUG || DEVELOPMENT)
 	if (imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr* psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
 		if (psa->psa_flags & _POSIX_SPAWN_FORCE_4K_PAGES) {
 			pmap_flags |= PMAP_CREATE_FORCE_4K_PAGES;
 		}
 	}
-#endif /* XNU_TARGET_OS_OSX && _POSIX_SPAWN_FORCE_4K_PAGES && PMAP_CREATE_FORCE_4K_PAGE */
+#endif /* defined(PMAP_CREATE_FORCE_4K_PAGES) && (DEBUG || DEVELOPMENT) */
 
 	pmap = pmap_create_options(get_task_ledger(ledger_task),
 	    (vm_map_size_t) 0,
@@ -686,7 +686,6 @@ load_machfile(
 		pmap_disable_user_jop(pmap);
 	}
 #endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
-
 
 #ifdef CONFIG_32BIT_TELEMETRY
 	if (!result->is_64bit_data) {
@@ -1374,15 +1373,6 @@ parse_machfile(
 				}
 				vmc = (struct version_min_command *) lcp;
 				ret = load_version(vmc, &found_version_cmd, imgp->ip_flags, result);
-#if XNU_TARGET_OS_OSX
-				if (ret == LOAD_SUCCESS) {
-					if (result->ip_platform == PLATFORM_IOS) {
-						vm_map_mark_alien(map);
-					} else {
-						assert(!vm_map_is_alien(map));
-					}
-				}
-#endif /* XNU_TARGET_OS_OSX */
 				break;
 			}
 			case LC_BUILD_VERSION: {
@@ -1400,15 +1390,7 @@ parse_machfile(
 				}
 				result->ip_platform = bvc->platform;
 				result->lr_sdk = bvc->sdk;
-				result->lr_min_sdk = bvc->minos;
 				found_version_cmd = TRUE;
-#if XNU_TARGET_OS_OSX
-				if (result->ip_platform == PLATFORM_IOS) {
-					vm_map_mark_alien(map);
-				} else {
-					assert(!vm_map_is_alien(map));
-				}
-#endif /* XNU_TARGET_OS_OSX */
 				break;
 			}
 			default:
@@ -2520,7 +2502,6 @@ load_version(
 {
 	uint32_t platform = 0;
 	uint32_t sdk;
-	uint32_t min_sdk;
 
 	if (vmc->cmdsize < sizeof(*vmc)) {
 		return LOAD_BADMACHO;
@@ -2530,7 +2511,6 @@ load_version(
 	}
 	*found_version_cmd = TRUE;
 	sdk = vmc->sdk;
-	min_sdk = vmc->version;
 	switch (vmc->cmd) {
 	case LC_VERSION_MIN_MACOSX:
 		platform = PLATFORM_MACOS;
@@ -2567,12 +2547,10 @@ load_version(
 	/* All LC_VERSION_MIN_* load commands are legacy and we will not be adding any more */
 	default:
 		sdk = (uint32_t)-1;
-		min_sdk = (uint32_t)-1;
 		__builtin_unreachable();
 	}
 	result->ip_platform = platform;
-	result->lr_min_sdk = min_sdk;
-	result->lr_sdk = sdk;
+	result->lr_min_sdk = sdk;
 	return LOAD_SUCCESS;
 }
 
@@ -3027,7 +3005,7 @@ load_dylinker(
 
 	/* Allocate wad-of-data from heap to reduce excessively deep stacks */
 
-	dyld_data = kheap_alloc(KHEAP_TEMP, sizeof(*dyld_data), Z_WAITOK);
+	MALLOC(dyld_data, void *, sizeof(*dyld_data), M_TEMP, M_WAITOK);
 	header = &dyld_data->__header;
 	myresult = &dyld_data->__myresult;
 	macho_data = &dyld_data->__macho_data;
@@ -3083,7 +3061,7 @@ load_dylinker(
 	vnode_put(vp);
 	kheap_free(KHEAP_TEMP, va, sizeof(*va));
 novp_out:
-	kheap_free(KHEAP_TEMP, dyld_data, sizeof(*dyld_data));
+	FREE(dyld_data, M_TEMP);
 	return ret;
 }
 

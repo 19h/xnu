@@ -49,6 +49,7 @@ struct sockopt;
 struct inpcb;
 
 /* Private, internal implementation functions */
+extern void     sflt_init(void);
 extern int      sflt_permission_check(struct inpcb *inp);
 extern void     sflt_initsock(struct socket *so);
 extern void     sflt_termsock(struct socket *so);

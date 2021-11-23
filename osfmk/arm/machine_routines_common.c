@@ -526,7 +526,6 @@ machine_thread_group_init(struct thread_group *tg)
 	data.thread_group_id = thread_group_get_id(tg);
 	data.thread_group_data = thread_group_get_machine_data(tg);
 	data.thread_group_size = thread_group_machine_data_size();
-	data.thread_group_flags = thread_group_get_flags(tg);
 	sched_perfcontrol_thread_group_init(&data);
 }
 
@@ -540,7 +539,6 @@ machine_thread_group_deinit(struct thread_group *tg)
 	data.thread_group_id = thread_group_get_id(tg);
 	data.thread_group_data = thread_group_get_machine_data(tg);
 	data.thread_group_size = thread_group_machine_data_size();
-	data.thread_group_flags = thread_group_get_flags(tg);
 	sched_perfcontrol_thread_group_deinit(&data);
 }
 

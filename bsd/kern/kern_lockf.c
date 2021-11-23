@@ -117,45 +117,23 @@ SYSCTL_INT(_debug, OID_AUTO, lockf_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &lockf_de
 #define LOCKF_DEBUG(mask, ...)          /* mask */
 #endif  /* !LOCKF_DEBUGGING */
 
-/*
- * If you need accounting for KM_LOCKF consider using
- * ZONE_VIEW_DEFINE to define a view.
- */
-#define KM_LOCKF       KHEAP_DEFAULT
+MALLOC_DEFINE(M_LOCKF, "lockf", "Byte-range locking structures");
 
 #define NOLOCKF (struct lockf *)0
 #define SELF    0x1
 #define OTHERS  0x2
 #define OFF_MAX 0x7fffffffffffffffULL   /* max off_t */
 
-/* return the effective end of a 'struct lockf': lf_end == -1 is OFF_MAX */
-#define LF_END(l)       ((l)->lf_end == -1 ? OFF_MAX : (l)->lf_end)
-
 /*
  * Overlapping lock states
- *
- * For lk_find_overlap(..., SELF, ...), the possible sequences are a single:
- *   - OVERLAP_NONE,
- *   - OVERLAP_EQUALS_LOCK, or
- *   - OVERLAP_CONTAINS_LOCK
- *
- * or the following sequence:
- *   - optional OVERLAP_STARTS_BEFORE_LOCK
- *   - zero or more OVERLAP_CONTAINED_BY_LOCK
- *   - optional OVERLAP_ENDS_AFTER_LOCK
- *   - OVERLAP_NONE
- *
- * In the annotations:
- *   - the search lock is [SS, SE] and
- *   - the returned overlap lock is [OS,OE].
  */
 typedef enum {
 	OVERLAP_NONE = 0,
-	OVERLAP_EQUALS_LOCK,        /* OS == SS && OE == SE */
-	OVERLAP_CONTAINS_LOCK,      /* OS <= SS && OE >= SE */
-	OVERLAP_CONTAINED_BY_LOCK,  /* OS >= SS && OE <= SE */
-	OVERLAP_STARTS_BEFORE_LOCK, /* OS < SS && OE >= SS */
-	OVERLAP_ENDS_AFTER_LOCK     /* OS > SS && OE > SE */
+	OVERLAP_EQUALS_LOCK,
+	OVERLAP_CONTAINS_LOCK,
+	OVERLAP_CONTAINED_BY_LOCK,
+	OVERLAP_STARTS_BEFORE_LOCK,
+	OVERLAP_ENDS_AFTER_LOCK
 } overlap_t;
 
 static int       lf_clearlock(struct lockf *);
@@ -174,8 +152,15 @@ static void      lf_boost_blocking_proc(struct lockf *, struct lockf *);
 static void      lf_adjust_assertion(struct lockf *block);
 #endif /* IMPORTANCE_INHERITANCE */
 
-static LCK_GRP_DECLARE(lf_dead_lock_grp, "lf_dead_lock");
-static LCK_MTX_DECLARE(lf_dead_lock, &lf_dead_lock_grp);
+static lck_mtx_t lf_dead_lock;
+static lck_grp_t *lf_dead_lock_grp;
+
+void
+lf_init(void)
+{
+	lf_dead_lock_grp = lck_grp_alloc_init("lf_dead_lock", LCK_GRP_ATTR_NULL);
+	lck_mtx_init(&lf_dead_lock, lf_dead_lock_grp, LCK_ATTR_NULL);
+}
 
 /*
  * lf_advlock
@@ -300,7 +285,7 @@ lf_advlock(struct vnop_advlock_args *ap)
 	/*
 	 * Create the lockf structure
 	 */
-	lock = kheap_alloc(KM_LOCKF, sizeof(struct lockf), Z_WAITOK);
+	MALLOC(lock, struct lockf *, sizeof *lock, M_LOCKF, M_WAITOK);
 	if (lock == NULL) {
 		return ENOLCK;
 	}
@@ -351,21 +336,21 @@ lf_advlock(struct vnop_advlock_args *ap)
 
 	case F_UNLCK:
 		error = lf_clearlock(lock);
-		kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+		FREE(lock, M_LOCKF);
 		break;
 
 	case F_GETLK:
 		error = lf_getlock(lock, fl, -1);
-		kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+		FREE(lock, M_LOCKF);
 		break;
 
 	case F_GETLKPID:
 		error = lf_getlock(lock, fl, fl->l_pid);
-		kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+		FREE(lock, M_LOCKF);
 		break;
 
 	default:
-		kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+		FREE(lock, M_LOCKF);
 		error = EINVAL;
 		break;
 	}
@@ -455,8 +440,8 @@ lf_coalesce_adjacent(struct lockf *lock)
 		 * NOTE: Assumes that if two locks are adjacent on the number line
 		 * and belong to the same owner, then they are adjacent on the list.
 		 */
-		if (LF_END(*lf) < OFF_MAX &&
-		    (LF_END(*lf) + 1) == lock->lf_start) {
+		if ((*lf)->lf_end != -1 &&
+		    ((*lf)->lf_end + 1) == lock->lf_start) {
 			struct lockf *adjacent = *lf;
 
 			LOCKF_DEBUG(LF_DBG_LIST, "lf_coalesce_adjacent: coalesce adjacent previous\n");
@@ -466,12 +451,12 @@ lf_coalesce_adjacent(struct lockf *lock)
 
 			lf_move_blocked(lock, adjacent);
 
-			kheap_free(KM_LOCKF, adjacent, sizeof(struct lockf));
+			FREE(adjacent, M_LOCKF);
 			continue;
 		}
 		/* If the lock starts adjacent to us, we can coalesce it */
-		if (LF_END(lock) < OFF_MAX &&
-		    (LF_END(lock) + 1) == (*lf)->lf_start) {
+		if (lock->lf_end != -1 &&
+		    (lock->lf_end + 1) == (*lf)->lf_start) {
 			struct lockf *adjacent = *lf;
 
 			LOCKF_DEBUG(LF_DBG_LIST, "lf_coalesce_adjacent: coalesce adjacent following\n");
@@ -481,7 +466,7 @@ lf_coalesce_adjacent(struct lockf *lock)
 
 			lf_move_blocked(lock, adjacent);
 
-			kheap_free(KM_LOCKF, adjacent, sizeof(struct lockf));
+			FREE(adjacent, M_LOCKF);
 			continue;
 		}
 
@@ -521,7 +506,7 @@ lf_setlock(struct lockf *lock, struct timespec *timeout)
 {
 	struct lockf *block;
 	struct lockf **head = lock->lf_head;
-	struct lockf **prev, *overlap;
+	struct lockf **prev, *overlap, *ltmp;
 	static const char lockstr[] = "lockf";
 	int priority, needtolink, error;
 	struct vnode *vp = lock->lf_vnode;
@@ -553,7 +538,7 @@ scan:
 		 */
 		if ((lock->lf_flags & F_WAIT) == 0) {
 			DTRACE_FSINFO(advlock__nowait, vnode_t, vp);
-			kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+			FREE(lock, M_LOCKF);
 			return EAGAIN;
 		}
 
@@ -691,7 +676,7 @@ scan:
 						LOCKF_DEBUG(LF_DBG_DEADLOCK, "lock %p which is me, so EDEADLK\n", lock);
 						proc_unlock(wproc);
 						lck_mtx_unlock(&lf_dead_lock);
-						kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+						FREE(lock, M_LOCKF);
 						return EDEADLK;
 					}
 				}
@@ -710,7 +695,7 @@ scan:
 		    lock->lf_type == F_WRLCK) {
 			lock->lf_type = F_UNLCK;
 			if ((error = lf_clearlock(lock)) != 0) {
-				kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+				FREE(lock, M_LOCKF);
 				return error;
 			}
 			lock->lf_type = F_WRLCK;
@@ -814,7 +799,7 @@ scan:
 			if (!TAILQ_EMPTY(&lock->lf_blkhd)) {
 				lf_wakelock(lock, TRUE);
 			}
-			kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+			FREE(lock, M_LOCKF);
 			/* Return ETIMEDOUT if timeout occoured. */
 			if (error == EWOULDBLOCK) {
 				error = ETIMEDOUT;
@@ -835,7 +820,6 @@ scan:
 	block = *head;
 	needtolink = 1;
 	for (;;) {
-		const off_t lkend = LF_END(lock);
 		ovcase = lf_findoverlap(block, lock, SELF, &prev, &overlap);
 		if (ovcase) {
 			block = overlap->lf_next;
@@ -867,8 +851,7 @@ scan:
 				lf_wakelock(overlap, TRUE);
 			}
 			overlap->lf_type = lock->lf_type;
-			lf_move_blocked(overlap, lock);
-			kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+			FREE(lock, M_LOCKF);
 			lock = overlap; /* for lf_coalesce_adjacent() */
 			break;
 
@@ -877,16 +860,14 @@ scan:
 			 * Check for common starting point and different types.
 			 */
 			if (overlap->lf_type == lock->lf_type) {
-				lf_move_blocked(overlap, lock);
-				kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+				FREE(lock, M_LOCKF);
 				lock = overlap; /* for lf_coalesce_adjacent() */
 				break;
 			}
 			if (overlap->lf_start == lock->lf_start) {
 				*prev = lock;
 				lock->lf_next = overlap;
-				assert(lkend < OFF_MAX);
-				overlap->lf_start = lkend + 1;
+				overlap->lf_start = lock->lf_end + 1;
 			} else {
 				/*
 				 * If we can't split the lock, we can't
@@ -894,7 +875,7 @@ scan:
 				 * resource shortage.
 				 */
 				if (lf_split(overlap, lock)) {
-					kheap_free(KM_LOCKF, lock, sizeof(struct lockf));
+					FREE(lock, M_LOCKF);
 					return ENOLCK;
 				}
 			}
@@ -910,7 +891,14 @@ scan:
 			    overlap->lf_type == F_WRLCK) {
 				lf_wakelock(overlap, TRUE);
 			} else {
-				lf_move_blocked(lock, overlap);
+				while (!TAILQ_EMPTY(&overlap->lf_blkhd)) {
+					ltmp = TAILQ_FIRST(&overlap->lf_blkhd);
+					TAILQ_REMOVE(&overlap->lf_blkhd, ltmp,
+					    lf_block);
+					TAILQ_INSERT_TAIL(&lock->lf_blkhd,
+					    ltmp, lf_block);
+					ltmp->lf_next = lock;
+				}
 			}
 			/*
 			 * Add the new lock if necessary and delete the overlap.
@@ -923,7 +911,7 @@ scan:
 			} else {
 				*prev = overlap->lf_next;
 			}
-			kheap_free(KM_LOCKF, overlap, sizeof(struct lockf));
+			FREE(overlap, M_LOCKF);
 			continue;
 
 		case OVERLAP_STARTS_BEFORE_LOCK:
@@ -932,7 +920,6 @@ scan:
 			 */
 			lock->lf_next = overlap->lf_next;
 			overlap->lf_next = lock;
-			assert(lock->lf_start > 0);
 			overlap->lf_end = lock->lf_start - 1;
 			prev = &lock->lf_next;
 			lf_wakelock(overlap, TRUE);
@@ -947,8 +934,7 @@ scan:
 				*prev = lock;
 				lock->lf_next = overlap;
 			}
-			assert(lkend < OFF_MAX);
-			overlap->lf_start = lkend + 1;
+			overlap->lf_start = lock->lf_end + 1;
 			lf_wakelock(overlap, TRUE);
 			break;
 		}
@@ -1003,7 +989,6 @@ lf_clearlock(struct lockf *unlock)
 #endif /* LOCKF_DEBUGGING */
 	prev = head;
 	while ((ovcase = lf_findoverlap(lf, unlock, SELF, &prev, &overlap)) != OVERLAP_NONE) {
-		const off_t unlkend = LF_END(unlock);
 		/*
 		 * Wakeup the list of locks to be retried.
 		 */
@@ -1020,13 +1005,12 @@ lf_clearlock(struct lockf *unlock)
 
 		case OVERLAP_EQUALS_LOCK:
 			*prev = overlap->lf_next;
-			kheap_free(KM_LOCKF, overlap, sizeof(struct lockf));
+			FREE(overlap, M_LOCKF);
 			break;
 
 		case OVERLAP_CONTAINS_LOCK: /* split it */
 			if (overlap->lf_start == unlock->lf_start) {
-				assert(unlkend < OFF_MAX);
-				overlap->lf_start = unlkend + 1;
+				overlap->lf_start = unlock->lf_end + 1;
 				break;
 			}
 			/*
@@ -1042,19 +1026,17 @@ lf_clearlock(struct lockf *unlock)
 		case OVERLAP_CONTAINED_BY_LOCK:
 			*prev = overlap->lf_next;
 			lf = overlap->lf_next;
-			kheap_free(KM_LOCKF, overlap, sizeof(struct lockf));
+			FREE(overlap, M_LOCKF);
 			continue;
 
 		case OVERLAP_STARTS_BEFORE_LOCK:
-			assert(unlock->lf_start > 0);
 			overlap->lf_end = unlock->lf_start - 1;
 			prev = &overlap->lf_next;
 			lf = overlap->lf_next;
 			continue;
 
 		case OVERLAP_ENDS_AFTER_LOCK:
-			assert(unlkend < OFF_MAX);
-			overlap->lf_start = unlkend + 1;
+			overlap->lf_start = unlock->lf_end + 1;
 			break;
 		}
 		break;
@@ -1105,11 +1087,10 @@ lf_getlock(struct lockf *lock, struct flock *fl, pid_t matchpid)
 		fl->l_type = block->lf_type;
 		fl->l_whence = SEEK_SET;
 		fl->l_start = block->lf_start;
-		if (block->lf_end == -1 ||
-		    (block->lf_start == 0 && LF_END(block) == OFF_MAX)) {
+		if (block->lf_end == -1) {
 			fl->l_len = 0;
 		} else {
-			fl->l_len = LF_END(block) - block->lf_start + 1;
+			fl->l_len = block->lf_end - block->lf_start + 1;
 		}
 		if (NULL != block->lf_owner) {
 			/*
@@ -1222,6 +1203,7 @@ static overlap_t
 lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
     struct lockf ***prev, struct lockf **overlap)
 {
+	off_t start, end;
 	int found_self = 0;
 
 	*overlap = lf;
@@ -1233,8 +1215,8 @@ lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
 		lf_print("lf_findoverlap: looking for overlap in", lock);
 	}
 #endif /* LOCKF_DEBUGGING */
-	const off_t start = lock->lf_start;
-	const off_t end = LF_END(lock);
+	start = lock->lf_start;
+	end = lock->lf_end;
 	while (lf != NOLOCKF) {
 		if (((type & SELF) && lf->lf_id != lock->lf_id) ||
 		    ((type & OTHERS) && lf->lf_id == lock->lf_id)) {
@@ -1268,10 +1250,8 @@ lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
 		/*
 		 * OK, check for overlap
 		 */
-		const off_t lfstart = lf->lf_start;
-		const off_t lfend = LF_END(lf);
-
-		if ((start > lfend) || (lfstart > end)) {
+		if ((lf->lf_end != -1 && start > lf->lf_end) ||
+		    (end != -1 && lf->lf_start > end)) {
 			/* Case 0 */
 			LOCKF_DEBUG(LF_DBG_LIST, "no overlap\n");
 
@@ -1279,30 +1259,37 @@ lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
 			 * NOTE: assumes that locks for the same process are
 			 * nonintersecting and ordered.
 			 */
-			if ((type & SELF) && lfstart > end) {
+			if ((type & SELF) && end != -1 && lf->lf_start > end) {
 				return OVERLAP_NONE;
 			}
 			*prev = &lf->lf_next;
 			*overlap = lf = lf->lf_next;
 			continue;
 		}
-		if ((lfstart == start) && (lfend == end)) {
+		if ((lf->lf_start == start) && (lf->lf_end == end)) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap == lock\n");
 			return OVERLAP_EQUALS_LOCK;
 		}
-		if ((lfstart <= start) && (lfend >= end)) {
+		if ((lf->lf_start <= start) &&
+		    (end != -1) &&
+		    ((lf->lf_end >= end) || (lf->lf_end == -1))) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap contains lock\n");
 			return OVERLAP_CONTAINS_LOCK;
 		}
-		if ((start <= lfstart) && (end >= lfend)) {
+		if (start <= lf->lf_start &&
+		    (end == -1 ||
+		    (lf->lf_end != -1 && end >= lf->lf_end))) {
 			LOCKF_DEBUG(LF_DBG_LIST, "lock contains overlap\n");
 			return OVERLAP_CONTAINED_BY_LOCK;
 		}
-		if ((lfstart < start) && (lfend >= start)) {
+		if ((lf->lf_start < start) &&
+		    ((lf->lf_end >= start) || (lf->lf_end == -1))) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap starts before lock\n");
 			return OVERLAP_STARTS_BEFORE_LOCK;
 		}
-		if ((lfstart > start) && (lfend > end)) {
+		if ((lf->lf_start > start) &&
+		    (end != -1) &&
+		    ((lf->lf_end > end) || (lf->lf_end == -1))) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap ends after lock\n");
 			return OVERLAP_ENDS_AFTER_LOCK;
 		}
@@ -1350,13 +1337,11 @@ lf_split(struct lockf *lock1, struct lockf *lock2)
 	 * Check to see if splitting into only two pieces.
 	 */
 	if (lock1->lf_start == lock2->lf_start) {
-		assert(LF_END(lock2) < OFF_MAX);
-		lock1->lf_start = LF_END(lock2) + 1;
+		lock1->lf_start = lock2->lf_end + 1;
 		lock2->lf_next = lock1;
 		return 0;
 	}
-	if (LF_END(lock1) == LF_END(lock2)) {
-		assert(lock2->lf_start > 0);
+	if (lock1->lf_end == lock2->lf_end) {
 		lock1->lf_end = lock2->lf_start - 1;
 		lock2->lf_next = lock1->lf_next;
 		lock1->lf_next = lock2;
@@ -1366,15 +1351,13 @@ lf_split(struct lockf *lock1, struct lockf *lock2)
 	 * Make a new lock consisting of the last part of
 	 * the encompassing lock
 	 */
-	splitlock = kheap_alloc(KM_LOCKF, sizeof(struct lockf), Z_WAITOK);
+	MALLOC(splitlock, struct lockf *, sizeof *splitlock, M_LOCKF, M_WAITOK);
 	if (splitlock == NULL) {
 		return ENOLCK;
 	}
 	bcopy(lock1, splitlock, sizeof *splitlock);
-	assert(LF_END(lock2) < OFF_MAX);
-	splitlock->lf_start = LF_END(lock2) + 1;
+	splitlock->lf_start = lock2->lf_end + 1;
 	TAILQ_INIT(&splitlock->lf_blkhd);
-	assert(lock2->lf_start > 0);
 	lock1->lf_end = lock2->lf_start - 1;
 	/*
 	 * OK, now link it in
@@ -1487,13 +1470,13 @@ lf_print(const char *tag, struct lockf *lock)
 		    lock->lf_type == F_RDLCK ? "shared" :
 		    lock->lf_type == F_WRLCK ? "exclusive" :
 		    lock->lf_type == F_UNLCK ? "unlock" : "unknown",
-		    (uint64_t)lock->lf_start, (uint64_t)lock->lf_end);
+		    (intmax_t)lock->lf_start, (intmax_t)lock->lf_end);
 	} else {
 		printf(" %s, start 0x%016llx, end 0x%016llx",
 		    lock->lf_type == F_RDLCK ? "shared" :
 		    lock->lf_type == F_WRLCK ? "exclusive" :
 		    lock->lf_type == F_UNLCK ? "unlock" : "unknown",
-		    (uint64_t)lock->lf_start, (uint64_t)lock->lf_end);
+		    (intmax_t)lock->lf_start, (intmax_t)lock->lf_end);
 	}
 	if (!TAILQ_EMPTY(&lock->lf_blkhd)) {
 		printf(" block %p\n", (void *)TAILQ_FIRST(&lock->lf_blkhd));
@@ -1541,7 +1524,7 @@ lf_printlist(const char *tag, struct lockf *lock)
 		    lf->lf_type == F_RDLCK ? "shared" :
 		    lf->lf_type == F_WRLCK ? "exclusive" :
 		    lf->lf_type == F_UNLCK ? "unlock" :
-		    "unknown", (uint64_t)lf->lf_start, (uint64_t)lf->lf_end);
+		    "unknown", (intmax_t)lf->lf_start, (intmax_t)lf->lf_end);
 		TAILQ_FOREACH(blk, &lf->lf_blkhd, lf_block) {
 			printf("\n\t\tlock request %p for ", (void *)blk);
 			if (blk->lf_flags & F_POSIX) {
@@ -1557,8 +1540,8 @@ lf_printlist(const char *tag, struct lockf *lock)
 			    blk->lf_type == F_RDLCK ? "shared" :
 			    blk->lf_type == F_WRLCK ? "exclusive" :
 			    blk->lf_type == F_UNLCK ? "unlock" :
-			    "unknown", (uint64_t)blk->lf_start,
-			    (uint64_t)blk->lf_end);
+			    "unknown", (intmax_t)blk->lf_start,
+			    (intmax_t)blk->lf_end);
 			if (!TAILQ_EMPTY(&blk->lf_blkhd)) {
 				panic("lf_printlist: bad list");
 			}

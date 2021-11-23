@@ -152,11 +152,6 @@
 
 /* for entitlement check */
 #include <IOKit/IOBSD.h>
-/*
- * If you need accounting for KM_SELECT consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_SELECT       KHEAP_DEFAULT
 
 /* XXX should be in a header file somewhere */
 extern kern_return_t IOBSDGetPlatformUUID(__darwin_uuid_t uuid, mach_timespec_t timeoutp);
@@ -507,7 +502,7 @@ write_nocancel(struct proc *p, struct write_nocancel_args *uap, user_ssize_t *re
 	}
 	if ((fp->f_flag & FWRITE) == 0) {
 		error = EBADF;
-	} else if (fp_isguarded(fp, GUARD_WRITE)) {
+	} else if (FP_ISGUARDED(fp, GUARD_WRITE)) {
 		proc_fdlock(p);
 		error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE);
 		proc_fdunlock(p);
@@ -557,7 +552,7 @@ pwrite_nocancel(struct proc *p, struct pwrite_nocancel_args *uap, user_ssize_t *
 
 	if ((fp->f_flag & FWRITE) == 0) {
 		error = EBADF;
-	} else if (fp_isguarded(fp, GUARD_WRITE)) {
+	} else if (FP_ISGUARDED(fp, GUARD_WRITE)) {
 		proc_fdlock(p);
 		error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE);
 		proc_fdunlock(p);
@@ -675,7 +670,7 @@ preparefilewrite(struct proc *p, struct fileproc **fp_ret, int fd, int check_for
 		error = EBADF;
 		goto ExitThisRoutine;
 	}
-	if (fp_isguarded(fp, GUARD_WRITE)) {
+	if (FP_ISGUARDED(fp, GUARD_WRITE)) {
 		error = fp_guard_exception(p, fd, fp, kGUARD_EXC_WRITE);
 		goto ExitThisRoutine;
 	}
@@ -1215,36 +1210,6 @@ pselect_nocancel(struct proc *p, struct pselect_nocancel_args *uap, int32_t *ret
 	return err;
 }
 
-void
-select_cleanup_uthread(struct _select *sel)
-{
-	kheap_free(KHEAP_DATA_BUFFERS, sel->ibits, 2 * sel->nbytes);
-	sel->ibits = sel->obits = NULL;
-	sel->nbytes = 0;
-}
-
-static int
-select_grow_uthread_cache(struct _select *sel, uint32_t nbytes)
-{
-	uint32_t *buf;
-
-	buf = kheap_alloc(KHEAP_DATA_BUFFERS, 2 * nbytes, Z_WAITOK | Z_ZERO);
-	if (buf) {
-		select_cleanup_uthread(sel);
-		sel->ibits = buf;
-		sel->obits = buf + nbytes / sizeof(uint32_t);
-		sel->nbytes = nbytes;
-		return true;
-	}
-	return false;
-}
-
-static void
-select_bzero_uthread_cache(struct _select *sel)
-{
-	bzero(sel->ibits, sel->nbytes * 2);
-}
-
 /*
  * Generic implementation of {,p}select. Care: we type-pun uap across the two
  * syscalls, which differ slightly. The first 4 arguments (nfds and the fd sets)
@@ -1261,6 +1226,7 @@ select_internal(struct proc *p, struct select_nocancel_args *uap, uint64_t timeo
 	struct uthread  *uth;
 	struct _select *sel;
 	struct _select_data *seldata;
+	int needzerofill = 1;
 	int count = 0;
 	size_t sz = 0;
 
@@ -1300,11 +1266,35 @@ select_internal(struct proc *p, struct select_nocancel_args *uap, uint64_t timeo
 	 * it is not a POSIX compliant error code for select().
 	 */
 	if (sel->nbytes < (3 * ni)) {
-		if (!select_grow_uthread_cache(sel, 3 * ni)) {
+		int nbytes = 3 * ni;
+
+		/* Free previous allocation, if any */
+		if (sel->ibits != NULL) {
+			FREE(sel->ibits, M_TEMP);
+		}
+		if (sel->obits != NULL) {
+			FREE(sel->obits, M_TEMP);
+			/* NULL out; subsequent ibits allocation may fail */
+			sel->obits = NULL;
+		}
+
+		MALLOC(sel->ibits, u_int32_t *, nbytes, M_TEMP, M_WAITOK | M_ZERO);
+		if (sel->ibits == NULL) {
 			return EAGAIN;
 		}
-	} else {
-		select_bzero_uthread_cache(sel);
+		MALLOC(sel->obits, u_int32_t *, nbytes, M_TEMP, M_WAITOK | M_ZERO);
+		if (sel->obits == NULL) {
+			FREE(sel->ibits, M_TEMP);
+			sel->ibits = NULL;
+			return EAGAIN;
+		}
+		sel->nbytes = nbytes;
+		needzerofill = 0;
+	}
+
+	if (needzerofill) {
+		bzero((caddr_t)sel->ibits, sel->nbytes);
+		bzero((caddr_t)sel->obits, sel->nbytes);
 	}
 
 	/*
@@ -1357,14 +1347,14 @@ select_internal(struct proc *p, struct select_nocancel_args *uap, uint64_t timeo
 			if (waitq_set_is_valid(uth->uu_wqset)) {
 				waitq_set_deinit(uth->uu_wqset);
 			}
-			kheap_free(KM_SELECT, uth->uu_wqset, uth->uu_wqstate_sz);
+			FREE(uth->uu_wqset, M_SELECT);
 		} else if (uth->uu_wqstate_sz && !uth->uu_wqset) {
 			panic("select: thread structure corrupt! "
 			    "uu_wqstate_sz:%ld, wqstate_buf == NULL",
 			    uth->uu_wqstate_sz);
 		}
 		uth->uu_wqstate_sz = sz;
-		uth->uu_wqset = kheap_alloc(KM_SELECT, sz, Z_WAITOK);
+		MALLOC(uth->uu_wqset, struct waitq_set *, sz, M_SELECT, M_WAITOK);
 		if (!uth->uu_wqset) {
 			panic("can't allocate %ld bytes for wqstate buffer",
 			    uth->uu_wqstate_sz);
@@ -1844,7 +1834,6 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 	u_int nfds = uap->nfds;
 	u_int rfds = 0;
 	rlim_t nofile = proc_limitgetcur(p, RLIMIT_NOFILE, TRUE);
-	size_t ni = nfds * sizeof(struct pollfd);
 
 	/*
 	 * This is kinda bogus.  We have fd limits, but that is not
@@ -1864,7 +1853,8 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 	}
 
 	if (nfds) {
-		fds = kheap_alloc(KHEAP_TEMP, ni, Z_WAITOK);
+		size_t ni = nfds * sizeof(struct pollfd);
+		MALLOC(fds, struct pollfd *, ni, M_TEMP, M_WAITOK);
 		if (NULL == fds) {
 			error = EAGAIN;
 			goto out;
@@ -1989,7 +1979,9 @@ done:
 	}
 
 out:
-	kheap_free(KHEAP_TEMP, fds, ni);
+	if (NULL != fds) {
+		FREE(fds, M_TEMP);
+	}
 
 	kqueue_dealloc(kq);
 	return error;
@@ -3239,20 +3231,14 @@ SYSCTL_PROC(_machdep_remotetime, OID_AUTO, conversion_params,
 #endif /* CONFIG_MACH_BRIDGE_RECV_TIME */
 
 #if DEVELOPMENT || DEBUG
-
+#if __AMP__
 #include <pexpert/pexpert.h>
 extern int32_t sysctl_get_bound_cpuid(void);
-extern kern_return_t sysctl_thread_bind_cpuid(int32_t cpuid);
+extern void sysctl_thread_bind_cpuid(int32_t cpuid);
 static int
 sysctl_kern_sched_thread_bind_cpu SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-
-	/*
-	 * DO NOT remove this bootarg guard or make this non-development.
-	 * This kind of binding should only be used for tests and
-	 * experiments in a custom configuration, never shipping code.
-	 */
 
 	if (!PE_parse_boot_argn("enable_skstb", NULL, 0)) {
 		return ENOENT;
@@ -3268,15 +3254,7 @@ sysctl_kern_sched_thread_bind_cpu SYSCTL_HANDLER_ARGS
 	}
 
 	if (changed) {
-		kern_return_t kr = sysctl_thread_bind_cpuid(new_value);
-
-		if (kr == KERN_NOT_SUPPORTED) {
-			return ENOTSUP;
-		}
-
-		if (kr == KERN_INVALID_VALUE) {
-			return ERANGE;
-		}
+		sysctl_thread_bind_cpuid(new_value);
 	}
 
 	return error;
@@ -3285,7 +3263,6 @@ sysctl_kern_sched_thread_bind_cpu SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern, OID_AUTO, sched_thread_bind_cpu, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_kern_sched_thread_bind_cpu, "I", "");
 
-#if __AMP__
 extern char sysctl_get_bound_cluster_type(void);
 extern void sysctl_thread_bind_cluster_type(char cluster_type);
 static int
@@ -3427,12 +3404,6 @@ SYSCTL_INT(_kern, OID_AUTO, sched_edge_migrate_ipi_immediate, CTLFLAG_RW | CTLFL
 #endif /* CONFIG_SCHED_EDGE */
 
 #endif /* __AMP__ */
-
-/* used for testing by exception_tests */
-extern uint32_t ipc_control_port_options;
-SYSCTL_INT(_kern, OID_AUTO, ipc_control_port_options,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &ipc_control_port_options, 0, "");
-
 #endif /* DEVELOPMENT || DEBUG */
 
 extern uint32_t task_exc_guard_default;

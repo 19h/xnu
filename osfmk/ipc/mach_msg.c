@@ -79,6 +79,7 @@
 
 #include <kern/kern_types.h>
 #include <kern/assert.h>
+#include <kern/counters.h>
 #include <kern/cpu_number.h>
 #include <kern/ipc_kobject.h>
 #include <kern/ipc_mig.h>
@@ -794,7 +795,7 @@ msg_receive_error(
 	}
 }
 
-static SECURITY_READ_ONLY_LATE(mach_msg_fetch_filter_policy_cbfunc_t) mach_msg_fetch_filter_policy_callback = NULL;
+static mach_msg_fetch_filter_policy_cbfunc_t mach_msg_fetch_filter_policy_callback = NULL;
 
 kern_return_t
 mach_msg_filter_register_callback(

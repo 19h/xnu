@@ -90,7 +90,6 @@
 #include <sys/fsctl.h>
 #include <sys/malloc.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
 #include <sys/syslog.h>
 #include <sys/unistd.h>
 #include <sys/resourcevar.h>
@@ -125,7 +124,7 @@
 #include <os/atomic_private.h>
 #include <IOKit/IOBSD.h>
 
-#define IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
+#define IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
 kern_return_t ipc_object_copyin(ipc_space_t, mach_port_name_t,
     mach_msg_type_name_t, ipc_port_t *, mach_port_context_t, mach_msg_guard_flags_t *, uint32_t);
 void ipc_port_release_send(ipc_port_t);
@@ -145,6 +144,8 @@ __private_extern__
 int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
 
 static void fdrelse(struct proc * p, int fd);
+
+extern void file_lock_init(void);
 
 extern kauth_scope_t    kauth_scope_fileop;
 
@@ -180,11 +181,6 @@ ZONE_DECLARE(fp_zone, "fileproc",
     sizeof(struct fileproc), ZC_NOENCRYPT | ZC_ZFREE_CLEARMEM);
 ZONE_DECLARE(fdp_zone, "filedesc",
     sizeof(struct filedesc), ZC_NOENCRYPT | ZC_ZFREE_CLEARMEM);
-/*
- * If you need accounting for KM_OFILETABL consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_OFILETABL KHEAP_DEFAULT
 
 /*
  * Descriptor management.
@@ -196,7 +192,9 @@ int nfiles;                     /* actual number of open files */
 static const struct fileops uninitops;
 
 os_refgrp_decl(, f_refgrp, "files refcounts", NULL);
-static LCK_GRP_DECLARE(file_lck_grp, "file");
+lck_grp_attr_t * file_lck_grp_attr;
+lck_grp_t * file_lck_grp;
+lck_attr_t * file_lck_attr;
 
 #pragma mark fileglobs
 
@@ -219,7 +217,7 @@ fg_free(struct fileglob *fg)
 	if (IS_VALID_CRED(fg->fg_cred)) {
 		kauth_cred_unref(&fg->fg_cred);
 	}
-	lck_mtx_destroy(&fg->fg_lock, &file_lck_grp);
+	lck_mtx_destroy(&fg->fg_lock, file_lck_grp);
 
 #if CONFIG_MACF
 	mac_file_label_destroy(fg);
@@ -229,20 +227,9 @@ fg_free(struct fileglob *fg)
 
 OS_ALWAYS_INLINE
 void
-fg_ref(proc_t p, struct fileglob *fg)
+fg_ref(struct fileglob *fg)
 {
-#if DEBUG || DEVELOPMENT
-	proc_fdlock_assert(p, LCK_MTX_ASSERT_OWNED);
-#else
-	(void)p;
-#endif
 	os_ref_retain_raw(&fg->fg_count, &f_refgrp);
-}
-
-void
-fg_drop_live(struct fileglob *fg)
-{
-	os_ref_release_live_raw(&fg->fg_count, &f_refgrp);
 }
 
 int
@@ -395,6 +382,30 @@ check_file_seek_range(struct flock *fl, off_t cur_file_offset)
 		}
 	}
 	return 0;
+}
+
+
+/*
+ * file_lock_init
+ *
+ * Description:	Initialize the file lock group and the uipc and flist locks
+ *
+ * Parameters:	(void)
+ *
+ * Returns:	void
+ *
+ * Notes:	Called at system startup from bsd_init().
+ */
+void
+file_lock_init(void)
+{
+	/* allocate file lock group attribute and group */
+	file_lck_grp_attr = lck_grp_attr_alloc_init();
+
+	file_lck_grp = lck_grp_alloc_init("file", file_lck_grp_attr);
+
+	/* Allocate file lock attribute */
+	file_lck_attr = lck_attr_alloc_init();
 }
 
 
@@ -738,7 +749,7 @@ sys_dup(proc_t p, struct dup_args *uap, int32_t *retval)
 		proc_fdunlock(p);
 		return error;
 	}
-	if (fp_isguarded(fp, GUARD_DUP)) {
+	if (FP_ISGUARDED(fp, GUARD_DUP)) {
 		error = fp_guard_exception(p, old, fp, kGUARD_EXC_DUP);
 		(void) fp_drop(p, old, fp, 1);
 		proc_fdunlock(p);
@@ -798,7 +809,7 @@ startover:
 		proc_fdunlock(p);
 		return error;
 	}
-	if (fp_isguarded(fp, GUARD_DUP)) {
+	if (FP_ISGUARDED(fp, GUARD_DUP)) {
 		error = fp_guard_exception(p, old, fp, kGUARD_EXC_DUP);
 		(void) fp_drop(p, old, fp, 1);
 		proc_fdunlock(p);
@@ -839,7 +850,7 @@ closeit:
 		}
 
 		if ((nfp = fdp->fd_ofiles[new]) != NULL) {
-			if (fp_isguarded(nfp, GUARD_CLOSE)) {
+			if (FP_ISGUARDED(nfp, GUARD_CLOSE)) {
 				fp_drop(p, old, fp, 1);
 				error = fp_guard_exception(p,
 				    new, nfp, kGUARD_EXC_CLOSE);
@@ -1013,7 +1024,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 	}
 
 #if CONFIG_MACF
-	error = mac_file_check_fcntl(kauth_cred_get(), fp->fp_glob, uap->cmd,
+	error = mac_file_check_fcntl(proc_ucred(p), fp->fp_glob, uap->cmd,
 	    uap->arg);
 	if (error) {
 		goto out;
@@ -1025,7 +1036,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 	switch (uap->cmd) {
 	case F_DUPFD:
 	case F_DUPFD_CLOEXEC:
-		if (fp_isguarded(fp, GUARD_DUP)) {
+		if (FP_ISGUARDED(fp, GUARD_DUP)) {
 			error = fp_guard_exception(p, fd, fp, kGUARD_EXC_DUP);
 			goto out;
 		}
@@ -1053,7 +1064,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		if (uap->arg & FD_CLOEXEC) {
 			*pop |= UF_EXCLOSE;
 		} else {
-			if (fp_isguarded(fp, 0)) {
+			if (FILEPROC_TYPE(fp) == FTYPE_GUARDED) {
 				error = fp_guard_exception(p,
 				    fd, fp, kGUARD_EXC_NOCLOEXEC);
 				goto out;
@@ -1259,7 +1270,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		}
 
 #if CONFIG_MACF
-		error = mac_file_check_lock(kauth_cred_get(), fp->fp_glob,
+		error = mac_file_check_lock(proc_ucred(p), fp->fp_glob,
 		    F_SETLK, &fl);
 		if (error) {
 			(void)vnode_put(vp);
@@ -1405,7 +1416,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			}
 
 #if CONFIG_MACF
-			error = mac_file_check_lock(kauth_cred_get(), fp->fp_glob,
+			error = mac_file_check_lock(proc_ucred(p), fp->fp_glob,
 			    uap->cmd, &fl);
 			if (error == 0)
 #endif
@@ -1912,8 +1923,11 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		proc_fdunlock(p);
 
 		pathlen = MAXPATHLEN;
-		pathbufp = zalloc(ZV_NAMEI);
-
+		MALLOC(pathbufp, char *, pathlen, M_TEMP, M_WAITOK);
+		if (pathbufp == NULL) {
+			error = ENOMEM;
+			goto outdrop;
+		}
 		if ((error = vnode_getwithref(vp)) == 0) {
 			if (uap->cmd == F_GETPATH_NOFIRMLINK) {
 				error = vn_getpath_ext(vp, NULL, pathbufp, &pathlen, VN_GETPATH_NO_FIRMLINK);
@@ -1926,7 +1940,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 				error = copyout((caddr_t)pathbufp, argp, pathlen);
 			}
 		}
-		zfree(ZV_NAMEI, pathbufp);
+		FREE(pathbufp, M_TEMP);
 		goto outdrop;
 	}
 
@@ -2587,12 +2601,9 @@ dropboth:
 			.len = CP_MAX_WRAPPEDKEYSIZE,
 		};
 
-		k.key = kheap_alloc(KHEAP_TEMP, CP_MAX_WRAPPEDKEYSIZE, Z_WAITOK | Z_ZERO);
-		if (k.key == NULL) {
-			error = ENOMEM;
-		} else {
-			error = VNOP_IOCTL(vp, F_TRANSCODEKEY, (caddr_t)&k, 1, &context);
-		}
+		MALLOC(k.key, char *, k.len, M_TEMP, M_WAITOK | M_ZERO);
+
+		error = VNOP_IOCTL(vp, F_TRANSCODEKEY, (caddr_t)&k, 1, &context);
 
 		vnode_put(vp);
 
@@ -2601,7 +2612,7 @@ dropboth:
 			*retval = k.len;
 		}
 
-		kheap_free(KHEAP_TEMP, k.key, CP_MAX_WRAPPEDKEYSIZE);
+		FREE(k.key, M_TEMP);
 
 		break;
 	}
@@ -2702,7 +2713,7 @@ dropboth:
 
 #if CONFIG_MACF
 		/* Re-do MAC checks against the new FD, pass in a fake argument */
-		error = mac_file_check_fcntl(kauth_cred_get(), fp2->fp_glob, uap->cmd, 0);
+		error = mac_file_check_fcntl(proc_ucred(p), fp2->fp_glob, uap->cmd, 0);
 		if (error) {
 			fp_drop(p, fd2, fp2, 1);
 			goto out;
@@ -2997,8 +3008,11 @@ dropboth:
 		proc_fdunlock(p);
 
 		pathlen = MAXPATHLEN;
-		pathbufp = zalloc(ZV_NAMEI);
-
+		MALLOC(pathbufp, char *, pathlen, M_TEMP, M_WAITOK);
+		if (pathbufp == NULL) {
+			error = ENOMEM;
+			goto outdrop;
+		}
 		if ((error = vnode_getwithref(vp)) == 0) {
 			int backingstore = 0;
 
@@ -3026,45 +3040,12 @@ dropboth:
 				(void)vnode_put(vp);
 			}
 		}
-
-		zfree(ZV_NAMEI, pathbufp);
+		FREE(pathbufp, M_TEMP);
 		goto outdrop;
 	}
 
-	case F_RECYCLE: {
-#if !DEBUG && !DEVELOPMENT
-		bool allowed = false;
-
-		//
-		// non-debug and non-development kernels have restrictions
-		// on who can all this fcntl.  the process has to be marked
-		// with the dataless-manipulator entitlement and either the
-		// process or thread have to be marked rapid-aging.
-		//
-		if (!vfs_context_is_dataless_manipulator(&context)) {
-			error = EPERM;
-			goto out;
-		}
-
-		proc_t proc = vfs_context_proc(&context);
-		if (proc && (proc->p_lflag & P_LRAGE_VNODES)) {
-			allowed = true;
-		} else {
-			thread_t thr = vfs_context_thread(&context);
-			if (thr) {
-				struct uthread *ut = get_bsdthread_info(thr);
-
-				if (ut && (ut->uu_flag & UT_RAGE_VNODES)) {
-					allowed = true;
-				}
-			}
-		}
-		if (!allowed) {
-			error = EPERM;
-			goto out;
-		}
-#endif
-
+#if DEBUG || DEVELOPMENT
+	case F_RECYCLE:
 		if (fp->f_type != DTYPE_VNODE) {
 			error = EBADF;
 			goto out;
@@ -3074,7 +3055,7 @@ dropboth:
 
 		vnode_recycle(vp);
 		break;
-	}
+#endif
 
 	default:
 		/*
@@ -3245,7 +3226,6 @@ finishdup(proc_t p,
 	struct fileproc *ofp;
 #if CONFIG_MACF
 	int error;
-	kauth_cred_t cred;
 #endif
 
 #if DIAGNOSTIC
@@ -3258,9 +3238,7 @@ finishdup(proc_t p,
 	}
 
 #if CONFIG_MACF
-	cred = kauth_cred_proc_ref(p);
-	error = mac_file_check_dup(cred, ofp->fp_glob, new);
-	kauth_cred_unref(&cred);
+	error = mac_file_check_dup(proc_ucred(p), ofp->fp_glob, new);
 	if (error) {
 		fdrelse(p, new);
 		return error;
@@ -3278,7 +3256,7 @@ finishdup(proc_t p,
 		return ENOMEM;
 	}
 
-	fg_ref(p, ofp->fp_glob);
+	fg_ref(ofp->fp_glob);
 	nfp->fp_glob = ofp->fp_glob;
 
 #if DIAGNOSTIC
@@ -3343,7 +3321,7 @@ close_nocancel(proc_t p, int fd)
 		return EBADF;
 	}
 
-	if (fp_isguarded(fp, GUARD_CLOSE)) {
+	if (FP_ISGUARDED(fp, GUARD_CLOSE)) {
 		int error = fp_guard_exception(p, fd, fp, kGUARD_EXC_CLOSE);
 		proc_fdunlock(p);
 		return error;
@@ -3358,9 +3336,6 @@ fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags)
 {
 	struct filedesc *fdp = p->p_fd;
 	struct fileglob *fg = fp->fp_glob;
-#if CONFIG_MACF
-	kauth_cred_t cred;
-#endif
 
 #if DIAGNOSTIC
 	proc_fdlock_assert(p, LCK_MTX_ASSERT_OWNED);
@@ -3409,9 +3384,7 @@ fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags)
 				kauth_authorize_fileop(fg->fg_cred, KAUTH_FILEOP_CLOSE,
 				    (uintptr_t)fg->fg_data, (uintptr_t)fileop_flags);
 #if CONFIG_MACF
-				cred = kauth_cred_proc_ref(p);
-				mac_file_notify_close(cred, fp->fp_glob);
-				kauth_cred_unref(&cred);
+				mac_file_notify_close(proc_ucred(p), fp->fp_glob);
 #endif
 				vnode_put((vnode_t)fg->fg_data);
 			}
@@ -3876,14 +3849,14 @@ fdalloc(proc_t p, int want, int *result)
 			numfiles = (int)lim;
 		}
 		proc_fdunlock(p);
-		newofiles = kheap_alloc(KM_OFILETABL, numfiles * OFILESIZE,
-		    Z_WAITOK);
+		MALLOC(newofiles, struct fileproc **,
+		    numfiles * OFILESIZE, M_OFILETABL, M_WAITOK);
 		proc_fdlock(p);
 		if (newofiles == NULL) {
 			return ENOMEM;
 		}
 		if (fdp->fd_nfiles >= numfiles) {
-			kheap_free(KM_OFILETABL, newofiles, numfiles * OFILESIZE);
+			FREE(newofiles, M_OFILETABL);
 			continue;
 		}
 		newofileflags = (char *) &newofiles[numfiles];
@@ -3906,7 +3879,7 @@ fdalloc(proc_t p, int want, int *result)
 		fdp->fd_ofiles = newofiles;
 		fdp->fd_ofileflags = newofileflags;
 		fdp->fd_nfiles = numfiles;
-		kheap_free(KM_OFILETABL, ofiles, oldnfiles * OFILESIZE);
+		FREE(ofiles, M_OFILETABL);
 		fdexpand++;
 	}
 }
@@ -4582,9 +4555,6 @@ falloc_withalloc(proc_t p, struct fileproc **resultfp, int *resultfd,
 	struct fileproc *fp;
 	struct fileglob *fg;
 	int error, nfd;
-#if CONFIG_MACF
-	kauth_cred_t cred;
-#endif
 
 	/* Make sure we don't go beyond the system-wide limit */
 	if (nfiles >= maxfiles) {
@@ -4601,9 +4571,7 @@ falloc_withalloc(proc_t p, struct fileproc **resultfp, int *resultfd,
 	}
 
 #if CONFIG_MACF
-	cred = kauth_cred_proc_ref(p);
-	error = mac_file_check_create(cred);
-	kauth_cred_unref(&cred);
+	error = mac_file_check_create(proc_ucred(p));
 	if (error) {
 		proc_fdunlock(p);
 		return error;
@@ -4623,7 +4591,7 @@ falloc_withalloc(proc_t p, struct fileproc **resultfp, int *resultfd,
 		return ENOMEM;
 	}
 	fg = zalloc_flags(fg_zone, Z_WAITOK | Z_ZERO);
-	lck_mtx_init(&fg->fg_lock, &file_lck_grp, LCK_ATTR_NULL);
+	lck_mtx_init(&fg->fg_lock, file_lck_grp, file_lck_attr);
 
 	os_ref_retain_locked(&fp->fp_iocount);
 	os_ref_init_raw(&fg->fg_count, &f_refgrp);
@@ -4901,8 +4869,8 @@ fdcopy(proc_t p, vnode_t uth_cdir)
 	}
 	proc_fdunlock(p);
 
-	newfdp->fd_ofiles = kheap_alloc(KM_OFILETABL, i * OFILESIZE,
-	    Z_WAITOK | Z_ZERO);
+	MALLOC(newfdp->fd_ofiles, struct fileproc **,
+	    i * OFILESIZE, M_OFILETABL, M_WAITOK);
 	if (newfdp->fd_ofiles == NULL) {
 		if (newfdp->fd_cdir) {
 			vnode_rele(newfdp->fd_cdir);
@@ -4914,6 +4882,7 @@ fdcopy(proc_t p, vnode_t uth_cdir)
 		zfree(fdp_zone, newfdp);
 		return NULL;
 	}
+	(void) memset(newfdp->fd_ofiles, 0, i * OFILESIZE);
 	proc_fdlock(p);
 
 	newfdp->fd_ofileflags = (char *) &newfdp->fd_ofiles[i];
@@ -4950,7 +4919,7 @@ fdcopy(proc_t p, vnode_t uth_cdir)
 					fp->fp_flags |=
 					    (ofp->fp_flags & ~FP_TYPEMASK);
 					fp->fp_glob = ofp->fp_glob;
-					fg_ref(p, fp->fp_glob);
+					fg_ref(fp->fp_glob);
 					*fpp = fp;
 				}
 			} else {
@@ -4980,8 +4949,8 @@ fdcopy(proc_t p, vnode_t uth_cdir)
 	newfdp->fd_kqhash = NULL;
 	newfdp->fd_kqhashmask = 0;
 	newfdp->fd_wqkqueue = NULL;
-	lck_mtx_init(&newfdp->fd_kqhashlock, &proc_kqhashlock_grp, &proc_lck_attr);
-	lck_mtx_init(&newfdp->fd_knhashlock, &proc_knhashlock_grp, &proc_lck_attr);
+	lck_mtx_init(&newfdp->fd_kqhashlock, proc_kqhashlock_grp, proc_lck_attr);
+	lck_mtx_init(&newfdp->fd_knhashlock, proc_knhashlock_grp, proc_lck_attr);
 
 	return newfdp;
 }
@@ -5047,7 +5016,7 @@ fdfree(proc_t p)
 				proc_fdlock(p);
 			}
 		}
-		kheap_free(KM_OFILETABL, fdp->fd_ofiles, fdp->fd_nfiles * OFILESIZE);
+		FREE(fdp->fd_ofiles, M_OFILETABL);
 		fdp->fd_ofiles = NULL;
 		fdp->fd_nfiles = 0;
 	}
@@ -5080,8 +5049,8 @@ fdfree(proc_t p)
 		hashdestroy(fdp->fd_kqhash, M_KQUEUE, fdp->fd_kqhashmask);
 	}
 
-	lck_mtx_destroy(&fdp->fd_kqhashlock, &proc_kqhashlock_grp);
-	lck_mtx_destroy(&fdp->fd_knhashlock, &proc_knhashlock_grp);
+	lck_mtx_destroy(&fdp->fd_kqhashlock, proc_kqhashlock_grp);
+	lck_mtx_destroy(&fdp->fd_knhashlock, proc_knhashlock_grp);
 
 	zfree(fdp_zone, fdp);
 }
@@ -5136,8 +5105,7 @@ fileproc_drain(proc_t p, struct fileproc * fp)
 
 		fo_drain(fp, &context);
 		if ((fp->fp_flags & FP_INSELECT) == FP_INSELECT) {
-			if (fp->fp_wset != NULL &&
-			    waitq_wakeup64_all((struct waitq *)fp->fp_wset, NO_EVENT64,
+			if (waitq_wakeup64_all((struct waitq *)fp->fp_wset, NO_EVENT64,
 			    THREAD_INTERRUPTED, WAITQ_ALL_PRIORITIES) == KERN_INVALID_ARGUMENT) {
 				panic("bad wait queue for waitq_wakeup64_all %p (fp:%p)", fp->fp_wset, fp);
 			}
@@ -5251,7 +5219,7 @@ sys_flock(proc_t p, struct flock_args *uap, __unused int32_t *retval)
 		goto out;
 	}
 #if CONFIG_MACF
-	error = mac_file_check_lock(kauth_cred_get(), fp->fp_glob, F_SETLK, &lf);
+	error = mac_file_check_lock(proc_ucred(p), fp->fp_glob, F_SETLK, &lf);
 	if (error) {
 		goto out;
 	}
@@ -5311,23 +5279,22 @@ sys_fileport_makeport(proc_t p, struct fileport_makeport_args *uap,
 		goto out_unlock;
 	}
 
-	if (fp_isguarded(fp, GUARD_FILEPORT)) {
+	if (FP_ISGUARDED(fp, GUARD_FILEPORT)) {
 		err = fp_guard_exception(p, fd, fp, kGUARD_EXC_FILEPORT);
 		goto out_unlock;
 	}
-
-	/* Dropped when port is deallocated */
-	fg_ref(p, fg);
 
 	proc_fdunlock(p);
 
 	/* Allocate and initialize a port */
 	fileport = fileport_alloc(fg);
 	if (fileport == IPC_PORT_NULL) {
-		fg_drop_live(fg);
 		err = EAGAIN;
 		goto out;
 	}
+
+	/* Dropped when port is deallocated */
+	fg_ref(fg);
 
 	/* Add an entry.  Deallocates port on failure. */
 	name = ipc_port_copyout_send(fileport, get_task_ipcspace(p->task));
@@ -5415,7 +5382,7 @@ fileport_makefd(proc_t p, ipc_port_t port, int uf_flags, int *retval)
 	}
 
 	fp->fp_glob = fg;
-	fg_ref(p, fg);
+	fg_ref(fg);
 
 	procfdtbl_releasefd(p, fd, fp);
 	proc_fdunlock(p);
@@ -5455,7 +5422,7 @@ sys_fileport_makefd(proc_t p, struct fileport_makefd_args *uap, int32_t *retval)
 	int err;
 
 	res = ipc_object_copyin(get_task_ipcspace(p->task),
-	    send, MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
+	    send, MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND);
 
 	if (res == KERN_SUCCESS) {
 		err = fileport_makefd(p, port, UF_EXCLOSE, retval);
@@ -5518,7 +5485,7 @@ dupfdopen(struct filedesc *fdp, int indx, int dfd, int flags, int error)
 		return EBADF;
 	}
 #if CONFIG_MACF
-	myerror = mac_file_check_dup(kauth_cred_get(), wfp->fp_glob, dfd);
+	myerror = mac_file_check_dup(proc_ucred(p), wfp->fp_glob, dfd);
 	if (myerror) {
 		proc_fdunlock(p);
 		return myerror;
@@ -5538,7 +5505,7 @@ dupfdopen(struct filedesc *fdp, int indx, int dfd, int flags, int error)
 	 */
 	switch (error) {
 	case ENODEV:
-		if (fp_isguarded(wfp, GUARD_DUP)) {
+		if (FP_ISGUARDED(wfp, GUARD_DUP)) {
 			proc_fdunlock(p);
 			return EPERM;
 		}
@@ -5558,7 +5525,7 @@ dupfdopen(struct filedesc *fdp, int indx, int dfd, int flags, int error)
 		if (fp->fp_glob) {
 			fg_free(fp->fp_glob);
 		}
-		fg_ref(p, wfp->fp_glob);
+		fg_ref(wfp->fp_glob);
 		fp->fp_glob = wfp->fp_glob;
 
 		fdp->fd_ofileflags[indx] = fdp->fd_ofileflags[dfd] |

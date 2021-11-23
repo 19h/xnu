@@ -314,8 +314,7 @@ extern int route_op_entitlement_check(struct socket *, kauth_cred_t, int, boolea
 #define RTF_PROXY       0x8000000       /* proxying, no interface scope */
 #define RTF_ROUTER      0x10000000      /* host is a router */
 #define RTF_DEAD        0x20000000      /* Route entry is being freed */
-#define RTF_GLOBAL      0x40000000      /* route to destination of the global internet */
-                                        /* 0x80000000 unassigned */
+                                        /* 0x40000000 and up unassigned */
 
 #define RTPRF_OURS      RTF_PROTO3      /* set on routes we manage */
 #define RTF_BITS \
@@ -323,7 +322,7 @@ extern int route_op_entitlement_check(struct socket *, kauth_cred_t, int, boolea
 	"\10DELCLONE\11CLONING\12XRESOLVE\13LLINFO\14STATIC\15BLACKHOLE" \
 	"\16NOIFREF\17PROTO2\20PROTO1\21PRCLONING\22WASCLONED\23PROTO3" \
 	"\25PINNED\26LOCAL\27BROADCAST\30MULTICAST\31IFSCOPE\32CONDEMNED" \
-	"\33IFREF\34PROXY\35ROUTER\37GLOBAL"
+	"\33IFREF\34PROXY\35ROUTER"
 
 #define IS_DIRECT_HOSTROUTE(rt) \
 	(((rt)->rt_flags & (RTF_HOST | RTF_GATEWAY)) == RTF_HOST)

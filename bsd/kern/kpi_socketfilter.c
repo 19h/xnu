@@ -60,12 +60,6 @@
 #define SFEF_NODETACH           0x2     /* Detach should not be called */
 #define SFEF_NOSOCKET           0x4     /* Socket is gone */
 
-/*
- * If you need accounting for KM_IFADDR consider using
- * KALLOC_HEAP_DEFINE to define a view.
- */
-#define KM_IFADDR       KHEAP_DEFAULT
-
 struct socket_filter_entry {
 	struct socket_filter_entry      *sfe_next_onsocket;
 	struct socket_filter_entry      *sfe_next_onfilter;
@@ -91,12 +85,9 @@ struct socket_filter {
 
 TAILQ_HEAD(socket_filter_list, socket_filter);
 
-static LCK_GRP_DECLARE(sock_filter_lock_grp, "socket filter lock");
-static LCK_RW_DECLARE(sock_filter_lock, &sock_filter_lock_grp);
-static LCK_MTX_DECLARE(sock_filter_cleanup_lock, &sock_filter_lock_grp);
-
-static struct socket_filter_list        sock_filter_head =
-    TAILQ_HEAD_INITIALIZER(sock_filter_head);
+static struct socket_filter_list        sock_filter_head;
+static lck_rw_t                         *sock_filter_lock = NULL;
+static lck_mtx_t                        *sock_filter_cleanup_lock = NULL;
 static struct socket_filter_entry       *sock_filter_cleanup_entries = NULL;
 static thread_t                         sock_filter_cleanup_thread = NULL;
 
@@ -152,6 +143,26 @@ sflt_permission_check(struct inpcb *inp)
 	return 0;
 }
 
+__private_extern__ void
+sflt_init(void)
+{
+	lck_grp_attr_t  *grp_attrib = NULL;
+	lck_attr_t      *lck_attrib = NULL;
+	lck_grp_t       *lck_group = NULL;
+
+	TAILQ_INIT(&sock_filter_head);
+
+	/* Allocate a rw lock */
+	grp_attrib = lck_grp_attr_alloc_init();
+	lck_group = lck_grp_alloc_init("socket filter lock", grp_attrib);
+	lck_grp_attr_free(grp_attrib);
+	lck_attrib = lck_attr_alloc_init();
+	sock_filter_lock = lck_rw_alloc_init(lck_group, lck_attrib);
+	sock_filter_cleanup_lock = lck_mtx_alloc_init(lck_group, lck_attrib);
+	lck_grp_free(lck_group);
+	lck_attr_free(lck_attrib);
+}
+
 static void
 sflt_retain_locked(struct socket_filter *filter)
 {
@@ -164,14 +175,14 @@ sflt_release_locked(struct socket_filter *filter)
 	if (os_ref_release_locked(&filter->sf_refcount) == 0) {
 		/* Call the unregistered function */
 		if (filter->sf_filter.sf_unregistered) {
-			lck_rw_unlock_exclusive(&sock_filter_lock);
+			lck_rw_unlock_exclusive(sock_filter_lock);
 			filter->sf_filter.sf_unregistered(
 				filter->sf_filter.sf_handle);
-			lck_rw_lock_exclusive(&sock_filter_lock);
+			lck_rw_lock_exclusive(sock_filter_lock);
 		}
 
 		/* Free the entry */
-		kheap_free(KM_IFADDR, filter, sizeof(struct socket_filter));
+		FREE(filter, M_IFADDR);
 	}
 }
 
@@ -192,7 +203,7 @@ sflt_entry_release(struct socket_filter_entry *entry)
 		/* That was the last reference */
 
 		/* Take the cleanup lock */
-		lck_mtx_lock(&sock_filter_cleanup_lock);
+		lck_mtx_lock(sock_filter_cleanup_lock);
 
 		/* Put this item on the cleanup list */
 		entry->sfe_next_oncleanup = sock_filter_cleanup_entries;
@@ -211,7 +222,7 @@ sflt_entry_release(struct socket_filter_entry *entry)
 		}
 
 		/* Drop the cleanup lock */
-		lck_mtx_unlock(&sock_filter_cleanup_lock);
+		lck_mtx_unlock(sock_filter_cleanup_lock);
 	} else if (old <= 0) {
 		panic("sflt_entry_release - sfe_refcount (%d) <= 0\n",
 		    (int)old);
@@ -225,11 +236,11 @@ sflt_cleanup_thread(void *blah, wait_result_t blah2)
 {
 #pragma unused(blah, blah2)
 	while (1) {
-		lck_mtx_lock(&sock_filter_cleanup_lock);
+		lck_mtx_lock(sock_filter_cleanup_lock);
 		while (sock_filter_cleanup_entries == NULL) {
 			/* Sleep until we've got something better to do */
 			msleep(&sock_filter_cleanup_entries,
-			    &sock_filter_cleanup_lock, PWAIT,
+			    sock_filter_cleanup_lock, PWAIT,
 			    "sflt_cleanup", NULL);
 		}
 
@@ -238,10 +249,10 @@ sflt_cleanup_thread(void *blah, wait_result_t blah2)
 		sock_filter_cleanup_entries = NULL;
 
 		/* Drop the lock */
-		lck_mtx_unlock(&sock_filter_cleanup_lock);
+		lck_mtx_unlock(sock_filter_cleanup_lock);
 
 		/* Take the socket filter lock */
-		lck_rw_lock_exclusive(&sock_filter_lock);
+		lck_rw_lock_exclusive(sock_filter_lock);
 
 		/* Cleanup every dead item */
 		struct socket_filter_entry      *entry;
@@ -254,7 +265,7 @@ sflt_cleanup_thread(void *blah, wait_result_t blah2)
 			if ((entry->sfe_flags & SFEF_NODETACH) == 0 &&
 			    entry->sfe_filter->sf_filter.sf_detach) {
 				entry->sfe_flags |= SFEF_NODETACH;
-				lck_rw_unlock_exclusive(&sock_filter_lock);
+				lck_rw_unlock_exclusive(sock_filter_lock);
 
 				/*
 				 * Warning - passing a potentially
@@ -263,7 +274,7 @@ sflt_cleanup_thread(void *blah, wait_result_t blah2)
 				entry->sfe_filter->sf_filter.sf_detach(
 					entry->sfe_cookie, entry->sfe_socket);
 
-				lck_rw_lock_exclusive(&sock_filter_lock);
+				lck_rw_lock_exclusive(sock_filter_lock);
 			}
 
 			/*
@@ -297,11 +308,11 @@ sflt_cleanup_thread(void *blah, wait_result_t blah2)
 			sflt_release_locked(entry->sfe_filter);
 			entry->sfe_socket = NULL;
 			entry->sfe_filter = NULL;
-			kheap_free(KM_IFADDR, entry, sizeof(struct socket_filter_entry));
+			FREE(entry, M_IFADDR);
 		}
 
 		/* Drop the socket filter lock */
-		lck_rw_unlock_exclusive(&sock_filter_lock);
+		lck_rw_unlock_exclusive(sock_filter_lock);
 	}
 	/* NOTREACHED */
 }
@@ -328,8 +339,8 @@ sflt_attach_locked(struct socket *so, struct socket_filter *filter,
 		}
 	}
 	/* allocate the socket filter entry */
-	entry = kheap_alloc(KM_IFADDR, sizeof(struct socket_filter_entry),
-	    Z_WAITOK);
+	MALLOC(entry, struct socket_filter_entry *, sizeof(*entry), M_IFADDR,
+	    M_WAITOK);
 	if (entry == NULL) {
 		return ENOMEM;
 	}
@@ -358,7 +369,7 @@ sflt_attach_locked(struct socket *so, struct socket_filter *filter,
 		 * Release the filter lock --
 		 * callers must be aware we will do this
 		 */
-		lck_rw_unlock_exclusive(&sock_filter_lock);
+		lck_rw_unlock_exclusive(sock_filter_lock);
 
 		/* Unlock the socket */
 		if (socklocked) {
@@ -375,7 +386,7 @@ sflt_attach_locked(struct socket *so, struct socket_filter *filter,
 		}
 
 		/* Lock the filters again */
-		lck_rw_lock_exclusive(&sock_filter_lock);
+		lck_rw_lock_exclusive(sock_filter_lock);
 
 		/*
 		 * If the attach function returns an error,
@@ -403,7 +414,7 @@ sflt_attach_internal(socket_t socket, sflt_handle handle)
 
 	int result = EINVAL;
 
-	lck_rw_lock_exclusive(&sock_filter_lock);
+	lck_rw_lock_exclusive(sock_filter_lock);
 
 	struct socket_filter *filter = NULL;
 	TAILQ_FOREACH(filter, &sock_filter_head, sf_global_next) {
@@ -416,7 +427,7 @@ sflt_attach_internal(socket_t socket, sflt_handle handle)
 		result = sflt_attach_locked(socket, filter, 1);
 	}
 
-	lck_rw_unlock_exclusive(&sock_filter_lock);
+	lck_rw_unlock_exclusive(sock_filter_lock);
 
 	return result;
 }
@@ -441,11 +452,11 @@ sflt_initsock(struct socket *so)
 	 */
 	struct protosw *proto = so->so_proto->pr_protosw;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	if (TAILQ_FIRST(&proto->pr_filter_head) != NULL) {
 		/* Promote lock to exclusive */
-		if (!lck_rw_lock_shared_to_exclusive(&sock_filter_lock)) {
-			lck_rw_lock_exclusive(&sock_filter_lock);
+		if (!lck_rw_lock_shared_to_exclusive(sock_filter_lock)) {
+			lck_rw_lock_exclusive(sock_filter_lock);
 		}
 
 		/*
@@ -484,7 +495,7 @@ sflt_initsock(struct socket *so)
 			filter = filter_next;
 		}
 	}
-	lck_rw_done(&sock_filter_lock);
+	lck_rw_done(sock_filter_lock);
 }
 
 /*
@@ -495,7 +506,7 @@ sflt_initsock(struct socket *so)
 __private_extern__ void
 sflt_termsock(struct socket *so)
 {
-	lck_rw_lock_exclusive(&sock_filter_lock);
+	lck_rw_lock_exclusive(sock_filter_lock);
 
 	struct socket_filter_entry *entry;
 
@@ -526,16 +537,16 @@ sflt_termsock(struct socket *so)
 			entry->sfe_flags |= SFEF_NODETACH;
 
 			/* Drop the lock before calling the detach function */
-			lck_rw_unlock_exclusive(&sock_filter_lock);
+			lck_rw_unlock_exclusive(sock_filter_lock);
 			sfe_filter->sf_filter.sf_detach(sfe_cookie, so);
-			lck_rw_lock_exclusive(&sock_filter_lock);
+			lck_rw_lock_exclusive(sock_filter_lock);
 
 			/* Release the filter */
 			sflt_release_locked(sfe_filter);
 		}
 	}
 
-	lck_rw_unlock_exclusive(&sock_filter_lock);
+	lck_rw_unlock_exclusive(sock_filter_lock);
 }
 
 
@@ -550,7 +561,7 @@ sflt_notify_internal(struct socket *so, sflt_event_t event, void *param,
 	struct socket_filter_entry *entry;
 	int unlocked = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry; entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
 		    entry->sfe_filter->sf_filter.sf_notify &&
@@ -561,7 +572,7 @@ sflt_notify_internal(struct socket *so, sflt_event_t event, void *param,
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -577,11 +588,11 @@ sflt_notify_internal(struct socket *so, sflt_event_t event, void *param,
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked != 0) {
 		socket_lock(so, 0);
@@ -612,7 +623,7 @@ sflt_ioctl(struct socket *so, u_long cmd, caddr_t data)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -622,7 +633,7 @@ sflt_ioctl(struct socket *so, u_long cmd, caddr_t data)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -638,11 +649,11 @@ sflt_ioctl(struct socket *so, u_long cmd, caddr_t data)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -662,7 +673,7 @@ sflt_bind(struct socket *so, const struct sockaddr *nam)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -672,7 +683,7 @@ sflt_bind(struct socket *so, const struct sockaddr *nam)
 			 * release the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -688,11 +699,11 @@ sflt_bind(struct socket *so, const struct sockaddr *nam)
 			 * Take the socket filter lock again and
 			 * release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -712,7 +723,7 @@ sflt_listen(struct socket *so)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -722,7 +733,7 @@ sflt_listen(struct socket *so)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -738,11 +749,11 @@ sflt_listen(struct socket *so)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -763,7 +774,7 @@ sflt_accept(struct socket *head, struct socket *so,
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -773,7 +784,7 @@ sflt_accept(struct socket *head, struct socket *so,
 			 * release the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -789,11 +800,11 @@ sflt_accept(struct socket *head, struct socket *so,
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -813,7 +824,7 @@ sflt_getsockname(struct socket *so, struct sockaddr **local)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -823,7 +834,7 @@ sflt_getsockname(struct socket *so, struct sockaddr **local)
 			 * release the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -839,11 +850,11 @@ sflt_getsockname(struct socket *so, struct sockaddr **local)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -863,7 +874,7 @@ sflt_getpeername(struct socket *so, struct sockaddr **remote)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -873,7 +884,7 @@ sflt_getpeername(struct socket *so, struct sockaddr **remote)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -889,11 +900,11 @@ sflt_getpeername(struct socket *so, struct sockaddr **remote)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -913,7 +924,7 @@ sflt_connectin(struct socket *so, const struct sockaddr *remote)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -923,7 +934,7 @@ sflt_connectin(struct socket *so, const struct sockaddr *remote)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -939,11 +950,11 @@ sflt_connectin(struct socket *so, const struct sockaddr *remote)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -959,7 +970,7 @@ sflt_connectout_common(struct socket *so, const struct sockaddr *nam)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -969,7 +980,7 @@ sflt_connectout_common(struct socket *so, const struct sockaddr *nam)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -985,11 +996,11 @@ sflt_connectout_common(struct socket *so, const struct sockaddr *nam)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -1043,7 +1054,7 @@ sflt_setsockopt(struct socket *so, struct sockopt *sopt)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -1053,7 +1064,7 @@ sflt_setsockopt(struct socket *so, struct sockopt *sopt)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -1069,11 +1080,11 @@ sflt_setsockopt(struct socket *so, struct sockopt *sopt)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -1093,7 +1104,7 @@ sflt_getsockopt(struct socket *so, struct sockopt *sopt)
 	int unlocked = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
@@ -1103,7 +1114,7 @@ sflt_getsockopt(struct socket *so, struct sockopt *sopt)
 			 * the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -1119,11 +1130,11 @@ sflt_getsockopt(struct socket *so, struct sockopt *sopt)
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -1145,7 +1156,7 @@ sflt_data_out(struct socket *so, const struct sockaddr *to, mbuf_t *data,
 	int setsendthread = 0;
 	int error = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
 		/* skip if this is a subflow socket */
@@ -1159,7 +1170,7 @@ sflt_data_out(struct socket *so, const struct sockaddr *to, mbuf_t *data,
 			 * release the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -1180,11 +1191,11 @@ sflt_data_out(struct socket *so, const struct sockaddr *to, mbuf_t *data,
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -1208,7 +1219,7 @@ sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
 	int error = 0;
 	int unlocked = 0;
 
-	lck_rw_lock_shared(&sock_filter_lock);
+	lck_rw_lock_shared(sock_filter_lock);
 
 	for (entry = so->so_filt; entry && (error == 0);
 	    entry = entry->sfe_next_onsocket) {
@@ -1223,7 +1234,7 @@ sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
 			 * release the socket filter lock
 			 */
 			sflt_entry_retain(entry);
-			lck_rw_unlock_shared(&sock_filter_lock);
+			lck_rw_unlock_shared(sock_filter_lock);
 
 			/* If the socket isn't already unlocked, unlock it */
 			if (unlocked == 0) {
@@ -1239,11 +1250,11 @@ sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
 			 * Take the socket filter lock again
 			 * and release the entry
 			 */
-			lck_rw_lock_shared(&sock_filter_lock);
+			lck_rw_lock_shared(sock_filter_lock);
 			sflt_entry_release(entry);
 		}
 	}
-	lck_rw_unlock_shared(&sock_filter_lock);
+	lck_rw_unlock_shared(sock_filter_lock);
 
 	if (unlocked) {
 		socket_lock(so, 0);
@@ -1273,7 +1284,7 @@ sflt_detach(socket_t socket, sflt_handle handle)
 		return EINVAL;
 	}
 
-	lck_rw_lock_exclusive(&sock_filter_lock);
+	lck_rw_lock_exclusive(sock_filter_lock);
 	for (entry = socket->so_filt; entry; entry = entry->sfe_next_onsocket) {
 		if (entry->sfe_filter->sf_filter.sf_handle == handle &&
 		    (entry->sfe_flags & SFEF_ATTACHED) != 0) {
@@ -1284,7 +1295,7 @@ sflt_detach(socket_t socket, sflt_handle handle)
 	if (entry != NULL) {
 		sflt_detach_locked(entry);
 	}
-	lck_rw_unlock_exclusive(&sock_filter_lock);
+	lck_rw_unlock_exclusive(sock_filter_lock);
 
 	return result;
 }
@@ -1322,11 +1333,13 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 	}
 
 	/* Allocate the socket filter */
-	sock_filt = kheap_alloc(KM_IFADDR,
-	    sizeof(struct socket_filter), Z_WAITOK | Z_ZERO);
+	MALLOC(sock_filt, struct socket_filter *, sizeof(*sock_filt),
+	    M_IFADDR, M_WAITOK);
 	if (sock_filt == NULL) {
 		return ENOBUFS;
 	}
+
+	bzero(sock_filt, sizeof(*sock_filt));
 
 	/* Legacy sflt_filter length; current structure minus extended */
 	len = sizeof(*filter) - sizeof(struct sflt_filter_ext);
@@ -1346,7 +1359,7 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 	}
 	bcopy(filter, &sock_filt->sf_filter, len);
 
-	lck_rw_lock_exclusive(&sock_filter_lock);
+	lck_rw_lock_exclusive(sock_filter_lock);
 	/* Look for an existing entry */
 	TAILQ_FOREACH(match, &sock_filter_head, sf_global_next) {
 		if (match->sf_filter.sf_handle ==
@@ -1371,10 +1384,10 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 			INC_ATOMIC_INT64_LIM(net_api_stats.nas_sfltr_register_os_total);
 		}
 	}
-	lck_rw_unlock_exclusive(&sock_filter_lock);
+	lck_rw_unlock_exclusive(sock_filter_lock);
 
 	if (match != NULL) {
-		kheap_free(KM_IFADDR, sock_filt, sizeof(struct socket_filter));
+		FREE(sock_filt, M_IFADDR);
 		return EEXIST;
 	}
 
@@ -1402,7 +1415,8 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 			    !SOCK_CHECK_TYPE(so, type)) {
 				continue;
 			}
-			solist = kheap_alloc(KHEAP_TEMP, sizeof(struct solist), Z_NOWAIT);
+			MALLOC(solist, struct solist *, sizeof(*solist),
+			    M_IFADDR, M_NOWAIT);
 			if (!solist) {
 				continue;
 			}
@@ -1420,7 +1434,8 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 			    !SOCK_CHECK_TYPE(so, type)) {
 				continue;
 			}
-			solist = kheap_alloc(KHEAP_TEMP, sizeof(struct solist), Z_NOWAIT);
+			MALLOC(solist, struct solist *, sizeof(*solist),
+			    M_IFADDR, M_NOWAIT);
 			if (!solist) {
 				continue;
 			}
@@ -1465,7 +1480,7 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 		sock_release(so);
 		solist = solisthead;
 		solisthead = solisthead->next;
-		kheap_free(KHEAP_TEMP, solist, sizeof(struct solist));
+		FREE(solist, M_IFADDR);
 	}
 
 	return error;
@@ -1489,7 +1504,7 @@ errno_t
 sflt_unregister(sflt_handle handle)
 {
 	struct socket_filter *filter;
-	lck_rw_lock_exclusive(&sock_filter_lock);
+	lck_rw_lock_exclusive(sock_filter_lock);
 
 	/* Find the entry by the handle */
 	TAILQ_FOREACH(filter, &sock_filter_head, sf_global_next) {
@@ -1522,7 +1537,7 @@ sflt_unregister(sflt_handle handle)
 		sflt_release_locked(filter);
 	}
 
-	lck_rw_unlock_exclusive(&sock_filter_lock);
+	lck_rw_unlock_exclusive(sock_filter_lock);
 
 	if (filter == NULL) {
 		return ENOENT;

@@ -892,19 +892,17 @@ vm_test_map_copy_adjust_to_target(void)
 	mach_memory_entry_port_release(mem_entry);
 
 	/* create 4k copy map */
-	curprot = VM_PROT_NONE;
-	maxprot = VM_PROT_NONE;
 	kr = vm_map_copy_extract(map4k, addr4k, 0x3000,
-	    FALSE, &copy4k, &curprot, &maxprot,
+	    VM_PROT_READ, FALSE,
+	    &copy4k, &curprot, &maxprot,
 	    VM_INHERIT_DEFAULT, VM_MAP_KERNEL_FLAGS_NONE);
 	assert(kr == KERN_SUCCESS);
 	assert(copy4k->size == 0x3000);
 
 	/* create 16k copy map */
-	curprot = VM_PROT_NONE;
-	maxprot = VM_PROT_NONE;
 	kr = vm_map_copy_extract(map16k, addr16k, 0x4000,
-	    FALSE, &copy16k, &curprot, &maxprot,
+	    VM_PROT_READ, FALSE,
+	    &copy16k, &curprot, &maxprot,
 	    VM_INHERIT_DEFAULT, VM_MAP_KERNEL_FLAGS_NONE);
 	assert(kr == KERN_SUCCESS);
 	assert(copy16k->size == 0x4000);

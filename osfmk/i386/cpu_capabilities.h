@@ -155,10 +155,6 @@ _NumCPUs( void )
 
 #else /* !KERNEL_PRIVATE */
 
-/*
- * <sys/commpage.h> defines a couple of conveniency macros
- * to help read data from the commpage.
- */
 #if defined(__i386__)
 
 #define _COMM_PAGE_AREA_LENGTH          _COMM_PAGE32_AREA_LENGTH

@@ -50,7 +50,6 @@
 static struct vsock_transport * _Atomic the_vsock_transport = NULL;
 static ZONE_DECLARE(vsockpcb_zone, "vsockpcbzone",
     sizeof(struct vsockpcb), ZC_NONE);
-static LCK_GRP_DECLARE(vsock_lock_grp, "vsock");
 static struct vsockpcbinfo vsockinfo;
 
 static uint32_t vsock_sendspace = VSOCK_MAX_PACKET_SIZE * 8;
@@ -71,7 +70,7 @@ vsock_get_matching_pcb(struct vsock_address src, struct vsock_address dst)
 	struct vsockpcb *match = NULL;
 	struct vsockpcb *pcb = NULL;
 
-	lck_rw_lock_shared(&vsockinfo.bound_lock);
+	lck_rw_lock_shared(vsockinfo.bound_lock);
 	LIST_FOREACH(pcb, &vsockinfo.bound, bound) {
 		// Source cid and port must match. Only destination port must match. (Allows for a changing CID during migration)
 		socket_lock(pcb->so, 1);
@@ -90,7 +89,7 @@ vsock_get_matching_pcb(struct vsock_address src, struct vsock_address dst)
 		socket_lock(match->so, 1);
 		preferred = match;
 	}
-	lck_rw_done(&vsockinfo.bound_lock);
+	lck_rw_done(vsockinfo.bound_lock);
 
 	return preferred;
 }
@@ -112,7 +111,7 @@ vsock_bind_address_if_free(struct vsockpcb *pcb, uint32_t local_cid, uint32_t lo
 	struct vsockpcb *pcb_match = NULL;
 
 	socket_unlock(pcb->so, 0);
-	lck_rw_lock_exclusive(&vsockinfo.bound_lock);
+	lck_rw_lock_exclusive(vsockinfo.bound_lock);
 	LIST_FOREACH(pcb_match, &vsockinfo.bound, bound) {
 		socket_lock(pcb_match->so, 1);
 		if (pcb == pcb_match ||
@@ -131,7 +130,7 @@ vsock_bind_address_if_free(struct vsockpcb *pcb, uint32_t local_cid, uint32_t lo
 		pcb->remote_address = (struct vsock_address) { .cid = remote_cid, .port = remote_port };
 		LIST_INSERT_HEAD(&vsockinfo.bound, pcb, bound);
 	}
-	lck_rw_done(&vsockinfo.bound_lock);
+	lck_rw_done(vsockinfo.bound_lock);
 
 	return taken ? EADDRINUSE : 0;
 }
@@ -226,10 +225,10 @@ vsock_unbind_pcb(struct vsockpcb *pcb, bool is_locked)
 
 	if (!is_locked) {
 		socket_unlock(pcb->so, 0);
-		lck_rw_lock_exclusive(&vsockinfo.bound_lock);
+		lck_rw_lock_exclusive(vsockinfo.bound_lock);
 		socket_lock(pcb->so, 0);
 		if (!pcb->bound.le_prev) {
-			lck_rw_done(&vsockinfo.bound_lock);
+			lck_rw_done(vsockinfo.bound_lock);
 			return;
 		}
 	}
@@ -239,7 +238,7 @@ vsock_unbind_pcb(struct vsockpcb *pcb, bool is_locked)
 	pcb->bound.le_prev = NULL;
 
 	if (!is_locked) {
-		lck_rw_done(&vsockinfo.bound_lock);
+		lck_rw_done(vsockinfo.bound_lock);
 	}
 }
 
@@ -251,12 +250,12 @@ vsock_new_sockaddr(struct vsock_address *address)
 	}
 
 	struct sockaddr_vm *addr;
-	MALLOC(addr, struct sockaddr_vm *, sizeof(*addr), M_SONAME,
-	    M_WAITOK | M_ZERO);
+	MALLOC(addr, struct sockaddr_vm *, sizeof(*addr), M_SONAME, M_WAITOK);
 	if (!addr) {
 		return NULL;
 	}
 
+	bzero(addr, sizeof(*addr));
 	addr->svm_len = sizeof(*addr);
 	addr->svm_family = AF_VSOCK;
 	addr->svm_port = address->port;
@@ -630,7 +629,7 @@ vsock_reset_transport(struct vsock_transport *transport)
 	struct vsockpcb *pcb = NULL;
 	struct vsockpcb *tmp_pcb = NULL;
 
-	lck_rw_lock_exclusive(&vsockinfo.bound_lock);
+	lck_rw_lock_exclusive(vsockinfo.bound_lock);
 	LIST_FOREACH_SAFE(pcb, &vsockinfo.bound, bound, tmp_pcb) {
 		// Disconnect this transport's sockets. Listen and bind sockets must stay alive.
 		socket_lock(pcb->so, 1);
@@ -642,7 +641,7 @@ vsock_reset_transport(struct vsock_transport *transport)
 		}
 		socket_unlock(pcb->so, 1);
 	}
-	lck_rw_done(&vsockinfo.bound_lock);
+	lck_rw_done(vsockinfo.bound_lock);
 
 	return error;
 }
@@ -723,10 +722,10 @@ vsock_pcblist SYSCTL_HANDLER_ARGS
 	}
 
 	// Get the generation count and the count of all vsock sockets.
-	lck_rw_lock_shared(&vsockinfo.all_lock);
+	lck_rw_lock_shared(vsockinfo.all_lock);
 	uint64_t n = vsockinfo.all_pcb_count;
 	vsock_gen_t gen_count = vsockinfo.vsock_gencnt;
-	lck_rw_done(&vsockinfo.all_lock);
+	lck_rw_done(vsockinfo.all_lock);
 
 	const size_t xpcb_len = sizeof(struct xvsockpcb);
 	struct xvsockpgen xvg;
@@ -759,7 +758,7 @@ vsock_pcblist SYSCTL_HANDLER_ARGS
 		return 0;
 	}
 
-	lck_rw_lock_shared(&vsockinfo.all_lock);
+	lck_rw_lock_shared(vsockinfo.all_lock);
 
 	n = 0;
 	struct vsockpcb *pcb = NULL;
@@ -804,7 +803,7 @@ vsock_pcblist SYSCTL_HANDLER_ARGS
 	// Update the generation count to match the sockets being returned.
 	gen_count = vsockinfo.vsock_gencnt;
 
-	lck_rw_done(&vsockinfo.all_lock);
+	lck_rw_done(vsockinfo.all_lock);
 
 	if (!error) {
 		/*
@@ -887,11 +886,11 @@ vsock_attach(struct socket *so, int proto, struct proc *p)
 	}
 
 	// Add to the list of all vsock sockets.
-	lck_rw_lock_exclusive(&vsockinfo.all_lock);
+	lck_rw_lock_exclusive(vsockinfo.all_lock);
 	TAILQ_INSERT_TAIL(&vsockinfo.all, pcb, all);
 	vsockinfo.all_pcb_count++;
 	pcb->vsock_gencnt = ++vsockinfo.vsock_gencnt;
-	lck_rw_done(&vsockinfo.all_lock);
+	lck_rw_done(vsockinfo.all_lock);
 
 	return 0;
 }
@@ -951,13 +950,13 @@ vsock_detach(struct socket *so)
 	}
 
 	// Remove from the list of all vsock sockets.
-	lck_rw_lock_exclusive(&vsockinfo.all_lock);
+	lck_rw_lock_exclusive(vsockinfo.all_lock);
 	TAILQ_REMOVE(&vsockinfo.all, pcb, all);
 	pcb->all.tqe_next = NULL;
 	pcb->all.tqe_prev = NULL;
 	vsockinfo.all_pcb_count--;
 	vsockinfo.vsock_gencnt++;
-	lck_rw_done(&vsockinfo.all_lock);
+	lck_rw_done(vsockinfo.all_lock);
 
 	// Deallocate any resources.
 	zfree(vsockpcb_zone, pcb);
@@ -1381,9 +1380,15 @@ vsock_init(struct protosw *pp, struct domain *dp)
 	}
 
 	// Setup VSock protocol info struct.
-	lck_rw_init(&vsockinfo.all_lock, &vsock_lock_grp, LCK_ATTR_NULL);
-	lck_rw_init(&vsockinfo.bound_lock, &vsock_lock_grp, LCK_ATTR_NULL);
-	lck_mtx_init(&vsockinfo.port_lock, &vsock_lock_grp, LCK_ATTR_NULL);
+	vsockinfo.vsock_lock_grp_attr = lck_grp_attr_alloc_init();
+	vsockinfo.vsock_lock_grp = lck_grp_alloc_init("vsock", vsockinfo.vsock_lock_grp_attr);
+	vsockinfo.vsock_lock_attr = lck_attr_alloc_init();
+	if ((vsockinfo.all_lock = lck_rw_alloc_init(vsockinfo.vsock_lock_grp, vsockinfo.vsock_lock_attr)) == NULL ||
+	    (vsockinfo.bound_lock = lck_rw_alloc_init(vsockinfo.vsock_lock_grp, vsockinfo.vsock_lock_attr)) == NULL) {
+		panic("%s: unable to allocate PCB lock\n", __func__);
+		/* NOTREACHED */
+	}
+	lck_mtx_init(&vsockinfo.port_lock, vsockinfo.vsock_lock_grp, vsockinfo.vsock_lock_attr);
 	TAILQ_INIT(&vsockinfo.all);
 	LIST_INIT(&vsockinfo.bound);
 	vsockinfo.last_port = VMADDR_PORT_ANY;

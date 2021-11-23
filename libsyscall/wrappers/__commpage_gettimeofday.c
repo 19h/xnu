@@ -55,8 +55,9 @@ __commpage_gettimeofday_internal(struct timeval *tp, uint64_t *tbr_out)
 	volatile uint64_t *gtod_Ticks_scale_p;
 	volatile uint64_t *gtod_Ticks_per_sec_p;
 
-	COMM_PAGE_SLOT_TYPE(new_commpage_timeofday_data_t) commpage_timeofday_datap =
-	    COMM_PAGE_SLOT(new_commpage_timeofday_data_t, NEWTIMEOFDAY_DATA);
+	new_commpage_timeofday_data_t *commpage_timeofday_datap;
+
+	commpage_timeofday_datap =  (new_commpage_timeofday_data_t *)_COMM_PAGE_NEWTIMEOFDAY_DATA;
 
 	gtod_TimeStamp_tick_p = &commpage_timeofday_datap->TimeStamp_tick;
 	gtod_TimeStamp_sec_p = &commpage_timeofday_datap->TimeStamp_sec;

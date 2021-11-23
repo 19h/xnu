@@ -126,15 +126,6 @@ decl_simple_lock_data(extern, panic_lock);
 
 extern unsigned int not_in_kdp;
 
-#if !LOCK_STATS
-#define usimple_lock_nopreempt(lck, grp) \
-	usimple_lock_nopreempt(lck)
-#define usimple_lock_try_nopreempt(lck, grp) \
-	usimple_lock_try_nopreempt(lck)
-#endif
-static void usimple_lock_nopreempt(usimple_lock_t, lck_grp_t *);
-static unsigned int usimple_lock_try_nopreempt(usimple_lock_t, lck_grp_t *);
-
 /*
  *	We often want to know the addresses of the callers
  *	of the various lock routines.  However, this information
@@ -350,22 +341,6 @@ lck_spin_lock(
 	usimple_lock((usimple_lock_t) lck, NULL);
 }
 
-void
-lck_spin_lock_nopreempt(
-	lck_spin_t      *lck)
-{
-	usimple_lock_nopreempt((usimple_lock_t) lck, NULL);
-}
-
-void
-lck_spin_lock_nopreempt_grp(
-	lck_spin_t      *lck,
-	lck_grp_t       *grp)
-{
-#pragma unused(grp)
-	usimple_lock_nopreempt((usimple_lock_t) lck, grp);
-}
-
 /*
  *      Routine:        lck_spin_unlock
  */
@@ -374,13 +349,6 @@ lck_spin_unlock(
 	lck_spin_t      *lck)
 {
 	usimple_unlock((usimple_lock_t) lck);
-}
-
-void
-lck_spin_unlock_nopreempt(
-	lck_spin_t      *lck)
-{
-	usimple_unlock_nopreempt((usimple_lock_t) lck);
 }
 
 boolean_t
@@ -407,34 +375,6 @@ lck_spin_try_lock(
 	lck_spin_t      *lck)
 {
 	boolean_t lrval = (boolean_t)usimple_lock_try((usimple_lock_t) lck, LCK_GRP_NULL);
-#if     DEVELOPMENT || DEBUG
-	if (lrval) {
-		pltrace(FALSE);
-	}
-#endif
-	return lrval;
-}
-
-int
-lck_spin_try_lock_nopreempt(
-	lck_spin_t      *lck)
-{
-	boolean_t lrval = (boolean_t)usimple_lock_try_nopreempt((usimple_lock_t) lck, LCK_GRP_NULL);
-#if     DEVELOPMENT || DEBUG
-	if (lrval) {
-		pltrace(FALSE);
-	}
-#endif
-	return lrval;
-}
-
-int
-lck_spin_try_lock_nopreempt_grp(
-	lck_spin_t      *lck,
-	lck_grp_t       *grp)
-{
-#pragma unused(grp)
-	boolean_t lrval = (boolean_t)usimple_lock_try_nopreempt((usimple_lock_t) lck, grp);
 #if     DEVELOPMENT || DEBUG
 	if (lrval) {
 		pltrace(FALSE);
@@ -499,8 +439,12 @@ usimple_lock_init(
 	usimple_lock_t  l,
 	__unused unsigned short tag)
 {
+#ifndef MACHINE_SIMPLE_LOCK
 	USLDBG(usld_lock_init(l, tag));
 	hw_lock_init(&l->interlock);
+#else
+	simple_lock_init((simple_lock_t)l, tag);
+#endif
 }
 
 volatile uint32_t spinlock_owner_cpu = ~0;
@@ -525,22 +469,6 @@ spinlock_timeout_NMI(uintptr_t thread_addr)
 	return spinlock_owner_cpu;
 }
 
-__abortlike
-static void
-usimple_lock_acquire_timeout_panic(usimple_lock_t l)
-{
-	uintptr_t lowner = (uintptr_t)l->interlock.lock_data;
-	uint32_t lock_cpu;
-
-	spinlock_timed_out = l; /* spinlock_timeout_NMI consumes this */
-	lock_cpu = spinlock_timeout_NMI(lowner);
-	panic("Spinlock acquisition timed out: lock=%p, "
-	    "lock owner thread=0x%lx, current_thread: %p, "
-	    "lock owner active on CPU 0x%x, current owner: 0x%lx, time: %llu",
-	    l, lowner, current_thread(), lock_cpu,
-	    (uintptr_t)l->interlock.lock_data, mach_absolute_time());
-}
-
 /*
  *	Acquire a usimple_lock.
  *
@@ -553,57 +481,38 @@ void
 	usimple_lock_t  l
 	LCK_GRP_ARG(lck_grp_t *grp))
 {
+#ifndef MACHINE_SIMPLE_LOCK
 	DECL_PC(pc);
 
 	OBTAIN_PC(pc);
 	USLDBG(usld_lock_pre(l, pc));
 
-	while (__improbable(hw_lock_to(&l->interlock, LockTimeOutTSC, grp) == 0)) {
-		if (!machine_timeout_suspended()) {
-			usimple_lock_acquire_timeout_panic(l);
+	if (__improbable(hw_lock_to(&l->interlock, LockTimeOutTSC, grp) == 0)) {
+		boolean_t uslock_acquired = FALSE;
+		while (machine_timeout_suspended()) {
+			enable_preemption();
+			if ((uslock_acquired = hw_lock_to(&l->interlock, LockTimeOutTSC, grp))) {
+				break;
+			}
 		}
-		enable_preemption();
-	}
 
+		if (uslock_acquired == FALSE) {
+			uint32_t lock_cpu;
+			uintptr_t lowner = (uintptr_t)l->interlock.lock_data;
+			spinlock_timed_out = l;
+			lock_cpu = spinlock_timeout_NMI(lowner);
+			panic("Spinlock acquisition timed out: lock=%p, lock owner thread=0x%lx, current_thread: %p, lock owner active on CPU 0x%x, current owner: 0x%lx, time: %llu",
+			    l, lowner, current_thread(), lock_cpu, (uintptr_t)l->interlock.lock_data, mach_absolute_time());
+		}
+	}
 #if DEVELOPMENT || DEBUG
 	pltrace(FALSE);
 #endif
 
 	USLDBG(usld_lock_post(l, pc));
-#if CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_ACQUIRE, l, 0, (uintptr_t)LCK_GRP_PROBEARG(grp));
+#else
+	simple_lock((simple_lock_t)l, grp);
 #endif
-}
-
-/*
- *	Acquire a usimple_lock_nopreempt
- *
- *	Called and returns with preemption disabled.  Note
- *	that the hw_lock routines are responsible for
- *	maintaining preemption state.
- */
-static void
-usimple_lock_nopreempt(
-	usimple_lock_t  l,
-	lck_grp_t *grp)
-{
-	DECL_PC(pc);
-
-	OBTAIN_PC(pc);
-	USLDBG(usld_lock_pre(l, pc));
-
-	while (__improbable(hw_lock_to_nopreempt(&l->interlock, LockTimeOutTSC, grp) == 0)) {
-		if (!machine_timeout_suspended()) {
-			usimple_lock_acquire_timeout_panic(l);
-		}
-		enable_preemption();
-	}
-
-#if DEVELOPMENT || DEBUG
-	pltrace(FALSE);
-#endif
-
-	USLDBG(usld_lock_post(l, pc));
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_ACQUIRE, l, 0, (uintptr_t)LCK_GRP_PROBEARG(grp));
 #endif
@@ -621,6 +530,7 @@ void
 usimple_unlock(
 	usimple_lock_t  l)
 {
+#ifndef MACHINE_SIMPLE_LOCK
 	DECL_PC(pc);
 
 	OBTAIN_PC(pc);
@@ -629,28 +539,11 @@ usimple_unlock(
 	pltrace(TRUE);
 #endif
 	hw_lock_unlock(&l->interlock);
-}
-
-/*
- *	Release a usimple_unlock_nopreempt.
- *
- *	Called and returns with preemption enabled.  Note
- *	that the hw_lock routines are responsible for
- *	maintaining preemption state.
- */
-void
-usimple_unlock_nopreempt(
-	usimple_lock_t  l)
-{
-	DECL_PC(pc);
-
-	OBTAIN_PC(pc);
-	USLDBG(usld_unlock(l, pc));
-#if DEVELOPMENT || DEBUG
-	pltrace(TRUE);
+#else
+	simple_unlock_rwmb((simple_lock_t)l);
 #endif
-	hw_lock_unlock_nopreempt(&l->interlock);
 }
+
 
 /*
  *	Conditionally acquire a usimple_lock.
@@ -669,6 +562,7 @@ usimple_lock_try(
 	usimple_lock_t  l,
 	lck_grp_t *grp)
 {
+#ifndef MACHINE_SIMPLE_LOCK
 	unsigned int    success;
 	DECL_PC(pc);
 
@@ -681,36 +575,9 @@ usimple_lock_try(
 		USLDBG(usld_lock_try_post(l, pc));
 	}
 	return success;
-}
-
-/*
- *	Conditionally acquire a usimple_lock.
- *
- *	Called and returns with preemption disabled.  Note
- *	that the hw_lock routines are responsible for
- *	maintaining preemption state.
- *
- *	XXX No stats are gathered on a miss; I preserved this
- *	behavior from the original assembly-language code, but
- *	doesn't it make sense to log misses?  XXX
- */
-static unsigned int
-usimple_lock_try_nopreempt(
-	usimple_lock_t  l,
-	lck_grp_t *grp)
-{
-	unsigned int    success;
-	DECL_PC(pc);
-
-	OBTAIN_PC(pc);
-	USLDBG(usld_lock_try_pre(l, pc));
-	if ((success = hw_lock_try_nopreempt(&l->interlock, grp))) {
-#if DEVELOPMENT || DEBUG
-		pltrace(FALSE);
+#else
+	return simple_lock_try((simple_lock_t)l, grp);
 #endif
-		USLDBG(usld_lock_try_post(l, pc));
-	}
-	return success;
 }
 
 /*

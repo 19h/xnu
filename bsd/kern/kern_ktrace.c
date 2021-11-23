@@ -70,8 +70,7 @@ char *proc_name_address(void *p);
 
 kern_return_t ktrace_background_available_notify_user(void);
 
-static LCK_GRP_DECLARE(ktrace_grp, "ktrace");
-static LCK_MTX_DECLARE(ktrace_mtx, &ktrace_grp);
+static lck_mtx_t *ktrace_mtx;
 
 /*
  * The overall state of ktrace, whether it is unconfigured, in foreground mode,
@@ -149,7 +148,7 @@ void
 ktrace_lock(void)
 {
 	if (!ktrace_single_threaded) {
-		lck_mtx_lock(&ktrace_mtx);
+		lck_mtx_lock(ktrace_mtx);
 	}
 }
 
@@ -157,7 +156,7 @@ void
 ktrace_unlock(void)
 {
 	if (!ktrace_single_threaded) {
-		lck_mtx_unlock(&ktrace_mtx);
+		lck_mtx_unlock(ktrace_mtx);
 	}
 }
 
@@ -165,7 +164,7 @@ void
 ktrace_assert_lock_held(void)
 {
 	if (!ktrace_single_threaded) {
-		lck_mtx_assert(&ktrace_mtx, LCK_MTX_ASSERT_OWNED);
+		lck_mtx_assert(ktrace_mtx, LCK_MTX_ASSERT_OWNED);
 	}
 }
 
@@ -548,4 +547,25 @@ ktrace_sysctl SYSCTL_HANDLER_ARGS
 out:
 	ktrace_unlock();
 	return ret;
+}
+
+/* This should only be called from the bootstrap thread. */
+void
+ktrace_init(void)
+{
+	static lck_grp_attr_t *lock_grp_attr = NULL;
+	static lck_grp_t *lock_grp = NULL;
+	static bool initialized = false;
+
+	if (initialized) {
+		return;
+	}
+
+	lock_grp_attr = lck_grp_attr_alloc_init();
+	lock_grp = lck_grp_alloc_init("ktrace", lock_grp_attr);
+	lck_grp_attr_free(lock_grp_attr);
+
+	ktrace_mtx = lck_mtx_alloc_init(lock_grp, LCK_ATTR_NULL);
+	assert(ktrace_mtx != NULL);;
+	initialized = true;
 }

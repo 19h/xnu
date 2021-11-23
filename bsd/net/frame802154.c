@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -304,7 +304,6 @@ frame802154_parse(uint8_t *data, size_t len, frame802154_t *pf, uint8_t **payloa
 #endif /* LLSEC802154_USES_EXPLICIT_KEYS */
 
 	if (len < 3) {
-		*payload = NULL;
 		return 0;
 	}
 
@@ -412,16 +411,10 @@ frame802154_parse(uint8_t *data, size_t len, frame802154_t *pf, uint8_t **payloa
 
 	/* header length */
 	c = p - data;
-
-
-	if (c <= len) {
-		/* payload length */
-		pf->payload_len = (int)(len - c);
-		/* payload */
-		*payload = p;
-	} else {
-		*payload = NULL;
-	}
+	/* payload length */
+	pf->payload_len = (int)(len - c);
+	/* payload */
+	*payload = p;
 
 	/* return header length if successful */
 	return c > len ? 0 : c;

@@ -33,7 +33,6 @@ COMMON_TARGETS = unit_tests \
 		perf_index		\
 		personas		\
 		unixconf	 	\
-		kernpost_test_report \
 
 KEXT_TARGETS = pgokext.kext
 

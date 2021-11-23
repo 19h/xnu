@@ -5307,6 +5307,12 @@ IOMemoryMap::free()
 		fMemory.reset();
 	}
 
+	if (fOwner && (fOwner != fMemory)) {
+		LOCK;
+		fOwner->removeMapping(this);
+		UNLOCK;
+	}
+
 	if (fSuperMap) {
 		fSuperMap.reset();
 	}
