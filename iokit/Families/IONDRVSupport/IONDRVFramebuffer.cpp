@@ -46,6 +46,8 @@
 
 #include <string.h>
 
+#define kAppleAudioVideoJackStateKey	"AppleAudioVideoJackState"
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 class IOATINDRV : public IONDRVFramebuffer
@@ -242,6 +244,12 @@ IOReturn IONDRVFramebuffer::enableController( void )
 
     if( kIOReturnSuccess == err) do {
 
+        // find out about onboard audio/video jack state
+        // OSObject * notify =
+        addNotification( gIOPublishNotification,
+                         resourceMatching(kAppleAudioVideoJackStateKey), 
+                         _videoJackStateChangeHandler, this, 0 );
+
         ignore_zero_fault( true );
 	err = checkDriver();
         ignore_zero_fault( false );
@@ -271,6 +279,25 @@ IOReturn IONDRVFramebuffer::enableController( void )
     } while( false);
 
     return( err);
+}
+
+bool IONDRVFramebuffer::_videoJackStateChangeHandler( void * target, void * ref,
+                                                        IOService * resourceService )
+{
+    IONDRVFramebuffer * self = (IONDRVFramebuffer *) target;
+    IOReturn		err;
+    UInt32		jackData;
+
+    OSObject * jackValue = resourceService->getProperty(kAppleAudioVideoJackStateKey);
+    if( !jackValue)
+        return( true );
+
+    jackData = (jackValue == kOSBooleanTrue);
+
+    self->nub->setProperty( kAppleAudioVideoJackStateKey, &jackData, sizeof(jackData) );
+    resourceService->removeProperty(kAppleAudioVideoJackStateKey);
+
+    return( true );
 }
 
 IODeviceMemory * IONDRVFramebuffer::getVRAMRange( void )
@@ -2023,6 +2050,16 @@ IOReturn IONDRVFramebuffer::setPowerState( unsigned long powerStateOrdinal,
     sleepInfo.powerFlags = 0;
     sleepInfo.powerReserved1 = 0;
     sleepInfo.powerReserved2 = 0;
+
+#if 1
+    if( newState == kHardwareSleep) {
+        IOMemoryDescriptor * vram;
+        if( (vram = getVRAMRange())) {
+            vram->redirect( kernel_task, true );
+            vram->release();
+        }
+    }
+#endif
         
     ignore_zero_fault( true );
     boolean_t ints = ml_set_interrupts_enabled( false );
@@ -2031,6 +2068,16 @@ IOReturn IONDRVFramebuffer::setPowerState( unsigned long powerStateOrdinal,
 
     ml_set_interrupts_enabled( ints );
     ignore_zero_fault( false );
+
+#if 1
+    if( newState == kHardwareWake) {
+        IOMemoryDescriptor * vram;
+        if( (vram = getVRAMRange())) {
+            vram->redirect( kernel_task, false );
+            vram->release();
+        }
+    }
+#endif
 
     if( powerStateOrdinal) {
         powerState = powerStateOrdinal;

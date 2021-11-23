@@ -797,7 +797,6 @@ GetDirEntrySize(BTreeIterator *bip, ExtendedVCB * vol)
 				    cnp->ustr.length * sizeof(UniChar), ':', 0);
 		if (utf8chars > kdirentMaxNameBytes)
 			utf8chars = kdirentMaxNameBytes;
-		utf8chars++;  /* account for NULL termination */
 	} else { /* hfs */
 		cnp = (CatalogName*) ckp->hfs.nodeName;
 		result = hfs_to_utf8(vol, cnp->pstr, kdirentMaxNameBytes + 1,
@@ -878,7 +877,7 @@ PositionIterator(CatalogIterator *cip, UInt32 offset, BTreeIterator *bip, UInt16
 			pid = *idp;
 
 			curOffset = CAT_START_OFFSET;
-	 		nextOffset = GetDirEntrySize(bip, vol);
+	 		nextOffset = CAT_START_OFFSET + GetDirEntrySize(bip, vol);
 
 			while (nextOffset < offset) {
 				result = BTIterateRecord( fcb, kBTreeNextRecord, bip, NULL, NULL );		

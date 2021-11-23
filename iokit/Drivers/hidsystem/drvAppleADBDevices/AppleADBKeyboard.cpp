@@ -93,23 +93,18 @@ return NX_EVS_DEVICE_INTERFACE_ADB;
 UInt32 AppleADBKeyboard::deviceType ( void )
 {
     UInt32	id;	//We need handler ID to remap adjustable JIS keyboard
-    
-    id = adbDevice->handlerID();
-    if (id == 18)  //Adjustable JIS
-    {
-	kmapConvert[0x32] = 0x35; //tilde to ESC 
-    }
     IORegistryEntry 	*regEntry;
     OSData *		data = 0;
     UInt32 		*dataptr;
-    
+        
     id = adbDevice->handlerID();
     if (id == 18)  //Adjustable JIS
     {
 	kmapConvert[0x32] = 0x35; //tilde to ESC 
     }
 
-    if ((id == kgestaltPwrBkEKDomKbd) || (id == kgestaltPwrBkEKISOKbd) || (id == kgestaltPwrBkEKJISKbd))
+    if ((id == kgestaltPwrBkEKDomKbd) || (id == kgestaltPwrBkEKISOKbd) || 
+	(id == kgestaltPwrBkEKJISKbd) || (id == kgestaltPwrBk99JISKbd))
     {	
 	if( (regEntry = IORegistryEntry::fromPath( "/pci@f2000000/mac-io/via-pmu/adb/keyboard", gIODTPlane ))) 
 	{
@@ -122,7 +117,7 @@ UInt32 AppleADBKeyboard::deviceType ( void )
 	    regEntry->release();
 	}
     }    
-
+        
     return id;
 }
 
@@ -145,7 +140,9 @@ void AppleADBKeyboard::setAlphaLockFeedback ( bool to )
     else
 	turnLEDon |= ADBKS_LED_CAPSLOCK;
 
-    thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
+    if ( ! isInactive() ) {
+        thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
+    }
 }
 
 void AppleADBKeyboard::setNumLockFeedback ( bool to )
@@ -155,7 +152,9 @@ void AppleADBKeyboard::setNumLockFeedback ( bool to )
     else
 	turnLEDon |= ADBKS_LED_NUMLOCK;
 
-    thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
+    if ( ! isInactive() ) {
+        thread_call_func(asyncSetLEDFunc, (thread_call_param_t)this, true);
+    }
 }
 
 
