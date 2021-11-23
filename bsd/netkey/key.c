@@ -174,6 +174,7 @@ __private_extern__ u_int64_t natt_now = 0;
 static LIST_HEAD(_sptree, secpolicy) sptree[IPSEC_DIR_MAX];     /* SPD */
 static LIST_HEAD(_sahtree, secashead) sahtree;                  /* SAD */
 static LIST_HEAD(_regtree, secreg) regtree[SADB_SATYPE_MAX + 1];
+static LIST_HEAD(_custom_sahtree, secashead) custom_sahtree;
 /* registed list */
 
 #define SPIHASHSIZE     128
@@ -470,11 +471,11 @@ static struct mbuf *key_setdumpsp(struct secpolicy *,
     u_int8_t, u_int32_t, u_int32_t);
 static u_int key_getspreqmsglen(struct secpolicy *);
 static int key_spdexpire(struct secpolicy *);
-static struct secashead *key_newsah(struct secasindex *, ifnet_t, u_int, u_int8_t);
+static struct secashead *key_newsah(struct secasindex *, ifnet_t, u_int, u_int8_t, u_int16_t);
 static struct secasvar *key_newsav(struct mbuf *,
     const struct sadb_msghdr *, struct secashead *, int *,
     struct socket *);
-static struct secashead *key_getsah(struct secasindex *);
+static struct secashead *key_getsah(struct secasindex *, u_int16_t);
 static struct secasvar *key_checkspidup(struct secasindex *, u_int32_t);
 static void key_setspi __P((struct secasvar *, u_int32_t));
 static struct secasvar *key_getsavbyspi(struct secashead *, u_int32_t);
@@ -640,6 +641,7 @@ key_init(struct protosw *pp, struct domain *dp)
 	ipsec_policy_count = 0;
 
 	LIST_INIT(&sahtree);
+	LIST_INIT(&custom_sahtree);
 
 	for (i = 0; i <= SADB_SATYPE_MAX; i++) {
 		LIST_INIT(&regtree[i]);
@@ -1471,6 +1473,157 @@ found:
 	return match;
 }
 
+/*
+ * This function checks whether a UDP packet with a random local port
+ * and a remote port of 4500 matches an SA in the kernel. If does match,
+ * send the packet to the ESP engine. If not, send the packet to the UDP protocol.
+ */
+bool
+key_checksa_present(u_int family,
+    caddr_t local_addr,
+    caddr_t remote_addr,
+    u_int16_t local_port,
+    u_int16_t remote_port)
+{
+	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
+
+	/* sanity check */
+	if (local_addr == NULL || remote_addr == NULL) {
+		panic("key_allocsa: NULL pointer is passed.\n");
+	}
+
+	/*
+	 * searching SAD.
+	 * XXX: to be checked internal IP header somewhere.  Also when
+	 * IPsec tunnel packet is received.  But ESP tunnel mode is
+	 * encrypted so we can't check internal IP header.
+	 */
+	/*
+	 * search a valid state list for inbound packet.
+	 * the search order is not important.
+	 */
+	struct secashead *sah = NULL;
+	bool found_sa = false;
+
+	lck_mtx_lock(sadb_mutex);
+	LIST_FOREACH(sah, &sahtree, chain) {
+		if (sah->state == SADB_SASTATE_DEAD) {
+			continue;
+		}
+
+		if (sah->dir != IPSEC_DIR_OUTBOUND) {
+			continue;
+		}
+
+		if (family != sah->saidx.src.ss_family) {
+			continue;
+		}
+
+		struct sockaddr_in src_in = {};
+		struct sockaddr_in6 src_in6 = {};
+
+		/* check src address */
+		switch (family) {
+		case AF_INET:
+			src_in.sin_family = AF_INET;
+			src_in.sin_len = sizeof(src_in);
+			memcpy(&src_in.sin_addr, local_addr, sizeof(src_in.sin_addr));
+			if (key_sockaddrcmp((struct sockaddr*)&src_in,
+			    (struct sockaddr *)&sah->saidx.src, 0) != 0) {
+				continue;
+			}
+			break;
+		case AF_INET6:
+			src_in6.sin6_family = AF_INET6;
+			src_in6.sin6_len = sizeof(src_in6);
+			memcpy(&src_in6.sin6_addr, local_addr, sizeof(src_in6.sin6_addr));
+			if (IN6_IS_SCOPE_LINKLOCAL(&src_in6.sin6_addr)) {
+				/* kame fake scopeid */
+				src_in6.sin6_scope_id =
+				    ntohs(src_in6.sin6_addr.s6_addr16[1]);
+				src_in6.sin6_addr.s6_addr16[1] = 0;
+			}
+			if (key_sockaddrcmp((struct sockaddr*)&src_in6,
+			    (struct sockaddr *)&sah->saidx.src, 0) != 0) {
+				continue;
+			}
+			break;
+		default:
+			ipseclog((LOG_DEBUG, "key_checksa_present: "
+			    "unknown address family=%d.\n",
+			    family));
+			continue;
+		}
+
+		struct sockaddr_in dest_in = {};
+		struct sockaddr_in6 dest_in6 = {};
+
+		/* check dst address */
+		switch (family) {
+		case AF_INET:
+			dest_in.sin_family = AF_INET;
+			dest_in.sin_len = sizeof(dest_in);
+			memcpy(&dest_in.sin_addr, remote_addr, sizeof(dest_in.sin_addr));
+			if (key_sockaddrcmp((struct sockaddr*)&dest_in,
+			    (struct sockaddr *)&sah->saidx.dst, 0) != 0) {
+				continue;
+			}
+
+			break;
+		case AF_INET6:
+			dest_in6.sin6_family = AF_INET6;
+			dest_in6.sin6_len = sizeof(dest_in6);
+			memcpy(&dest_in6.sin6_addr, remote_addr, sizeof(dest_in6.sin6_addr));
+			if (IN6_IS_SCOPE_LINKLOCAL(&dest_in6.sin6_addr)) {
+				/* kame fake scopeid */
+				dest_in6.sin6_scope_id =
+				    ntohs(dest_in6.sin6_addr.s6_addr16[1]);
+				dest_in6.sin6_addr.s6_addr16[1] = 0;
+			}
+			if (key_sockaddrcmp((struct sockaddr*)&dest_in6,
+			    (struct sockaddr *)&sah->saidx.dst, 0) != 0) {
+				continue;
+			}
+
+			break;
+		default:
+			ipseclog((LOG_DEBUG, "key_checksa_present: "
+			    "unknown address family=%d.\n", family));
+			continue;
+		}
+
+		struct secasvar *nextsav = NULL;
+		for (u_int stateidx = 0; stateidx < _ARRAYLEN(saorder_state_alive); stateidx++) {
+			u_int state = saorder_state_alive[stateidx];
+			for (struct secasvar *sav = LIST_FIRST(&sah->savtree[state]); sav != NULL; sav = nextsav) {
+				nextsav = LIST_NEXT(sav, chain);
+				/* sanity check */
+				if (sav->state != state) {
+					ipseclog((LOG_DEBUG, "key_checksa_present: "
+					    "invalid sav->state "
+					    "(state: %d SA: %d)\n",
+					    state, sav->state));
+					continue;
+				}
+
+				if (sav->remote_ike_port != ntohs(remote_port)) {
+					continue;
+				}
+
+				if (sav->natt_encapsulated_src_port != local_port) {
+					continue;
+				}
+				found_sa = true;;
+				break;
+			}
+		}
+	}
+
+	/* not found */
+	lck_mtx_unlock(sadb_mutex);
+	return found_sa;
+}
+
 u_int16_t
 key_natt_get_translated_port(
 	struct secasvar *outsav)
@@ -1999,7 +2152,8 @@ key_msg2sp(
 				paddr = (struct sockaddr *)(xisr + 1);
 				uint8_t src_len = paddr->sa_len;
 
-				if (xisr->sadb_x_ipsecrequest_len < src_len) {
+				/* +sizeof(uint8_t) for dst_len below */
+				if (xisr->sadb_x_ipsecrequest_len < sizeof(*xisr) + src_len + sizeof(uint8_t)) {
 					ipseclog((LOG_DEBUG, "key_msg2sp: invalid request "
 					    "invalid source address length.\n"));
 					key_freesp(newsp, KEY_SADB_UNLOCKED);
@@ -2023,7 +2177,7 @@ key_msg2sp(
 				paddr = (struct sockaddr *)((caddr_t)paddr + paddr->sa_len);
 				uint8_t dst_len = paddr->sa_len;
 
-				if (xisr->sadb_x_ipsecrequest_len < (src_len + dst_len)) {
+				if (xisr->sadb_x_ipsecrequest_len < sizeof(*xisr) + src_len + dst_len) {
 					ipseclog((LOG_DEBUG, "key_msg2sp: invalid request "
 					    "invalid dest address length.\n"));
 					key_freesp(newsp, KEY_SADB_UNLOCKED);
@@ -3656,7 +3810,8 @@ static struct secashead *
 key_newsah(struct secasindex *saidx,
     ifnet_t ipsec_if,
     u_int outgoing_if,
-    u_int8_t dir)
+    u_int8_t dir,
+    u_int16_t flags)
 {
 	struct secashead *newsah;
 
@@ -3664,6 +3819,8 @@ key_newsah(struct secasindex *saidx,
 	if (saidx == NULL) {
 		panic("key_newsaidx: NULL pointer is passed.\n");
 	}
+
+	VERIFY(flags == SECURITY_ASSOCIATION_PFKEY || flags == SECURITY_ASSOCIATION_CUSTOM_IPSEC);
 
 	newsah = keydb_newsecashead();
 	if (newsah == NULL) {
@@ -3702,7 +3859,13 @@ key_newsah(struct secasindex *saidx,
 	newsah->dir = dir;
 	/* add to saidxtree */
 	newsah->state = SADB_SASTATE_MATURE;
-	LIST_INSERT_HEAD(&sahtree, newsah, chain);
+	newsah->flags = flags;
+
+	if (flags == SECURITY_ASSOCIATION_PFKEY) {
+		LIST_INSERT_HEAD(&sahtree, newsah, chain);
+	} else {
+		LIST_INSERT_HEAD(&custom_sahtree, newsah, chain);
+	}
 	key_start_timehandler();
 
 	return newsah;
@@ -4086,8 +4249,8 @@ key_delsav(
 	/* remove from SA header */
 	if (__LIST_CHAINED(sav)) {
 		LIST_REMOVE(sav, chain);
+		ipsec_sav_count--;
 	}
-	ipsec_sav_count--;
 
 	if (sav->spihash.le_prev || sav->spihash.le_next) {
 		LIST_REMOVE(sav, spihash);
@@ -4144,18 +4307,33 @@ key_delsav(
  *	others	: found, pointer to a SA.
  */
 static struct secashead *
-key_getsah(struct secasindex *saidx)
+key_getsah(struct secasindex *saidx, u_int16_t flags)
 {
 	struct secashead *sah;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
-	LIST_FOREACH(sah, &sahtree, chain) {
-		if (sah->state == SADB_SASTATE_DEAD) {
-			continue;
+	if ((flags & SECURITY_ASSOCIATION_ANY) == SECURITY_ASSOCIATION_ANY ||
+	    (flags & SECURITY_ASSOCIATION_PFKEY) == SECURITY_ASSOCIATION_PFKEY) {
+		LIST_FOREACH(sah, &sahtree, chain) {
+			if (sah->state == SADB_SASTATE_DEAD) {
+				continue;
+			}
+			if (key_cmpsaidx(&sah->saidx, saidx, CMP_REQID)) {
+				return sah;
+			}
 		}
-		if (key_cmpsaidx(&sah->saidx, saidx, CMP_REQID)) {
-			return sah;
+	}
+
+	if ((flags & SECURITY_ASSOCIATION_ANY) == SECURITY_ASSOCIATION_ANY ||
+	    (flags & SECURITY_ASSOCIATION_PFKEY) == SECURITY_ASSOCIATION_CUSTOM_IPSEC) {
+		LIST_FOREACH(sah, &custom_sahtree, chain) {
+			if (sah->state == SADB_SASTATE_DEAD) {
+				continue;
+			}
+			if (key_cmpsaidx(&sah->saidx, saidx, 0)) {
+				return sah;
+			}
 		}
 	}
 
@@ -4170,9 +4348,9 @@ key_newsah2(struct secasindex *saidx,
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
-	sah = key_getsah(saidx);
+	sah = key_getsah(saidx, SECURITY_ASSOCIATION_ANY);
 	if (!sah) {
-		return key_newsah(saidx, NULL, 0, dir);
+		return key_newsah(saidx, NULL, 0, dir, SECURITY_ASSOCIATION_PFKEY);
 	}
 	return sah;
 }
@@ -6872,13 +7050,19 @@ key_getspi(
 	}
 
 	/* get a SA index */
-	if ((newsah = key_getsah(&saidx)) == NULL) {
+	if ((newsah = key_getsah(&saidx, SECURITY_ASSOCIATION_ANY)) == NULL) {
 		/* create a new SA index: key_addspi is always used for inbound spi */
-		if ((newsah = key_newsah(&saidx, ipsec_if, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_IPSECIF), IPSEC_DIR_INBOUND)) == NULL) {
+		if ((newsah = key_newsah(&saidx, ipsec_if, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_IPSECIF), IPSEC_DIR_INBOUND, SECURITY_ASSOCIATION_PFKEY)) == NULL) {
 			lck_mtx_unlock(sadb_mutex);
 			ipseclog((LOG_DEBUG, "key_getspi: No more memory.\n"));
 			return key_senderror(so, m, ENOBUFS);
 		}
+	}
+
+	if ((newsah->flags & SECURITY_ASSOCIATION_CUSTOM_IPSEC) == SECURITY_ASSOCIATION_CUSTOM_IPSEC) {
+		lck_mtx_unlock(sadb_mutex);
+		ipseclog((LOG_ERR, "key_getspi: custom ipsec exists\n"));
+		return key_senderror(so, m, EEXIST);
 	}
 
 	/* get a new SA */
@@ -7196,7 +7380,7 @@ key_update(
 	lck_mtx_lock(sadb_mutex);
 
 	/* get a SA header */
-	if ((sah = key_getsah(&saidx)) == NULL) {
+	if ((sah = key_getsah(&saidx, SECURITY_ASSOCIATION_PFKEY)) == NULL) {
 		lck_mtx_unlock(sadb_mutex);
 		ipseclog((LOG_DEBUG, "key_update: no SA index found.\n"));
 		return key_senderror(so, m, ENOENT);
@@ -7394,12 +7578,18 @@ key_migrate(struct socket *so,
 	/* Find or create new SAH */
 	KEY_SETSECASIDX(proto, sah->saidx.mode, sah->saidx.reqid, src1 + 1, dst1 + 1, ipsec_if1 ? ipsec_if1->if_index : 0, &saidx1);
 
-	if ((newsah = key_getsah(&saidx1)) == NULL) {
-		if ((newsah = key_newsah(&saidx1, ipsec_if1, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_MIGRATE_IPSECIF), sah->dir)) == NULL) {
+	if ((newsah = key_getsah(&saidx1, SECURITY_ASSOCIATION_ANY)) == NULL) {
+		if ((newsah = key_newsah(&saidx1, ipsec_if1, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_MIGRATE_IPSECIF), sah->dir, SECURITY_ASSOCIATION_PFKEY)) == NULL) {
 			lck_mtx_unlock(sadb_mutex);
 			ipseclog((LOG_DEBUG, "key_migrate: No more memory.\n"));
 			return key_senderror(so, m, ENOBUFS);
 		}
+	}
+
+	if ((newsah->flags & SECURITY_ASSOCIATION_CUSTOM_IPSEC) == SECURITY_ASSOCIATION_CUSTOM_IPSEC) {
+		lck_mtx_unlock(sadb_mutex);
+		ipseclog((LOG_ERR, "key_migrate: custom ipsec exists\n"));
+		return key_senderror(so, m, EEXIST);
 	}
 
 	/* Migrate SAV in to new SAH */
@@ -7586,14 +7776,21 @@ key_add(
 	lck_mtx_lock(sadb_mutex);
 
 	/* get a SA header */
-	if ((newsah = key_getsah(&saidx)) == NULL) {
+	if ((newsah = key_getsah(&saidx, SECURITY_ASSOCIATION_ANY)) == NULL) {
 		/* create a new SA header: key_addspi is always used for outbound spi */
-		if ((newsah = key_newsah(&saidx, ipsec_if, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_IPSECIF), IPSEC_DIR_OUTBOUND)) == NULL) {
+		if ((newsah = key_newsah(&saidx, ipsec_if, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_IPSECIF), IPSEC_DIR_OUTBOUND, SECURITY_ASSOCIATION_PFKEY)) == NULL) {
 			lck_mtx_unlock(sadb_mutex);
 			ipseclog((LOG_DEBUG, "key_add: No more memory.\n"));
 			bzero_keys(mhp);
 			return key_senderror(so, m, ENOBUFS);
 		}
+	}
+
+	if ((newsah->flags & SECURITY_ASSOCIATION_CUSTOM_IPSEC) == SECURITY_ASSOCIATION_CUSTOM_IPSEC) {
+		lck_mtx_unlock(sadb_mutex);
+		ipseclog((LOG_ERR, "key_add: custom ipsec exists\n"));
+		bzero_keys(mhp);
+		return key_senderror(so, m, EEXIST);
 	}
 
 	/* set spidx if there */
@@ -10732,4 +10929,116 @@ key_fill_offload_frames_for_savs(ifnet_t ifp,
 	lck_mtx_unlock(sadb_mutex);
 
 	return frame_index;
+}
+
+#pragma mark Custom IPsec
+
+__private_extern__ bool
+key_custom_ipsec_token_is_valid(void *ipsec_token)
+{
+	if (ipsec_token == NULL) {
+		return false;
+	}
+
+	struct secashead *sah = (struct secashead *)ipsec_token;
+
+	return (sah->flags & SECURITY_ASSOCIATION_CUSTOM_IPSEC) == SECURITY_ASSOCIATION_CUSTOM_IPSEC;
+}
+
+__private_extern__ int
+key_reserve_custom_ipsec(void **ipsec_token, union sockaddr_in_4_6 *src, union sockaddr_in_4_6 *dst,
+    u_int8_t proto)
+{
+	if (src == NULL || dst == NULL) {
+		ipseclog((LOG_ERR, "register custom ipsec: invalid address\n"));
+		return EINVAL;
+	}
+
+	if (src->sa.sa_family != dst->sa.sa_family) {
+		ipseclog((LOG_ERR, "register custom ipsec: address family mismatched\n"));
+		return EINVAL;
+	}
+
+	if (src->sa.sa_len != dst->sa.sa_len) {
+		ipseclog((LOG_ERR, "register custom ipsec: address struct size mismatched\n"));
+		return EINVAL;
+	}
+
+	if (ipsec_token == NULL) {
+		ipseclog((LOG_ERR, "register custom ipsec: invalid ipsec token\n"));
+		return EINVAL;
+	}
+
+	switch (src->sa.sa_family) {
+	case AF_INET:
+		if (src->sa.sa_len != sizeof(struct sockaddr_in)) {
+			ipseclog((LOG_ERR, "register custom esp: invalid address length\n"));
+			return EINVAL;
+		}
+		break;
+	case AF_INET6:
+		if (src->sa.sa_len != sizeof(struct sockaddr_in6)) {
+			ipseclog((LOG_ERR, "register custom esp: invalid address length\n"));
+			return EINVAL;
+		}
+		break;
+	default:
+		ipseclog((LOG_ERR, "register custom esp: invalid address length\n"));
+		return EAFNOSUPPORT;
+	}
+
+	if (proto != IPPROTO_ESP && proto != IPPROTO_AH) {
+		ipseclog((LOG_ERR, "register custom esp: invalid proto %u\n", proto));
+		return EINVAL;
+	}
+
+	struct secasindex saidx = {};
+	KEY_SETSECASIDX(proto, IPSEC_MODE_ANY, 0, &src->sa, &dst->sa, 0, &saidx);
+
+	lck_mtx_lock(sadb_mutex);
+
+	struct secashead *sah = NULL;
+	if ((sah = key_getsah(&saidx, SECURITY_ASSOCIATION_ANY)) != NULL) {
+		lck_mtx_unlock(sadb_mutex);
+		ipseclog((LOG_ERR, "register custom esp: SA exists\n"));
+		return EEXIST;
+	}
+
+	if ((sah = key_newsah(&saidx, NULL, 0, IPSEC_DIR_ANY, SECURITY_ASSOCIATION_CUSTOM_IPSEC)) == NULL) {
+		lck_mtx_unlock(sadb_mutex);
+		ipseclog((LOG_DEBUG, "register custom esp: No more memory.\n"));
+		return ENOBUFS;
+	}
+
+	*ipsec_token = (void *)sah;
+
+	lck_mtx_unlock(sadb_mutex);
+	return 0;
+}
+
+__private_extern__ void
+key_release_custom_ipsec(void **ipsec_token)
+{
+	struct secashead *sah = *ipsec_token;
+	VERIFY(sah != NULL);
+
+	lck_mtx_lock(sadb_mutex);
+
+	VERIFY((sah->flags & SECURITY_ASSOCIATION_CUSTOM_IPSEC) == SECURITY_ASSOCIATION_CUSTOM_IPSEC);
+
+	bool sa_present = true;
+	if (LIST_FIRST(&sah->savtree[SADB_SASTATE_LARVAL]) == NULL &&
+	    LIST_FIRST(&sah->savtree[SADB_SASTATE_MATURE]) == NULL &&
+	    LIST_FIRST(&sah->savtree[SADB_SASTATE_DYING]) == NULL &&
+	    LIST_FIRST(&sah->savtree[SADB_SASTATE_DEAD]) == NULL) {
+		sa_present = false;
+	}
+	VERIFY(sa_present == false);
+
+	key_delsah(sah);
+
+	lck_mtx_unlock(sadb_mutex);
+
+	*ipsec_token = NULL;
+	return;
 }

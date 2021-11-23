@@ -158,7 +158,6 @@ machine_thread_create(thread_t thread,
 	}
 	thread->machine.preemption_count = 0;
 	thread->machine.cthread_self = 0;
-	thread->machine.cthread_data = 0;
 #if defined(HAS_APPLE_PAC)
 	thread->machine.rop_pid = task->rop_pid;
 	thread->machine.disable_user_jop = task->disable_user_jop;
@@ -272,6 +271,15 @@ machine_thread_init(void)
 
 }
 
+/*
+ * Routine:	machine_thread_template_init
+ *
+ */
+void
+machine_thread_template_init(thread_t __unused thr_template)
+{
+	/* Nothing to do on this platform. */
+}
 
 /*
  * Routine: get_useraddr
@@ -335,6 +343,7 @@ machine_stack_attach(thread_t thread,
 #if defined(HAS_APPLE_PAC)
 	/* Sign the initial kernel stack saved state */
 	const uint32_t default_cpsr = PSR64_KERNEL_DEFAULT & ~PSR64_MODE_EL_MASK;
+	boolean_t intr = ml_set_interrupts_enabled(FALSE);
 	asm volatile (
 		"mov	x0, %[ss]"				"\n"
 
@@ -368,6 +377,7 @@ machine_stack_attach(thread_t thread,
 		  [SS64_LR]		"i"(offsetof(struct arm_saved_state, ss_64.lr))
 		: "x0", "x1", "x2", "x3", "x4", "x5", "x6"
 	);
+	ml_set_interrupts_enabled(intr);
 #else
 	savestate->lr = (uintptr_t)thread_continue;
 	savestate->cpsr = (PSR64_KERNEL_DEFAULT & ~PSR64_MODE_EL_MASK) | current_el;

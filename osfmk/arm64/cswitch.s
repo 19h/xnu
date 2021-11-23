@@ -146,13 +146,14 @@
  */
 .macro	set_thread_registers
 	msr		TPIDR_EL1, $0						// Write new thread pointer to TPIDR_EL1
+	ldr		$1, [$0, ACT_CPUDATAP]
+	str		$0, [$1, CPU_ACTIVE_THREAD]
 	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
 	mrs		$2, TPIDRRO_EL0						// Extract cpu number from TPIDRRO_EL0
 	and		$2, $2, #(MACHDEP_CPUNUM_MASK)
 	orr		$2, $1, $2							// Save new cthread/cpu to TPIDRRO_EL0
 	msr		TPIDRRO_EL0, $2
-	ldr		$1, [$0, TH_CTH_DATA]				// Get new cthread data pointer
-	msr		TPIDR_EL0, $1						// Save data pointer to TPIDRRW_EL0
+	msr		TPIDR_EL0, xzr
 	/* ARM64_TODO Reserve x18 until we decide what to do with it */
 	mov		x18, $1								// ... and trash reserved x18
 .endmacro
