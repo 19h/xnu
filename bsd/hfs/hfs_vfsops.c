@@ -999,7 +999,7 @@ hfs_syncer(void *arg0, void *unused)
     //
     if (hfsmp->hfs_mp->mnt_pending_write_size > hfsmp->hfs_max_pending_io) {
 	    int counter=0;
-	    uint64_t pending_io, start, rate;
+	    uint64_t pending_io, start, rate = 0;
 	    
 	    no_max = 0;
 
@@ -1027,7 +1027,9 @@ hfs_syncer(void *arg0, void *unused)
 	    clock_get_calendar_microtime(&secs, &usecs);
 	    now = ((uint64_t)secs * 1000000ULL) + (uint64_t)usecs;
 	    hfsmp->hfs_last_sync_time = now;
-	    rate = ((pending_io * 1000000ULL) / (now - start));     // yields bytes per second
+	    if (now != start) {
+		    rate = ((pending_io * 1000000ULL) / (now - start));     // yields bytes per second
+	    }
 
 	    hfs_end_transaction(hfsmp);
 	    
@@ -1037,7 +1039,7 @@ hfs_syncer(void *arg0, void *unused)
 	    // than 2 seconds, adjust hfs_max_pending_io so that we
 	    // will allow about 1.5 seconds of i/o to queue up.
 	    //
-	    if ((now - start) >= 300000) {
+	    if (((now - start) >= 300000) && (rate != 0)) {
 		    uint64_t scale = (pending_io * 100) / rate;
 		    
 		    if (scale < 100 || scale > 200) {
@@ -3964,6 +3966,9 @@ hfs_extendfs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context)
 	hfsmp->hfs_flags |= HFS_RESIZE_IN_PROGRESS;
 	HFS_MOUNT_UNLOCK(hfsmp, TRUE);
 
+	/* Start with a clean journal. */
+	hfs_journal_flush(hfsmp, TRUE);
+
 	/*
 	 * Enclose changes inside a transaction.
 	 */
@@ -4242,6 +4247,9 @@ out:
 	}
 	if (transaction_begun) {
 		hfs_end_transaction(hfsmp);
+		hfs_journal_flush(hfsmp, FALSE);
+		/* Just to be sure, sync all data to the disk */
+		(void) VNOP_IOCTL(hfsmp->hfs_devvp, DKIOCSYNCHRONIZECACHE, NULL, FWRITE, context);
 	}
 
 	return MacToVFSError(error);
