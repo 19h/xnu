@@ -383,7 +383,7 @@ class IOServiceUserNotification : public IOUserNotification
         OSNotificationHeader		notifyHeader;
     };
 
-    enum { kMaxOutstanding = 256 };
+    enum { kMaxOutstanding = 1024 };
 
     PingMsg *		pingMsg;
     vm_size_t		msgSize;
@@ -1963,6 +1963,33 @@ kern_return_t is_io_connect_map_memory(
 	err = kIOReturnBadArgument;
 
     return( err );
+}
+
+IOMemoryMap * IOUserClient::removeMappingForDescriptor(IOMemoryDescriptor * mem)
+{
+    OSIterator *  iter;
+    IOMemoryMap * map = 0;
+
+    IOLockLock(gIOObjectPortLock);
+
+    iter = OSCollectionIterator::withCollection(mappings);
+    if(iter)
+    {
+        while ((map = OSDynamicCast(IOMemoryMap, iter->getNextObject())))
+        {
+            if(mem == map->getMemoryDescriptor())
+            {
+                map->retain();
+                mappings->removeObject(map);
+                break;
+            }
+        }
+        iter->release();
+    }
+
+    IOLockUnlock(gIOObjectPortLock);
+
+    return (map);
 }
 
 kern_return_t is_io_connect_unmap_memory(
