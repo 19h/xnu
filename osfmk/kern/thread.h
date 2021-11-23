@@ -214,7 +214,7 @@ struct thread {
 #define TH_OPT_SCHED_VM_GROUP   0x0200          /* Thread belongs to special scheduler VM group */
 #define TH_OPT_HONOR_QLIMIT     0x0400          /* Thread will honor qlimit while sending mach_msg, regardless of MACH_SEND_ALWAYS */
 #define TH_OPT_SEND_IMPORTANCE  0x0800          /* Thread will allow importance donation from kernel rpc */
-#define TH_OPT_ZONE_PRIV        0x1000          /* Thread may use the zone replenish reserve */
+#define TH_OPT_ZONE_GC          0x1000          /* zone_gc() called on this thread */
 
 	bool                            wake_active;    /* wake event on stop */
 	bool                            at_safe_point;  /* thread_abort_safely allowed */
@@ -283,10 +283,6 @@ struct thread {
 #define TH_SFLAG_BASE_PRI_FROZEN        0x0800          /* (effective) base_pri is frozen */
 #define TH_SFLAG_WAITQ_PROMOTED         0x1000          /* promote reason: waitq wakeup (generally for IPC receive) */
 
-#if __AMP__
-#define TH_SFLAG_ECORE_ONLY             0x2000          /* Bind thread to E core processor set */
-#define TH_SFLAG_PCORE_ONLY             0x4000          /* Bind thread to P core processor set */
-#endif
 
 #define TH_SFLAG_EXEC_PROMOTED          0x8000          /* promote reason: thread is in an exec */
 
@@ -675,9 +671,7 @@ struct thread {
 #define assert_thread_magic(thread) do { (void)(thread); } while (0)
 #endif
 
-extern thread_t                 thread_bootstrap(void);
-
-extern void                     thread_machine_init_template(void);
+extern void                     thread_bootstrap(void);
 
 extern void                     thread_init(void);
 
@@ -863,9 +857,7 @@ extern kern_return_t    machine_thread_dup(
 	thread_t                target,
 	boolean_t               is_corpse);
 
-extern void             machine_thread_init(void);
-
-extern void             machine_thread_template_init(thread_t thr_template);
+extern void                             machine_thread_init(void);
 
 extern kern_return_t    machine_thread_create(
 	thread_t                thread,

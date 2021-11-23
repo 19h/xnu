@@ -1413,15 +1413,13 @@ host_security_self(void)
 }
 
 kern_return_t
-host_set_atm_diagnostic_flag(host_t host, uint32_t diagnostic_flag)
+host_set_atm_diagnostic_flag(host_priv_t host_priv, uint32_t diagnostic_flag)
 {
-	if (host == HOST_NULL) {
+	if (host_priv == HOST_PRIV_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (!IOTaskHasEntitlement(current_task(), "com.apple.private.set-atm-diagnostic-flag")) {
-		return KERN_NO_ACCESS;
-	}
+	assert(host_priv == &realhost);
 
 #if CONFIG_ATM
 	return atm_set_diagnostic_config(diagnostic_flag);

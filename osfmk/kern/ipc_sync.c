@@ -108,7 +108,7 @@ convert_port_to_semaphore(ipc_port_t port)
 		 */
 		if (ip_kotype(port) == IKOT_SEMAPHORE) {
 			require_ip_active(port);
-			semaphore = (semaphore_t) ip_get_kobject(port);
+			semaphore = (semaphore_t) port->ip_kobject;
 			semaphore_reference(semaphore);
 			return semaphore;
 		}
@@ -169,7 +169,7 @@ semaphore_notify(mach_msg_header_t *msg)
 	require_ip_active(port);
 	assert(IKOT_SEMAPHORE == ip_kotype(port));
 
-	semaphore_dereference((semaphore_t) ip_get_kobject(port));
+	semaphore_dereference((semaphore_t)port->ip_kobject);
 }
 
 lock_set_t

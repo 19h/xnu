@@ -147,10 +147,6 @@ typedef enum {
 
 typedef enum {
 	PSET_SMP,
-#if __AMP__
-	PSET_AMP_E,
-	PSET_AMP_P,
-#endif
 } pset_cluster_type_t;
 
 typedef bitmap_t cpumap_t;

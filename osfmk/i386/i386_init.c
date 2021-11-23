@@ -259,7 +259,7 @@ physmap_init_L3(int startIndex, uint64_t highest_phys, uint64_t *physStart, pt_e
 }
 
 static void
-physmap_init(uint8_t phys_random_L3, uint64_t *new_physmap_base, uint64_t *new_physmap_max)
+physmap_init(uint8_t phys_random_L3)
 {
 	pt_entry_t *l3pte;
 	int pml4_index, i;
@@ -341,14 +341,14 @@ physmap_init(uint8_t phys_random_L3, uint64_t *new_physmap_base, uint64_t *new_p
 		    | INTEL_PTE_WRITE;
 	}
 
-	*new_physmap_base = KVADDR(kernPhysPML4Index, phys_random_L3, 0, 0);
+	physmap_base = KVADDR(kernPhysPML4Index, phys_random_L3, 0, 0);
 	/*
 	 * physAddr contains the last-mapped physical address, so that's what we
 	 * add to physmap_base to derive the ending VA for the physmap.
 	 */
-	*new_physmap_max = *new_physmap_base + physAddr;
+	physmap_max = physmap_base + physAddr;
 
-	DBG("Physical address map base: 0x%qx\n", *new_physmap_base);
+	DBG("Physical address map base: 0x%qx\n", physmap_base);
 	for (i = kernPhysPML4Index; i < (kernPhysPML4Index + kernPhysPML4EntryCount); i++) {
 		DBG("Physical map idlepml4[%d]: 0x%llx\n", i, IdlePML4[i]);
 	}
@@ -360,7 +360,6 @@ static void
 Idle_PTs_init(void)
 {
 	uint64_t        rand64;
-	uint64_t        new_physmap_base, new_physmap_max;
 
 	/* Allocate the "idle" kernel page tables: */
 	KPTphys  = ALLOCPAGES(NKPT);            /* level 1 */
@@ -392,22 +391,13 @@ Idle_PTs_init(void)
 	 * two 8-bit entropy values needed for address randomization.
 	 */
 	rand64 = early_random();
-	physmap_init(rand64 & 0xFF, &new_physmap_base, &new_physmap_max);
+	physmap_init(rand64 & 0xFF);
 	doublemap_init((rand64 >> 8) & 0xFF);
 	idt64_remap();
 
 	postcode(VSTART_SET_CR3);
 
-	/*
-	 * Switch to the page tables. We set physmap_base and physmap_max just
-	 * before switching to the new page tables to avoid someone calling
-	 * kprintf() or otherwise using physical memory in between.
-	 * This is needed because kprintf() writes to physical memory using
-	 * ml_phys_read_data and PHYSMAP_PTOV, which requires physmap_base to be
-	 * set correctly.
-	 */
-	physmap_base = new_physmap_base;
-	physmap_max = new_physmap_max;
+	// Switch to the page tables..
 	set_cr3_raw((uintptr_t)ID_MAP_VTOP(IdlePML4));
 }
 
@@ -579,10 +569,6 @@ vstart(vm_offset_t boot_args_start)
 	boolean_t       is_boot_cpu = !(boot_args_start == 0);
 	int             cpu = 0;
 	uint32_t        lphysfree;
-#if DEBUG
-	uint64_t        gsbase;
-#endif
-
 
 	postcode(VSTART_ENTRY);
 
@@ -671,11 +657,8 @@ vstart(vm_offset_t boot_args_start)
 		set_cr3_raw((uintptr_t)ID_MAP_VTOP(IdlePML4));
 		/* Find our logical cpu number */
 		cpu = lapic_to_cpu[(LAPIC_READ(ID) >> LAPIC_ID_SHIFT) & LAPIC_ID_MASK];
-#if DEBUG
-		gsbase = rdmsr64(MSR_IA32_GS_BASE);
-#endif
+		DBG("CPU: %d, GSBASE initial value: 0x%llx\n", cpu, rdmsr64(MSR_IA32_GS_BASE));
 		cpu_desc_load(cpu_datap(cpu));
-		DBG("CPU: %d, GSBASE initial value: 0x%llx\n", cpu, gsbase);
 	}
 
 	early_boot = 0;
@@ -721,8 +704,6 @@ i386_init(void)
 
 	lck_mod_init();
 
-	printf_init();                  /* Init this in case we need debugger */
-
 	/*
 	 * Initialize the timer callout world
 	 */
@@ -732,6 +713,7 @@ i386_init(void)
 
 	postcode(CPU_INIT_D);
 
+	printf_init();                  /* Init this in case we need debugger */
 	panic_init();                   /* Init this in case we need debugger */
 
 	/* setup debugging output if one has been chosen */
@@ -829,8 +811,7 @@ i386_init(void)
 #endif /* MONOTONIC */
 
 	processor_bootstrap();
-	thread_t thread = thread_bootstrap();
-	machine_set_current_thread(thread);
+	thread_bootstrap();
 
 	pstate_trace();
 	kernel_debug_string_early("machine_startup");
@@ -871,8 +852,8 @@ do_init_slave(boolean_t fast_restart)
 #if CONFIG_MTRR
 		mtrr_update_cpu();
 #endif
-		/* update CPU microcode and apply CPU workarounds */
-		ucode_update_wake_and_apply_cpu_was();
+		/* update CPU microcode */
+		ucode_update_wake();
 	} else {
 		init_param = FAST_SLAVE_INIT;
 	}

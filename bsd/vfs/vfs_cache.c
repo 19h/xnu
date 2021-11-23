@@ -428,14 +428,12 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
  *
  */
 int
-build_path_with_parent(vnode_t first_vp, vnode_t parent_vp, char *buff, int buflen,
-    int *outlen, size_t *mntpt_outlen, int flags, vfs_context_t ctx)
+build_path_with_parent(vnode_t first_vp, vnode_t parent_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx)
 {
 	vnode_t vp, tvp;
 	vnode_t vp_with_iocount;
 	vnode_t proc_root_dir_vp;
 	char *end;
-	char *mntpt_end;
 	const char *str;
 	int  len;
 	int  ret = 0;
@@ -452,7 +450,7 @@ build_path_with_parent(vnode_t first_vp, vnode_t parent_vp, char *buff, int bufl
 	/*
 	 * Grab the process fd so we can evaluate fd_rdir.
 	 */
-	if (vfs_context_proc(ctx)->p_fd && !(flags & BUILDPATH_NO_PROCROOT)) {
+	if (vfs_context_proc(ctx)->p_fd) {
 		proc_root_dir_vp = vfs_context_proc(ctx)->p_fd->fd_rdir;
 	} else {
 		proc_root_dir_vp = NULL;
@@ -464,7 +462,6 @@ again:
 
 	end = &buff[buflen - 1];
 	*end = '\0';
-	mntpt_end = NULL;
 
 	/*
 	 * holding the NAME_CACHE_LOCK in shared mode is
@@ -523,9 +520,6 @@ again:
 				goto out_unlock;
 			} else {
 				vp = vp->v_mount->mnt_vnodecovered;
-				if (!mntpt_end && vp) {
-					mntpt_end = end;
-				}
 			}
 		}
 	}
@@ -767,9 +761,6 @@ bad_news:
 				tvp = NULL;
 			} else {
 				tvp = tvp->v_mount->mnt_vnodecovered;
-				if (!mntpt_end && tvp) {
-					mntpt_end = end;
-				}
 			}
 		}
 		if (tvp == NULLVP) {
@@ -791,10 +782,7 @@ out:
 	/*
 	 * length includes the trailing zero byte
 	 */
-	*outlen = (int)(&buff[buflen] - end);
-	if (mntpt_outlen && mntpt_end) {
-		*mntpt_outlen = (size_t)*outlen - (size_t)(&buff[buflen] - mntpt_end);
-	}
+	*outlen = &buff[buflen] - end;
 
 	/* One of the parents was moved during path reconstruction.
 	 * The caller is interested in knowing whether any of the
@@ -810,7 +798,7 @@ out:
 int
 build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx)
 {
-	return build_path_with_parent(first_vp, NULL, buff, buflen, outlen, NULL, flags, ctx);
+	return build_path_with_parent(first_vp, NULL, buff, buflen, outlen, flags, ctx);
 }
 
 /*

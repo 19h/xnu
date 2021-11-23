@@ -557,12 +557,16 @@ IOCatalogue::unloadModule(OSString * moduleName) const
 }
 
 IOReturn
-IOCatalogue::terminateDrivers(OSDictionary * matching, io_name_t className)
+IOCatalogue::_terminateDrivers(OSDictionary * matching)
 {
 	OSDictionary         * dict;
 	OSIterator           * iter;
 	IOService            * service;
 	IOReturn               ret;
+
+	if (!matching) {
+		return kIOReturnBadArgument;
+	}
 
 	ret = kIOReturnSuccess;
 	dict = NULL;
@@ -572,70 +576,25 @@ IOCatalogue::terminateDrivers(OSDictionary * matching, io_name_t className)
 		return kIOReturnNoMemory;
 	}
 
-	if (matching) {
-		OSKext::uniquePersonalityProperties( matching );
-	}
+	OSKext::uniquePersonalityProperties( matching );
 
 	// terminate instances.
 	do {
 		iter->reset();
 		while ((service = (IOService *)iter->getNextObject())) {
-			if (className && !service->metaCast(className)) {
+			dict = service->getPropertyTable();
+			if (!dict) {
 				continue;
 			}
-			if (matching) {
-				/* Terminate only for personalities that match the matching dictionary.
-				 * This comparison must be done with only the keys in the
-				 * "matching" dict to enable general matching.
-				 */
-				dict = service->getPropertyTable();
-				if (!dict) {
-					continue;
-				}
-				if (!dict->isEqualTo(matching, matching)) {
-					continue;
-				}
+
+			/* Terminate only for personalities that match the matching dictionary.
+			 * This comparison must be done with only the keys in the
+			 * "matching" dict to enable general matching.
+			 */
+			if (!dict->isEqualTo(matching, matching)) {
+				continue;
 			}
 
-			OSKext     * kext;
-			const char * bundleIDStr;
-			OSObject   * prop;
-			bool         okToTerminate;
-			for (okToTerminate = true;;) {
-				kext = service->getMetaClass()->getKext();
-				if (!kext) {
-					break;
-				}
-				bundleIDStr = kext->getIdentifierCString();
-				if (!bundleIDStr) {
-					break;
-				}
-				prop = kext->getPropertyForHostArch(kOSBundleAllowUserTerminateKey);
-				if (prop) {
-					okToTerminate = (kOSBooleanTrue == prop);
-					break;
-				}
-				if (!strcmp(kOSKextKernelIdentifier, bundleIDStr)) {
-					okToTerminate = false;
-					break;
-				}
-				if (!strncmp("com.apple.", bundleIDStr, strlen("com.apple."))) {
-					okToTerminate = false;
-					break;
-				}
-				break;
-			}
-			if (!okToTerminate) {
-#if DEVELOPMENT || DEBUG
-				okToTerminate = true;
-#endif /* DEVELOPMENT || DEBUG */
-				IOLog("%sallowing kextunload terminate for bundleID %s\n",
-				    okToTerminate ? "" : "dis", bundleIDStr ? bundleIDStr : "?");
-				if (!okToTerminate) {
-					ret = kIOReturnUnsupported;
-					break;
-				}
-			}
 			if (!service->terminate(kIOServiceRequired | kIOServiceSynchronous)) {
 				ret = kIOReturnUnsupported;
 				break;
@@ -690,10 +649,7 @@ IOCatalogue::terminateDrivers(OSDictionary * matching)
 {
 	IOReturn ret;
 
-	if (!matching) {
-		return kIOReturnBadArgument;
-	}
-	ret = terminateDrivers(matching, NULL);
+	ret = _terminateDrivers(matching);
 	IORWLockWrite(lock);
 	if (kIOReturnSuccess == ret) {
 		ret = _removeDrivers(matching);
@@ -739,7 +695,7 @@ IOCatalogue::terminateDriversForModule(
 
 	dict->setObject(gIOModuleIdentifierKey, moduleName);
 
-	ret = terminateDrivers(dict, NULL);
+	ret = _terminateDrivers(dict);
 
 	/* No goto between IOLock calls!
 	 */

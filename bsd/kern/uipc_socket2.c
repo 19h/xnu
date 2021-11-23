@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2019 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -118,9 +118,6 @@ static struct socket *sonewconn_internal(struct socket *, int);
 static int sbappendcontrol_internal(struct sockbuf *, struct mbuf *,
     struct mbuf *);
 static void soevent_ifdenied(struct socket *);
-
-static int sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop);
-static int sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop);
 
 /*
  * Primitive routines for operating on sockets and socket buffers
@@ -875,13 +872,13 @@ sbrelease(struct sockbuf *sb)
  * the mbuf chain is recorded in sb.  Empty mbufs are
  * discarded and mbufs are compacted where possible.
  */
-static int
-sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
+int
+sbappend(struct sockbuf *sb, struct mbuf *m)
 {
 	struct socket *so = sb->sb_so;
 
 	if (m == NULL || (sb->sb_flags & SB_DROP)) {
-		if (m != NULL && !nodrop) {
+		if (m != NULL) {
 			m_freem(m);
 		}
 		return 0;
@@ -890,30 +887,27 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 	SBLASTRECORDCHK(sb, "sbappend 1");
 
 	if (sb->sb_lastrecord != NULL && (sb->sb_mbtail->m_flags & M_EOR)) {
-		return sbappendrecord_common(sb, m, nodrop);
+		return sbappendrecord(sb, m);
 	}
 
-	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
-		ASSERT(nodrop == FALSE);
-		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
-			int error = sflt_data_in(so, NULL, &m, NULL, 0);
-			SBLASTRECORDCHK(sb, "sbappend 2");
+	if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
+		int error = sflt_data_in(so, NULL, &m, NULL, 0);
+		SBLASTRECORDCHK(sb, "sbappend 2");
 
 #if CONTENT_FILTER
-			if (error == 0) {
-				error = cfil_sock_data_in(so, NULL, m, NULL, 0);
-			}
+		if (error == 0) {
+			error = cfil_sock_data_in(so, NULL, m, NULL, 0);
+		}
 #endif /* CONTENT_FILTER */
 
-			if (error != 0) {
-				if (error != EJUSTRETURN) {
-					m_freem(m);
-				}
-				return 0;
+		if (error != 0) {
+			if (error != EJUSTRETURN) {
+				m_freem(m);
 			}
-		} else if (m) {
-			m->m_flags &= ~M_SKIPCFIL;
+			return 0;
 		}
+	} else if (m) {
+		m->m_flags &= ~M_SKIPCFIL;
 	}
 
 	/* If this is the first record, it's also the last record */
@@ -924,18 +918,6 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 	sbcompress(sb, m, sb->sb_mbtail);
 	SBLASTRECORDCHK(sb, "sbappend 3");
 	return 1;
-}
-
-int
-sbappend(struct sockbuf *sb, struct mbuf *m)
-{
-	return sbappend_common(sb, m, FALSE);
-}
-
-int
-sbappend_nodrop(struct sockbuf *sb, struct mbuf *m)
-{
-	return sbappend_common(sb, m, TRUE);
 }
 
 /*
@@ -961,26 +943,24 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 
 	SBLASTMBUFCHK(sb, __func__);
 
-	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
-		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
-			int error = sflt_data_in(so, NULL, &m, NULL, 0);
-			SBLASTRECORDCHK(sb, "sbappendstream 1");
+	if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
+		int error = sflt_data_in(so, NULL, &m, NULL, 0);
+		SBLASTRECORDCHK(sb, "sbappendstream 1");
 
 #if CONTENT_FILTER
-			if (error == 0) {
-				error = cfil_sock_data_in(so, NULL, m, NULL, 0);
-			}
+		if (error == 0) {
+			error = cfil_sock_data_in(so, NULL, m, NULL, 0);
+		}
 #endif /* CONTENT_FILTER */
 
-			if (error != 0) {
-				if (error != EJUSTRETURN) {
-					m_freem(m);
-				}
-				return 0;
+		if (error != 0) {
+			if (error != EJUSTRETURN) {
+				m_freem(m);
 			}
-		} else if (m) {
-			m->m_flags &= ~M_SKIPCFIL;
+			return 0;
 		}
+	} else if (m) {
+		m->m_flags &= ~M_SKIPCFIL;
 	}
 
 	sbcompress(sb, m, sb->sb_mbtail);
@@ -1086,14 +1066,14 @@ sblastmbufchk(struct sockbuf *sb, const char *where)
 /*
  * Similar to sbappend, except the mbuf chain begins a new record.
  */
-static int
-sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
+int
+sbappendrecord(struct sockbuf *sb, struct mbuf *m0)
 {
 	struct mbuf *m;
 	int space = 0;
 
 	if (m0 == NULL || (sb->sb_flags & SB_DROP)) {
-		if (m0 != NULL && nodrop == FALSE) {
+		if (m0 != NULL) {
 			m_freem(m0);
 		}
 		return 0;
@@ -1104,34 +1084,29 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 	}
 
 	if (space > sbspace(sb) && !(sb->sb_flags & SB_UNIX)) {
-		if (nodrop == FALSE) {
-			m_freem(m0);
-		}
+		m_freem(m0);
 		return 0;
 	}
 
-	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
-		ASSERT(nodrop == FALSE);
-		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
-			int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL,
-			    sock_data_filt_flag_record);
+	if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
+		int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL,
+		    sock_data_filt_flag_record);
 
 #if CONTENT_FILTER
-			if (error == 0) {
-				error = cfil_sock_data_in(sb->sb_so, NULL, m0, NULL, 0);
-			}
+		if (error == 0) {
+			error = cfil_sock_data_in(sb->sb_so, NULL, m0, NULL, 0);
+		}
 #endif /* CONTENT_FILTER */
 
-			if (error != 0) {
-				SBLASTRECORDCHK(sb, "sbappendrecord 1");
-				if (error != EJUSTRETURN) {
-					m_freem(m0);
-				}
-				return 0;
+		if (error != 0) {
+			SBLASTRECORDCHK(sb, "sbappendrecord 1");
+			if (error != EJUSTRETURN) {
+				m_freem(m0);
 			}
-		} else if (m0) {
-			m0->m_flags &= ~M_SKIPCFIL;
+			return 0;
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	/*
@@ -1156,18 +1131,6 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 	sbcompress(sb, m, m0);
 	SBLASTRECORDCHK(sb, "sbappendrecord 3");
 	return 1;
-}
-
-int
-sbappendrecord(struct sockbuf *sb, struct mbuf *m0)
-{
-	return sbappendrecord_common(sb, m0, FALSE);
-}
-
-int
-sbappendrecord_nodrop(struct sockbuf *sb, struct mbuf *m0)
-{
-	return sbappendrecord_common(sb, m0, TRUE);
 }
 
 /*
@@ -1313,37 +1276,35 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 		return 0;
 	}
 
-	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
-		/* Call socket data in filters */
-		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
-			int error;
-			error = sflt_data_in(sb->sb_so, asa, &m0, &control, 0);
-			SBLASTRECORDCHK(sb, __func__);
+	/* Call socket data in filters */
+	if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
+		int error;
+		error = sflt_data_in(sb->sb_so, asa, &m0, &control, 0);
+		SBLASTRECORDCHK(sb, __func__);
 
 #if CONTENT_FILTER
-			if (error == 0) {
-				error = cfil_sock_data_in(sb->sb_so, asa, m0, control,
-				    0);
-			}
+		if (error == 0) {
+			error = cfil_sock_data_in(sb->sb_so, asa, m0, control,
+			    0);
+		}
 #endif /* CONTENT_FILTER */
 
-			if (error) {
-				if (error != EJUSTRETURN) {
-					if (m0) {
-						m_freem(m0);
-					}
-					if (control != NULL && !sb_unix) {
-						m_freem(control);
-					}
-					if (error_out) {
-						*error_out = error;
-					}
+		if (error) {
+			if (error != EJUSTRETURN) {
+				if (m0) {
+					m_freem(m0);
 				}
-				return 0;
+				if (control != NULL && !sb_unix) {
+					m_freem(control);
+				}
+				if (error_out) {
+					*error_out = error;
+				}
 			}
-		} else if (m0) {
-			m0->m_flags &= ~M_SKIPCFIL;
+			return 0;
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	mbuf_chain = sbconcat_mbufs(sb, asa, m0, control);
@@ -1459,37 +1420,35 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 		return 0;
 	}
 
-	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
-		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
-			int error;
+	if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
+		int error;
 
-			error = sflt_data_in(sb->sb_so, NULL, &m0, &control, 0);
-			SBLASTRECORDCHK(sb, __func__);
+		error = sflt_data_in(sb->sb_so, NULL, &m0, &control, 0);
+		SBLASTRECORDCHK(sb, __func__);
 
 #if CONTENT_FILTER
-			if (error == 0) {
-				error = cfil_sock_data_in(sb->sb_so, NULL, m0, control,
-				    0);
-			}
+		if (error == 0) {
+			error = cfil_sock_data_in(sb->sb_so, NULL, m0, control,
+			    0);
+		}
 #endif /* CONTENT_FILTER */
 
-			if (error) {
-				if (error != EJUSTRETURN) {
-					if (m0) {
-						m_freem(m0);
-					}
-					if (control != NULL && !sb_unix) {
-						m_freem(control);
-					}
-					if (error_out) {
-						*error_out = error;
-					}
+		if (error) {
+			if (error != EJUSTRETURN) {
+				if (m0) {
+					m_freem(m0);
 				}
-				return 0;
+				if (control != NULL && !sb_unix) {
+					m_freem(control);
+				}
+				if (error_out) {
+					*error_out = error;
+				}
 			}
-		} else if (m0) {
-			m0->m_flags &= ~M_SKIPCFIL;
+			return 0;
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	result = sbappendcontrol_internal(sb, m0, control);

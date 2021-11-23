@@ -109,8 +109,6 @@
 #include <sys/lockf.h>
 #include <miscfs/fifofs/fifo.h>
 
-#include <nfs/nfs_conf.h>
-
 #include <string.h>
 #include <machine/machine_routines.h>
 
@@ -2410,11 +2408,11 @@ vclean(vnode_t vp, int flags)
 	 * Clean out any buffers associated with the vnode.
 	 */
 	if (flags & DOCLOSE) {
-#if CONFIG_NFS_CLIENT
+#if NFSCLIENT
 		if (vp->v_tag == VT_NFS) {
 			nfs_vinvalbuf(vp, V_SAVE, ctx, 0);
 		} else
-#endif /* CONFIG_NFS_CLIENT */
+#endif
 		{
 			VNOP_FSYNC(vp, MNT_WAIT, ctx);
 
@@ -2890,7 +2888,7 @@ vn_getpath_fsenter(struct vnode *vp, char *pathbuf, int *len)
 int
 vn_getpath_fsenter_with_parent(struct vnode *dvp, struct vnode *vp, char *pathbuf, int *len)
 {
-	return build_path_with_parent(vp, dvp, pathbuf, *len, len, NULL, 0, vfs_context_current());
+	return build_path_with_parent(vp, dvp, pathbuf, *len, len, 0, vfs_context_current());
 }
 
 int
@@ -2905,52 +2903,15 @@ vn_getpath_ext(struct vnode *vp, struct vnode *dvp, char *pathbuf, int *len, int
 		if (flags & VN_GETPATH_VOLUME_RELATIVE) {
 			bpflags |= (BUILDPATH_VOLUME_RELATIVE | BUILDPATH_NO_FIRMLINK);
 		}
-		if (flags & VN_GETPATH_NO_PROCROOT) {
-			bpflags |= BUILDPATH_NO_PROCROOT;
-		}
 	}
 
-	return build_path_with_parent(vp, dvp, pathbuf, *len, len, NULL, bpflags, vfs_context_current());
+	return build_path_with_parent(vp, dvp, pathbuf, *len, len, bpflags, vfs_context_current());
 }
 
 int
 vn_getpath_no_firmlink(struct vnode *vp, char *pathbuf, int *len)
 {
 	return vn_getpath_ext(vp, NULLVP, pathbuf, len, VN_GETPATH_NO_FIRMLINK);
-}
-
-int
-vn_getpath_ext_with_mntlen(struct vnode *vp, struct vnode *dvp, char *pathbuf, size_t *len, size_t *mntlen, int flags)
-{
-	int bpflags = (flags & VN_GETPATH_FSENTER) ? 0 : BUILDPATH_NO_FS_ENTER;
-	int local_len;
-	int error;
-
-	if (*len > INT_MAX) {
-		return EINVAL;
-	}
-
-	local_len = *len;
-
-	if (flags && (flags != VN_GETPATH_FSENTER)) {
-		if (flags & VN_GETPATH_NO_FIRMLINK) {
-			bpflags |= BUILDPATH_NO_FIRMLINK;;
-		}
-		if (flags & VN_GETPATH_VOLUME_RELATIVE) {
-			bpflags |= (BUILDPATH_VOLUME_RELATIVE | BUILDPATH_NO_FIRMLINK);
-		}
-		if (flags & VN_GETPATH_NO_PROCROOT) {
-			bpflags |= BUILDPATH_NO_PROCROOT;
-		}
-	}
-
-	error = build_path_with_parent(vp, dvp, pathbuf, local_len, &local_len, mntlen, bpflags, vfs_context_current());
-
-	if (local_len >= 0 && local_len <= (int)*len) {
-		*len = (size_t)local_len;
-	}
-
-	return error;
 }
 
 int
@@ -3933,12 +3894,6 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 		error = safedounmount(mp, flags, ctx);
 		break;
 	case VFS_CTL_STATFS:
-#if CONFIG_MACF
-		error = mac_mount_check_stat(ctx, mp);
-		if (error != 0) {
-			break;
-		}
-#endif
 		req->newidx = 0;
 		if (is_64_bit) {
 			req->newptr = vc.vc64.vc_ptr;
@@ -3970,11 +3925,11 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 			sfs.f_ffree = (user64_long_t)sp->f_ffree;
 			sfs.f_fsid = sp->f_fsid;
 			sfs.f_owner = sp->f_owner;
-#ifdef CONFIG_NFS_CLIENT
+#ifdef NFSCLIENT
 			if (mp->mnt_kern_flag & MNTK_TYPENAME_OVERRIDE) {
 				strlcpy(&sfs.f_fstypename[0], &mp->fstypename_override[0], MFSNAMELEN);
 			} else
-#endif /* CONFIG_NFS_CLIENT */
+#endif
 			{
 				strlcpy(sfs.f_fstypename, sp->f_fstypename, MFSNAMELEN);
 			}
@@ -4032,11 +3987,11 @@ sysctl_vfs_ctlbyfsid(__unused struct sysctl_oid *oidp, void *arg1, int arg2,
 			sfs.f_fsid = sp->f_fsid;
 			sfs.f_owner = sp->f_owner;
 
-#ifdef CONFIG_NFS_CLIENT
+#ifdef NFSCLIENT
 			if (mp->mnt_kern_flag & MNTK_TYPENAME_OVERRIDE) {
 				strlcpy(&sfs.f_fstypename[0], &mp->fstypename_override[0], MFSNAMELEN);
 			} else
-#endif /* CONFIG_NFS_CLIENT */
+#endif
 			{
 				strlcpy(sfs.f_fstypename, sp->f_fstypename, MFSNAMELEN);
 			}
@@ -5988,8 +5943,6 @@ vnode_lookupat(const char *path, int flags, vnode_t *vpp, vfs_context_t ctx,
 	if (start_dvp && (path[0] != '/')) {
 		nd.ni_dvp = start_dvp;
 		nd.ni_cnd.cn_flags |= USEDVP;
-		/* Don't take proc lock vnode_lookupat with a startdir specified */
-		nd.ni_flag |=  NAMEI_NOPROCLOCK;
 	}
 
 	if ((error = namei(&nd))) {
@@ -6274,21 +6227,26 @@ vn_create(vnode_t dvp, vnode_t *vpp, struct nameidata *ndp, struct vnode_attr *v
 	vp = *vpp;
 	old_error = error;
 
+#if CONFIG_MACF
+	if (!(flags & VN_CREATE_NOLABEL)) {
+		error = vnode_label(vnode_mount(vp), dvp, vp, cnp, VNODE_LABEL_CREATE, ctx);
+		if (error) {
+			goto error;
+		}
+	}
+#endif
+
 	/*
 	 * If some of the requested attributes weren't handled by the VNOP,
 	 * use our fallback code.
 	 */
-	if ((error == 0) && !VATTR_ALL_SUPPORTED(vap) && *vpp) {
+	if (!VATTR_ALL_SUPPORTED(vap) && *vpp) {
 		KAUTH_DEBUG("     CREATE - doing fallback with ACL %p", vap->va_acl);
 		error = vnode_setattr_fallback(*vpp, vap, ctx);
 	}
-
 #if CONFIG_MACF
-	if ((error == 0) && !(flags & VN_CREATE_NOLABEL)) {
-		error = vnode_label(vnode_mount(vp), dvp, vp, cnp, VNODE_LABEL_CREATE, ctx);
-	}
+error:
 #endif
-
 	if ((error != 0) && (vp != (vnode_t)0)) {
 		/* If we've done a compound open, close */
 		if (batched && (old_error == 0) && (vap->va_type == VREG)) {

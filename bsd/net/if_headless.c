@@ -25,8 +25,6 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-extern void if_headless_init(void);
-
 void
 if_headless_init(void)
 {

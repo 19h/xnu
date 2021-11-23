@@ -3440,7 +3440,6 @@ IOGeneralMemoryDescriptor::wireVirtual(IODirection forDirection)
 						upl_abort(iopl.fIOPL, 0);
 						upl_deallocate(iopl.fIOPL);
 					}
-					error = kIOReturnNoMemory;
 					goto abortExit;
 				}
 				dataP = NULL;
@@ -3741,10 +3740,6 @@ IOGeneralMemoryDescriptor::prepare(IODirection forDirection)
 	}
 
 	if (kIOMemoryTypeVirtual == type || kIOMemoryTypeVirtual64 == type || kIOMemoryTypeUIO == type) {
-		if ((forDirection & kIODirectionPrepareAvoidThrottling) && NEED_TO_HARD_THROTTLE_THIS_TASK()) {
-			error = kIOReturnNotReady;
-			goto finish;
-		}
 		error = wireVirtual(forDirection);
 	}
 
@@ -3755,8 +3750,6 @@ IOGeneralMemoryDescriptor::prepare(IODirection forDirection)
 			}
 		}
 	}
-
-finish:
 
 	if (_prepareLock) {
 		IOLockUnlock(_prepareLock);

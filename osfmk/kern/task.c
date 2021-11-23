@@ -177,14 +177,12 @@
 #include <security/mac_mach_internal.h>
 #endif
 
-#include <IOKit/IOBSD.h>
-
 #if KPERF
 extern int kpc_force_all_ctrs(task_t, int);
 #endif
 
-SECURITY_READ_ONLY_LATE(task_t) kernel_task;
-SECURITY_READ_ONLY_LATE(zone_t) task_zone;
+task_t                  kernel_task;
+zone_t                  task_zone;
 lck_attr_t      task_lck_attr;
 lck_grp_t       task_lck_grp;
 lck_grp_attr_t  task_lck_grp_attr;
@@ -752,7 +750,6 @@ task_reference_internal(task_t task)
 	void *       bt[TASK_REF_BTDEPTH];
 	int             numsaved = 0;
 
-	zone_require(task, task_zone);
 	os_ref_retain(&task->ref_count);
 
 	numsaved = OSBacktrace(bt, TASK_REF_BTDEPTH);
@@ -1298,11 +1295,7 @@ init_task_ledgers(void)
 	    task_wakeups_rate_exceeded, NULL, NULL);
 	ledger_set_callback(t, task_ledgers.physical_writes, task_io_rate_exceeded, (void *)FLAVOR_IO_PHYSICAL_WRITES, NULL);
 
-#if XNU_MONITOR
-	ledger_template_complete_secure_alloc(t);
-#else /* XNU_MONITOR */
 	ledger_template_complete(t);
-#endif /* XNU_MONITOR */
 	task_ledger_template = t;
 }
 
@@ -2220,7 +2213,7 @@ task_mark_corpse(task_t task)
 
 	ipc_task_reset(task);
 	/* Remove the naked send right for task port, needed to arm no sender notification */
-	task_set_special_port_internal(task, TASK_KERNEL_PORT, IPC_PORT_NULL);
+	task_set_special_port(task, TASK_KERNEL_PORT, IPC_PORT_NULL);
 	ipc_task_enable(task);
 
 	task_unlock(task);
@@ -2285,7 +2278,7 @@ task_port_notify(mach_msg_header_t *msg)
 
 	require_ip_active(port);
 	assert(IKOT_TASK == ip_kotype(port));
-	task = (task_t) ip_get_kobject(port);
+	task = (task_t) port->ip_kobject;
 
 	assert(task_is_a_corpse(task));
 
@@ -2685,7 +2678,18 @@ task_terminate_internal(
 	pmap_set_process(task->map->pmap, pid, procname);
 #endif /* MACH_ASSERT */
 
-	vm_map_terminate(task->map);
+	vm_map_remove(task->map,
+	    task->map->min_offset,
+	    task->map->max_offset,
+	    /*
+	     * Final cleanup:
+	     * + no unnesting
+	     * + remove immutable mappings
+	     * + allow gaps in range
+	     */
+	    (VM_MAP_REMOVE_NO_UNNESTING |
+	    VM_MAP_REMOVE_IMMUTABLE |
+	    VM_MAP_REMOVE_GAPS_OK));
 
 	/* release our shared region */
 	vm_shared_region_set(task, NULL);
@@ -4259,7 +4263,6 @@ task_freeze(
 	task_unlock(task);
 
 	if (VM_CONFIG_COMPRESSOR_IS_PRESENT &&
-	    (kr == KERN_SUCCESS) &&
 	    (eval_only == FALSE)) {
 		vm_wake_compactor_swapper();
 		/*
@@ -4335,6 +4338,7 @@ host_security_set_task_token(
 	task_lock(task);
 	task->sec_token = sec_token;
 	task->audit_token = audit_token;
+
 	task_unlock(task);
 
 	if (host_priv != HOST_PRIV_NULL) {
@@ -4343,8 +4347,7 @@ host_security_set_task_token(
 		kr = host_get_host_port(host_priv_self(), &host_port);
 	}
 	assert(kr == KERN_SUCCESS);
-
-	kr = task_set_special_port_internal(task, TASK_HOST_PORT, host_port);
+	kr = task_set_special_port(task, TASK_HOST_PORT, host_port);
 	return kr;
 }
 
@@ -5537,27 +5540,6 @@ task_energy(
 	return energy;
 }
 
-#if __AMP__
-
-uint64_t
-task_cpu_ptime(
-	task_t  task)
-{
-	uint64_t cpu_ptime = 0;
-	thread_t thread;
-
-	task_lock(task);
-	cpu_ptime += task->total_ptime;
-
-	queue_iterate(&task->threads, thread, thread_t, task_threads) {
-		cpu_ptime += timer_grab(&thread->ptime);
-	}
-
-	task_unlock(task);
-	return cpu_ptime;
-}
-
-#else /* __AMP__ */
 
 uint64_t
 task_cpu_ptime(
@@ -5566,7 +5548,6 @@ task_cpu_ptime(
 	return 0;
 }
 
-#endif /* __AMP__ */
 
 /* This function updates the cpu time in the arrays for each
  * effective and requested QoS class
@@ -6728,7 +6709,6 @@ task_update_logical_writes(task_t task, uint32_t io_size, int flags, void *vp)
 	int64_t io_delta = 0;
 	int64_t * global_counter_to_update;
 	boolean_t needs_telemetry = FALSE;
-	boolean_t is_external_device = FALSE;
 	int ledger_to_update = 0;
 	struct task_writes_counters * writes_counters_to_update;
 
@@ -6745,42 +6725,32 @@ task_update_logical_writes(task_t task, uint32_t io_size, int flags, void *vp)
 		global_counter_to_update = &global_logical_writes_count;
 		ledger_to_update = task_ledgers.logical_writes;
 		writes_counters_to_update = &task->task_writes_counters_internal;
-		is_external_device = FALSE;
 	} else {
 		global_counter_to_update = &global_logical_writes_to_external_count;
 		ledger_to_update = task_ledgers.logical_writes_to_external;
 		writes_counters_to_update = &task->task_writes_counters_external;
-		is_external_device = TRUE;
 	}
 
 	switch (flags) {
 	case TASK_WRITE_IMMEDIATE:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_immediate_writes));
 		ledger_credit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
 		break;
 	case TASK_WRITE_DEFERRED:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_deferred_writes));
 		ledger_credit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
 		break;
 	case TASK_WRITE_INVALIDATED:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_invalidated_writes));
 		ledger_debit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, FALSE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, FALSE, io_size);
 		break;
 	case TASK_WRITE_METADATA:
 		OSAddAtomic64(io_size, (SInt64 *)&(writes_counters_to_update->task_metadata_writes));
 		ledger_credit(task->ledger, ledger_to_update, io_size);
-		if (!is_external_device) {
-			coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
-		}
+		coalition_io_ledger_update(task, FLAVOR_IO_LOGICAL_WRITES, TRUE, io_size);
 		break;
 	}
 
@@ -6788,7 +6758,7 @@ task_update_logical_writes(task_t task, uint32_t io_size, int flags, void *vp)
 	if (io_telemetry_limit != 0) {
 		/* If io_telemetry_limit is 0, disable global updates and I/O telemetry */
 		needs_telemetry = global_update_logical_writes(io_delta, global_counter_to_update);
-		if (needs_telemetry && !is_external_device) {
+		if (needs_telemetry) {
 			act_set_io_telemetry_ast(current_thread());
 		}
 	}
@@ -7450,21 +7420,14 @@ void
 task_copy_vmobjects(task_t task, vm_object_query_t query, int len, int64_t* num)
 {
 	vm_object_t find_vmo;
-	unsigned int i = 0;
-	unsigned int vmobj_limit = len / sizeof(vm_object_query_data_t);
+	int64_t size = 0;
 
 	task_objq_lock(task);
 	if (query != NULL) {
 		queue_iterate(&task->task_objq, find_vmo, vm_object_t, task_objq)
 		{
-			vm_object_query_t p = &query[i];
-
-			/*
-			 * Clear the entire vm_object_query_t struct as we are using
-			 * only the first 6 bits in the uint64_t bitfield for this
-			 * anonymous struct member.
-			 */
-			bzero(p, sizeof(*p));
+			int byte_size;
+			vm_object_query_t p = &query[size++];
 
 			p->object_id = (vm_object_id_t) VM_KERNEL_ADDRPERM(find_vmo);
 			p->virtual_size = find_vmo->internal ? find_vmo->vo_size : 0;
@@ -7481,49 +7444,16 @@ task_copy_vmobjects(task_t task, vm_object_query_t query, int len, int64_t* num)
 				p->compressed_size = 0;
 			}
 
-			i++;
-
-			/* Make sure to not overrun */
-			if (i == vmobj_limit) {
+			/* make sure to not overrun */
+			byte_size = (int) size * sizeof(vm_object_query_data_t);
+			if ((int)(byte_size + sizeof(vm_object_query_data_t)) > len) {
 				break;
 			}
 		}
 	} else {
-		i = task->task_owned_objects;
+		size = task->task_owned_objects;
 	}
 	task_objq_unlock(task);
 
-	*num = i;
+	*num = size;
 }
-
-#if __has_feature(ptrauth_calls)
-
-#define PAC_EXCEPTION_ENTITLEMENT "com.apple.private.pac.exception"
-
-void
-task_set_pac_exception_fatal_flag(
-	task_t task)
-{
-	assert(task != TASK_NULL);
-
-	if (!IOTaskHasEntitlement(task, PAC_EXCEPTION_ENTITLEMENT)) {
-		return;
-	}
-
-	task_lock(task);
-	task->t_flags |= TF_PAC_EXC_FATAL;
-	task_unlock(task);
-}
-
-bool
-task_is_pac_exception_fatal(
-	task_t task)
-{
-	uint32_t flags = 0;
-
-	assert(task != TASK_NULL);
-
-	flags = os_atomic_load(&task->t_flags, relaxed);
-	return (bool)(flags & TF_PAC_EXC_FATAL);
-}
-#endif /* __has_feature(ptrauth_calls) */

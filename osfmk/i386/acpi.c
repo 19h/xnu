@@ -286,8 +286,8 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	mtrr_update_cpu();
 #endif
 
-	/* update CPU microcode and apply CPU workarounds */
-	ucode_update_wake_and_apply_cpu_was();
+	/* update CPU microcode */
+	ucode_update_wake();
 
 #if CONFIG_MTRR
 	/* set up PAT following boot processor power up */

@@ -2,7 +2,6 @@ from xnu import *
 import xnudefines
 from kdp import *
 from utils import *
-import struct
 
 def ReadPhysInt(phys_addr, bitsize = 64, cpuval = None):
     """ Read a physical memory data based on address.
@@ -66,69 +65,38 @@ def KDPReadPhysMEM(address, bits):
         print "Target is not connected over kdp. Nothing to do here."
         return retval
 
-    if "hwprobe" == KDPMode():
-        # Send the proper KDP command and payload to the bare metal debug tool via a KDP server
-        addr_for_kdp = struct.unpack("<Q", struct.pack(">Q", address))[0]
-        byte_count = struct.unpack("<I", struct.pack(">I", bits/8))[0]
-        packet = "{0:016x}{1:08x}{2:04x}".format(addr_for_kdp, byte_count, 0x0)
+    input_address = unsigned(addressof(kern.globals.manual_pkt.input))
+    len_address = unsigned(addressof(kern.globals.manual_pkt.len))
+    data_address = unsigned(addressof(kern.globals.manual_pkt.data))
+    if not WriteInt32ToMemoryAddress(0, input_address):
+        return retval
 
-        ret_obj = lldb.SBCommandReturnObject()
-        ci = lldb.debugger.GetCommandInterpreter()
-        ci.HandleCommand('process plugin packet send -c 25 -p {0}'.format(packet), ret_obj)
+    kdp_pkt_size = GetType('kdp_readphysmem64_req_t').GetByteSize()
+    if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
+        return retval
 
-        if ret_obj.Succeeded():
-            value = ret_obj.GetOutput()
+    data_addr = int(addressof(kern.globals.manual_pkt))
+    pkt = kern.GetValueFromAddress(data_addr, 'kdp_readphysmem64_req_t *')
 
+    header_value =GetKDPPacketHeaderInt(request=GetEnumValue('kdp_req_t::KDP_READPHYSMEM64'), length=kdp_pkt_size)
+
+    if ( WriteInt64ToMemoryAddress((header_value), int(addressof(pkt.hdr))) and
+         WriteInt64ToMemoryAddress(address, int(addressof(pkt.address))) and
+         WriteInt32ToMemoryAddress((bits/8), int(addressof(pkt.nbytes))) and
+         WriteInt16ToMemoryAddress(xnudefines.lcpu_self, int(addressof(pkt.lcpu)))
+         ):
+
+        if WriteInt32ToMemoryAddress(1, input_address):
+            # now read data from the kdp packet
+            data_address = unsigned(addressof(kern.GetValueFromAddress(int(addressof(kern.globals.manual_pkt.data)), 'kdp_readphysmem64_reply_t *').data))
             if bits == 64 :
-                pack_fmt = "<Q"
-                unpack_fmt = ">Q"
+                retval =  kern.GetValueFromAddress(data_address, 'uint64_t *').GetSBValue().Dereference().GetValueAsUnsigned()
             if bits == 32 :
-                pack_fmt = "<I"
-                unpack_fmt = ">I"
+                retval =  kern.GetValueFromAddress(data_address, 'uint32_t *').GetSBValue().Dereference().GetValueAsUnsigned()
             if bits == 16 :
-                pack_fmt = "<H"
-                unpack_fmt = ">H"
+                retval =  kern.GetValueFromAddress(data_address, 'uint16_t *').GetSBValue().Dereference().GetValueAsUnsigned()
             if bits == 8 :
-                pack_fmt = "<B"
-                unpack_fmt = ">B"
-
-            retval = struct.unpack(unpack_fmt, struct.pack(pack_fmt, int(value[-((bits/4)+1):], 16)))[0]
-
-    else:
-        input_address = unsigned(addressof(kern.globals.manual_pkt.input))
-        len_address = unsigned(addressof(kern.globals.manual_pkt.len))
-        data_address = unsigned(addressof(kern.globals.manual_pkt.data))
-
-        if not WriteInt32ToMemoryAddress(0, input_address):
-            return retval
-
-        kdp_pkt_size = GetType('kdp_readphysmem64_req_t').GetByteSize()
-        if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-            return retval
-
-        data_addr = int(addressof(kern.globals.manual_pkt))
-        pkt = kern.GetValueFromAddress(data_addr, 'kdp_readphysmem64_req_t *')
-
-        header_value =GetKDPPacketHeaderInt(request=GetEnumValue('kdp_req_t::KDP_READPHYSMEM64'), length=kdp_pkt_size)
-
-        if ( WriteInt64ToMemoryAddress((header_value), int(addressof(pkt.hdr))) and
-             WriteInt64ToMemoryAddress(address, int(addressof(pkt.address))) and
-             WriteInt32ToMemoryAddress((bits/8), int(addressof(pkt.nbytes))) and
-             WriteInt16ToMemoryAddress(xnudefines.lcpu_self, int(addressof(pkt.lcpu)))
-             ):
-
-            if WriteInt32ToMemoryAddress(1, input_address):
-                # now read data from the kdp packet
-                data_address = unsigned(addressof(kern.GetValueFromAddress(int(addressof(kern.globals.manual_pkt.data)), 'kdp_readphysmem64_reply_t *').data))
-                if bits == 64 :
-                    retval =  kern.GetValueFromAddress(data_address, 'uint64_t *').GetSBValue().Dereference().GetValueAsUnsigned()
-                if bits == 32 :
-                    retval =  kern.GetValueFromAddress(data_address, 'uint32_t *').GetSBValue().Dereference().GetValueAsUnsigned()
-                if bits == 16 :
-                    retval =  kern.GetValueFromAddress(data_address, 'uint16_t *').GetSBValue().Dereference().GetValueAsUnsigned()
-                if bits == 8 :
-                    retval =  kern.GetValueFromAddress(data_address, 'uint8_t *').GetSBValue().Dereference().GetValueAsUnsigned()
-
+                retval =  kern.GetValueFromAddress(data_address, 'uint8_t *').GetSBValue().Dereference().GetValueAsUnsigned()
     return retval
 
 
@@ -144,75 +112,42 @@ def KDPWritePhysMEM(address, intval, bits):
     if "kdp" != GetConnectionProtocol():
         print "Target is not connected over kdp. Nothing to do here."
         return False
-    
-    if "hwprobe" == KDPMode():
-        # Send the proper KDP command and payload to the bare metal debug tool via a KDP server
-        addr_for_kdp = struct.unpack("<Q", struct.pack(">Q", address))[0]
-        byte_count = struct.unpack("<I", struct.pack(">I", bits/8))[0]
-
-        if bits == 64 :
-            pack_fmt = ">Q"
-            unpack_fmt = "<Q"
-        if bits == 32 :
-            pack_fmt = ">I"
-            unpack_fmt = "<I"
-        if bits == 16 :
-            pack_fmt = ">H"
-            unpack_fmt = "<H"
-        if bits == 8 :
-            pack_fmt = ">B"
-            unpack_fmt = "<B"
-
-        data_val = struct.unpack(unpack_fmt, struct.pack(pack_fmt, intval))[0]
-
-        packet = "{0:016x}{1:08x}{2:04x}{3:016x}".format(addr_for_kdp, byte_count, 0x0, data_val)
-
-        ret_obj = lldb.SBCommandReturnObject()
-        ci = lldb.debugger.GetCommandInterpreter()
-        ci.HandleCommand('process plugin packet send -c 26 -p {0}'.format(packet), ret_obj)
-
-        if ret_obj.Succeeded():
-            return True
-        else:
-            return False
-
-    else:
-        input_address = unsigned(addressof(kern.globals.manual_pkt.input))
-        len_address = unsigned(addressof(kern.globals.manual_pkt.len))
-        data_address = unsigned(addressof(kern.globals.manual_pkt.data))
-        if not WriteInt32ToMemoryAddress(0, input_address):
-            return False
-
-        kdp_pkt_size = GetType('kdp_writephysmem64_req_t').GetByteSize() + (bits / 8)
-        if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-            return False
-
-        data_addr = int(addressof(kern.globals.manual_pkt))
-        pkt = kern.GetValueFromAddress(data_addr, 'kdp_writephysmem64_req_t *')
-
-        header_value =GetKDPPacketHeaderInt(request=GetEnumValue('kdp_req_t::KDP_WRITEPHYSMEM64'), length=kdp_pkt_size)
-
-        if ( WriteInt64ToMemoryAddress((header_value), int(addressof(pkt.hdr))) and
-             WriteInt64ToMemoryAddress(address, int(addressof(pkt.address))) and
-             WriteInt32ToMemoryAddress((bits/8), int(addressof(pkt.nbytes))) and
-             WriteInt16ToMemoryAddress(xnudefines.lcpu_self, int(addressof(pkt.lcpu)))
-             ):
-
-            if bits == 8:
-                if not WriteInt8ToMemoryAddress(intval, int(addressof(pkt.data))):
-                    return False
-            if bits == 16:
-                if not WriteInt16ToMemoryAddress(intval, int(addressof(pkt.data))):
-                    return False
-            if bits == 32:
-                if not WriteInt32ToMemoryAddress(intval, int(addressof(pkt.data))):
-                    return False
-            if bits == 64:
-                if not WriteInt64ToMemoryAddress(intval, int(addressof(pkt.data))):
-                    return False
-            if WriteInt32ToMemoryAddress(1, input_address):
-                return True
+    input_address = unsigned(addressof(kern.globals.manual_pkt.input))
+    len_address = unsigned(addressof(kern.globals.manual_pkt.len))
+    data_address = unsigned(addressof(kern.globals.manual_pkt.data))
+    if not WriteInt32ToMemoryAddress(0, input_address):
         return False
+
+    kdp_pkt_size = GetType('kdp_writephysmem64_req_t').GetByteSize() + (bits / 8)
+    if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
+        return False
+
+    data_addr = int(addressof(kern.globals.manual_pkt))
+    pkt = kern.GetValueFromAddress(data_addr, 'kdp_writephysmem64_req_t *')
+
+    header_value =GetKDPPacketHeaderInt(request=GetEnumValue('kdp_req_t::KDP_WRITEPHYSMEM64'), length=kdp_pkt_size)
+
+    if ( WriteInt64ToMemoryAddress((header_value), int(addressof(pkt.hdr))) and
+         WriteInt64ToMemoryAddress(address, int(addressof(pkt.address))) and
+         WriteInt32ToMemoryAddress((bits/8), int(addressof(pkt.nbytes))) and
+         WriteInt16ToMemoryAddress(xnudefines.lcpu_self, int(addressof(pkt.lcpu)))
+         ):
+
+        if bits == 8:
+            if not WriteInt8ToMemoryAddress(intval, int(addressof(pkt.data))):
+                return False
+        if bits == 16:
+            if not WriteInt16ToMemoryAddress(intval, int(addressof(pkt.data))):
+                return False
+        if bits == 32:
+            if not WriteInt32ToMemoryAddress(intval, int(addressof(pkt.data))):
+                return False
+        if bits == 64:
+            if not WriteInt64ToMemoryAddress(intval, int(addressof(pkt.data))):
+                return False
+        if WriteInt32ToMemoryAddress(1, input_address):
+            return True
+    return False
 
 
 def WritePhysInt(phys_addr, int_val, bitsize = 64):

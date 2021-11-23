@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -85,14 +85,6 @@ struct kctl {
 	u_int32_t               lastunit;
 };
 
-#if DEVELOPMENT || DEBUG
-enum ctl_status {
-	KCTL_DISCONNECTED = 0,
-	KCTL_CONNECTING = 1,
-	KCTL_CONNECTED = 2
-};
-#endif /* DEVELOPMENT || DEBUG */
-
 struct ctl_cb {
 	TAILQ_ENTRY(ctl_cb)     next;           /* controller chain */
 	lck_mtx_t               *mtx;
@@ -102,10 +94,6 @@ struct ctl_cb {
 	struct sockaddr_ctl     sac;
 	u_int32_t               usecount;
 	u_int32_t               kcb_usecount;
-	u_int32_t               require_clearing_count;
-#if DEVELOPMENT || DEBUG
-	enum ctl_status         status;
-#endif /* DEVELOPMENT || DEBUG */
 };
 
 #ifndef ROUNDUP64
@@ -237,12 +225,6 @@ u_int32_t ctl_debug = 0;
 SYSCTL_INT(_net_systm_kctl, OID_AUTO, debug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_debug, 0, "");
 
-#if DEVELOPMENT || DEBUG
-u_int32_t ctl_panic_debug = 0;
-SYSCTL_INT(_net_systm_kctl, OID_AUTO, panicdebug,
-    CTLFLAG_RW | CTLFLAG_LOCKED, &ctl_panic_debug, 0, "");
-#endif /* DEVELOPMENT || DEBUG */
-
 #define KCTL_TBL_INC 16
 
 static uintptr_t kctl_tbl_size = 0;
@@ -371,45 +353,24 @@ ctl_sofreelastref(struct socket *so)
 }
 
 /*
- * Use this function and ctl_kcb_require_clearing to serialize
- * critical calls into the kctl subsystem
+ * Use this function to serialize calls into the kctl subsystem
  */
 static void
 ctl_kcb_increment_use_count(struct ctl_cb *kcb, lck_mtx_t *mutex_held)
 {
 	LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
-	while (kcb->require_clearing_count > 0) {
-		msleep(&kcb->require_clearing_count, mutex_held, PSOCK | PCATCH, "kcb_require_clearing", NULL);
-	}
-	kcb->kcb_usecount++;
-}
-
-static void
-ctl_kcb_require_clearing(struct ctl_cb *kcb, lck_mtx_t *mutex_held)
-{
-	assert(kcb->kcb_usecount != 0);
-	kcb->require_clearing_count++;
-	kcb->kcb_usecount--;
-	while (kcb->kcb_usecount > 0) { // we need to wait until no one else is running
+	while (kcb->kcb_usecount > 0) {
 		msleep(&kcb->kcb_usecount, mutex_held, PSOCK | PCATCH, "kcb_usecount", NULL);
 	}
 	kcb->kcb_usecount++;
 }
 
 static void
-ctl_kcb_done_clearing(struct ctl_cb *kcb)
-{
-	assert(kcb->require_clearing_count != 0);
-	kcb->require_clearing_count--;
-	wakeup((caddr_t)&kcb->require_clearing_count);
-}
-
-static void
-ctl_kcb_decrement_use_count(struct ctl_cb *kcb)
+clt_kcb_decrement_use_count(struct ctl_cb *kcb)
 {
 	assert(kcb->kcb_usecount != 0);
 	kcb->kcb_usecount--;
-	wakeup((caddr_t)&kcb->kcb_usecount);
+	wakeup_one((caddr_t)&kcb->kcb_usecount);
 }
 
 static int
@@ -423,7 +384,6 @@ ctl_detach(struct socket *so)
 
 	lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);
 	ctl_kcb_increment_use_count(kcb, mtx_held);
-	ctl_kcb_require_clearing(kcb, mtx_held);
 
 	if (kcb->kctl != NULL && kcb->kctl->bind != NULL &&
 	    kcb->userdata != NULL && !(so->so_state & SS_ISCONNECTED)) {
@@ -438,12 +398,8 @@ ctl_detach(struct socket *so)
 	}
 
 	soisdisconnected(so);
-#if DEVELOPMENT || DEBUG
-	kcb->status = KCTL_DISCONNECTED;
-#endif /* DEVELOPMENT || DEBUG */
 	so->so_flags |= SOF_PCBCLEARING;
-	ctl_kcb_done_clearing(kcb);
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 	return 0;
 }
 
@@ -570,9 +526,6 @@ ctl_setup_kctl(struct socket *so, struct sockaddr *nam, struct proc *p)
 done:
 	if (error) {
 		soisdisconnected(so);
-#if DEVELOPMENT || DEBUG
-		kcb->status = KCTL_DISCONNECTED;
-#endif /* DEVELOPMENT || DEBUG */
 		lck_mtx_lock(ctl_mtx);
 		TAILQ_REMOVE(&kctl->kcb_head, kcb, next);
 		kcb->kctl = NULL;
@@ -597,7 +550,6 @@ ctl_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);
 	ctl_kcb_increment_use_count(kcb, mtx_held);
-	ctl_kcb_require_clearing(kcb, mtx_held);
 
 	error = ctl_setup_kctl(so, nam, p);
 	if (error) {
@@ -618,8 +570,7 @@ ctl_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	socket_lock(so, 0);
 
 out:
-	ctl_kcb_done_clearing(kcb);
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 	return error;
 }
 
@@ -635,14 +586,6 @@ ctl_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 
 	lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);
 	ctl_kcb_increment_use_count(kcb, mtx_held);
-	ctl_kcb_require_clearing(kcb, mtx_held);
-
-#if DEVELOPMENT || DEBUG
-	if (kcb->status != KCTL_DISCONNECTED && ctl_panic_debug) {
-		panic("kctl already connecting/connected");
-	}
-	kcb->status = KCTL_CONNECTING;
-#endif /* DEVELOPMENT || DEBUG */
 
 	error = ctl_setup_kctl(so, nam, p);
 	if (error) {
@@ -661,9 +604,6 @@ ctl_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		goto end;
 	}
 	soisconnected(so);
-#if DEVELOPMENT || DEBUG
-	kcb->status = KCTL_CONNECTED;
-#endif /* DEVELOPMENT || DEBUG */
 
 end:
 	if (error && kcb->kctl->disconnect) {
@@ -682,9 +622,6 @@ end:
 	}
 	if (error) {
 		soisdisconnected(so);
-#if DEVELOPMENT || DEBUG
-		kcb->status = KCTL_DISCONNECTED;
-#endif /* DEVELOPMENT || DEBUG */
 		lck_mtx_lock(ctl_mtx);
 		TAILQ_REMOVE(&kcb->kctl->kcb_head, kcb, next);
 		kcb->kctl = NULL;
@@ -695,8 +632,7 @@ end:
 		lck_mtx_unlock(ctl_mtx);
 	}
 out:
-	ctl_kcb_done_clearing(kcb);
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 	return error;
 }
 
@@ -708,7 +644,6 @@ ctl_disconnect(struct socket *so)
 	if ((kcb = (struct ctl_cb *)so->so_pcb)) {
 		lck_mtx_t *mtx_held = socket_getlock(so, PR_F_WILLUNLOCK);
 		ctl_kcb_increment_use_count(kcb, mtx_held);
-		ctl_kcb_require_clearing(kcb, mtx_held);
 		struct kctl             *kctl = kcb->kctl;
 
 		if (kctl && kctl->disconnect) {
@@ -719,9 +654,6 @@ ctl_disconnect(struct socket *so)
 		}
 
 		soisdisconnected(so);
-#if DEVELOPMENT || DEBUG
-		kcb->status = KCTL_DISCONNECTED;
-#endif /* DEVELOPMENT || DEBUG */
 
 		socket_unlock(so, 0);
 		lck_mtx_lock(ctl_mtx);
@@ -735,8 +667,7 @@ ctl_disconnect(struct socket *so)
 		kctlstat.kcs_gencnt++;
 		lck_mtx_unlock(ctl_mtx);
 		socket_lock(so, 0);
-		ctl_kcb_done_clearing(kcb);
-		ctl_kcb_decrement_use_count(kcb);
+		clt_kcb_decrement_use_count(kcb);
 	}
 	return 0;
 }
@@ -828,7 +759,7 @@ ctl_usr_rcvd(struct socket *so, int flags)
 	ctl_sbrcv_trim(so);
 
 out:
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 	return error;
 }
 
@@ -872,7 +803,7 @@ ctl_send(struct socket *so, int flags, struct mbuf *m,
 	if (error != 0) {
 		OSIncrementAtomic64((SInt64 *)&kctlstat.kcs_send_fail);
 	}
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 
 	return error;
 }
@@ -936,7 +867,7 @@ ctl_send_list(struct socket *so, int flags, struct mbuf *m,
 	if (error != 0) {
 		OSIncrementAtomic64((SInt64 *)&kctlstat.kcs_send_list_fail);
 	}
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 
 	return error;
 }
@@ -1036,7 +967,7 @@ ctl_enqueuembuf(kern_ctl_ref kctlref, u_int32_t unit, struct mbuf *m,
 	}
 
 	so_recv_data_stat(so, m, 0);
-	if (sbappend_nodrop(&so->so_rcv, m) != 0) {
+	if (sbappend(&so->so_rcv, m) != 0) {
 		if ((flags & CTL_DATA_NOWAKEUP) == 0) {
 			sorwakeup(so);
 		}
@@ -1133,7 +1064,7 @@ ctl_enqueuembuf_list(void *kctlref, u_int32_t unit, struct mbuf *m_list,
 			 */
 			m->m_nextpkt = NULL;
 			so_recv_data_stat(so, m, 0);
-			if (sbappendrecord_nodrop(&so->so_rcv, m) != 0) {
+			if (sbappendrecord(&so->so_rcv, m) != 0) {
 				needwakeup = 1;
 			} else {
 				/*
@@ -1239,10 +1170,6 @@ ctl_enqueuedata(void *kctlref, u_int32_t unit, void *data, size_t len,
 		m->m_flags |= M_EOR;
 	}
 	so_recv_data_stat(so, m, 0);
-	/*
-	 * No need to call the "nodrop" variant of sbappend
-	 * because the mbuf is local to the scope of the function
-	 */
 	if (sbappend(&so->so_rcv, m) != 0) {
 		if ((flags & CTL_DATA_NOWAKEUP) == 0) {
 			sorwakeup(so);
@@ -1449,7 +1376,7 @@ ctl_ctloutput(struct socket *so, struct sockopt *sopt)
 	}
 
 out:
-	ctl_kcb_decrement_use_count(kcb);
+	clt_kcb_decrement_use_count(kcb);
 	return error;
 }
 

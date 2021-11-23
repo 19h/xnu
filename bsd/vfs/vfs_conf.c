@@ -72,8 +72,6 @@
 #include <sys/mount_internal.h>
 #include <sys/vnode_internal.h>
 
-#include <nfs/nfs_conf.h>
-
 /*
  * These define the root filesystem, device, and root filesystem type.
  */
@@ -124,7 +122,7 @@ enum fs_type_num {
  */
 static struct vfstable vfstbllist[] = {
 	/* Sun-compatible Network Filesystem */
-#if CONFIG_NFS_CLIENT
+#if NFSCLIENT
 	{
 		.vfc_vfsops = &nfs_vfsops,
 		.vfc_name = "nfs",
@@ -140,7 +138,7 @@ static struct vfstable vfstbllist[] = {
 		.vfc_descsize = 0,
 		.vfc_sysctl = NULL
 	},
-#endif /* CONFIG_NFS_CLIENT */
+#endif /* NFSCLIENT */
 
 	/* Device Filesystem */
 #if DEVFS
@@ -323,7 +321,7 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
 #if MFS
 	&mfs_vnodeop_opv_desc,
 #endif
-#if CONFIG_NFS_CLIENT
+#if NFSCLIENT
 	&nfsv2_vnodeop_opv_desc,
 	&spec_nfsv2nodeop_opv_desc,
 #if CONFIG_NFS4
@@ -336,7 +334,7 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
 	&fifo_nfsv4nodeop_opv_desc,
 #endif /* CONFIG_NFS4 */
 #endif /* FIFO */
-#endif /* CONFIG_NFS_CLIENT */
+#endif /* NFSCLIENT */
 #if DEVFS
 	&devfs_vnodeop_opv_desc,
 	&devfs_spec_vnodeop_opv_desc,

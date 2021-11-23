@@ -128,27 +128,25 @@ static int
 sysctl_msec_to_ticks SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg2)
-	int error, temp;
-	long s, tt;
+	int error, s, tt;
 
 	tt = *(int *)arg1;
-	s = tt * 1000 / TCP_RETRANSHZ;
-	if (tt < 0 || s > INT_MAX) {
+	if (tt < 0 || tt >= INT_MAX / 1000) {
 		return EINVAL;
 	}
-	temp = (int)s;
+	s = tt * 1000 / TCP_RETRANSHZ;
 
-	error = sysctl_handle_int(oidp, &temp, 0, req);
+	error = sysctl_handle_int(oidp, &s, 0, req);
 	if (error || !req->newptr) {
 		return error;
 	}
 
-	tt = temp * TCP_RETRANSHZ / 1000;
-	if (tt < 1 || tt > INT_MAX) {
+	tt = s * TCP_RETRANSHZ / 1000;
+	if (tt < 1) {
 		return EINVAL;
 	}
 
-	*(int *)arg1 = (int)tt;
+	*(int *)arg1 = tt;
 	SYSCTL_SKMEM_UPDATE_AT_OFFSET(arg2, *(int*)arg1);
 	return 0;
 }

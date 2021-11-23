@@ -39,13 +39,6 @@
 #include <sys/kernel_types.h>
 #include <net/kpi_interface.h>
 
-#ifndef PRIVATE
-#include <Availability.h>
-#define __NKE_API_DEPRECATED __API_DEPRECATED("Network Kernel Extension KPI is deprecated", macos(10.4, 10.15.4))
-#else
-#define __NKE_API_DEPRECATED
-#endif /* PRIVATE */
-
 struct kev_msg;
 
 __BEGIN_DECLS
@@ -219,8 +212,7 @@ extern errno_t iflt_attach_internal(ifnet_t interface, const struct iff_filter *
 	iflt_attach_internal((interface), (filter), (filter_ref))
 #else
 extern errno_t iflt_attach(ifnet_t interface, const struct iff_filter *filter,
-    interface_filter_t *filter_ref)
-__NKE_API_DEPRECATED;
+    interface_filter_t *filter_ref);
 #endif /* KERNEL_PRIVATE */
 
 /*!
@@ -228,8 +220,7 @@ __NKE_API_DEPRECATED;
  *       @discussion Detaches an interface filter from an interface.
  *       @param filter_ref The reference to the filter from iflt_attach.
  */
-extern void iflt_detach(interface_filter_t filter_ref)
-__NKE_API_DEPRECATED;
+extern void iflt_detach(interface_filter_t filter_ref);
 
 __END_DECLS
 #endif /* __KPI_INTERFACEFILTER__ */

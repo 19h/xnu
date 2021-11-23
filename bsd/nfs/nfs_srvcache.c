@@ -65,9 +65,7 @@
  * FreeBSD-Id: nfs_srvcache.c,v 1.15 1997/10/12 20:25:46 phk Exp $
  */
 
-#include <nfs/nfs_conf.h>
-#if CONFIG_NFS_SERVER
-
+#if NFSSERVER
 /*
  * Reference: Chet Juszczak, "Improving the Performance and Correctness
  *		of an NFS Server", in Proc. Winter 1989 USENIX Conference,
@@ -457,4 +455,4 @@ nfsrv_cleancache(void)
 	lck_mtx_unlock(nfsrv_reqcache_mutex);
 }
 
-#endif /* CONFIG_NFS_SERVER */
+#endif /* NFSSERVER */

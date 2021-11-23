@@ -30,7 +30,6 @@
 
 #include <IOKit/IOCommand.h>
 #include <IOKit/IOMemoryDescriptor.h>
-#include <DriverKit/IODMACommand.h>
 class IOMapper;
 class IOBufferMemoryDescriptor;
 
@@ -62,7 +61,7 @@ enum{
 
 class IODMACommand : public IOCommand
 {
-	OSDeclareDefaultStructorsWithDispatch(IODMACommand);
+	OSDeclareDefaultStructors(IODMACommand);
 
 	friend class IODMAEventSource;
 
