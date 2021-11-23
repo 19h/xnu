@@ -57,6 +57,8 @@ typedef struct rtc_nanotime {
 
 struct cpu_data;
 
+extern uint64_t tsc_rebase_abs_time;
+
 extern void	_rtc_nanotime_store(
 			uint64_t	tsc,
 			uint64_t	nsec,
@@ -68,7 +70,7 @@ extern uint64_t	_rtc_nanotime_read(
 			rtc_nanotime_t	*rntp,
 			int		slow);
 
-extern rtc_nanotime_t	rtc_nanotime_info;
+extern rtc_nanotime_t rtc_nanotime_info;
 #endif
 
 #define	SLOW_TSC_THRESHOLD	1000067800	/* TSC is too slow for regular nanotime() algorithm */
@@ -83,6 +85,7 @@ extern rtc_nanotime_t	rtc_nanotime_info;
 0:	movl	RNT_GENERATION(%edi),%esi	/* being updated? */	; \
 	testl	%esi,%esi						; \
 	jz	0b				/* wait until done */	; \
+	lfence								; \
 	rdtsc								; \
 	lfence								; \
 	subl	RNT_TSC_BASE(%edi),%eax					; \
@@ -111,6 +114,7 @@ extern rtc_nanotime_t	rtc_nanotime_info;
 0:	movl	RNT_GENERATION(%rdi),%esi				; \
 	test	%esi,%esi			/* info updating? */	; \
 	jz	0b				/* - wait if so */	; \
+	lfence								; \
 	rdtsc								; \
 	lfence								; \
 	shlq	$32,%rdx						; \

@@ -50,6 +50,7 @@
  * DKIOCISFORMATTED                      is media formatted?
  * DKIOCISWRITABLE                       is media writable?
  *
+ * DKIOCREQUESTIDLE                      idle media
  * DKIOCDISCARD                          delete unused data
  *
  * DKIOCGETMAXBLOCKCOUNTREAD             get maximum block count for reads
@@ -66,6 +67,7 @@
  * DKIOCGETMAXSEGMENTADDRESSABLEBITCOUNT get maximum segment width in bits
  *
  * DKIOCGETPHYSICALBLOCKSIZE             get device's block size
+ * DKIOCGETCOMMANDPOOLSIZE               get device's queue depth
  */
 
 typedef struct
@@ -114,6 +116,7 @@ typedef struct
 #define DKIOCISFORMATTED                      _IOR('d', 23, uint32_t)
 #define DKIOCISWRITABLE                       _IOR('d', 29, uint32_t)
 
+#define DKIOCREQUESTIDLE                      _IO('d', 30)
 #define DKIOCDISCARD                          _IOW('d', 31, dk_discard_t)
 
 #define DKIOCGETMAXBLOCKCOUNTREAD             _IOR('d', 64, uint64_t)
@@ -130,6 +133,7 @@ typedef struct
 #define DKIOCGETMAXSEGMENTADDRESSABLEBITCOUNT _IOR('d', 75, uint64_t)
 
 #define DKIOCGETPHYSICALBLOCKSIZE             _IOR('d', 77, uint32_t)
+#define DKIOCGETCOMMANDPOOLSIZE               _IOR('d', 78, uint32_t)
 
 #ifdef KERNEL
 #define DK_FEATURE_DISCARD                    0x00000010

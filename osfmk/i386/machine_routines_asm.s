@@ -47,6 +47,7 @@ ENTRY(ml_get_timebase)
 
 			movl    S_ARG0, %ecx
 			
+			lfence
 			rdtsc
 			lfence
 			
@@ -134,6 +135,13 @@ LEXT(tmrCvt)
 
 			ret						// Leave...
 
+
+/* void             _rtc_nanotime_store(uint64_t                tsc,
+	                                uint64_t                nsec,
+	                                uint32_t                scale,
+	                                uint32_t                shift,
+	                                rtc_nanotime_t  *dst) ;
+*/
 			.globl	EXT(_rtc_nanotime_store)
 			.align	FALIGN
 
@@ -235,7 +243,9 @@ Lslow:
 		pushl		%esi					/* save generation */
 		pushl		RNT_SHIFT(%edi)				/* save low 32 bits of tscFreq */
 
-		rdtsc							/* get TSC in %edx:%eax */
+		lfence
+		rdtsc	  						/* get TSC in %edx:%eax */
+		lfence
 		subl		RNT_TSC_BASE(%edi),%eax
 		sbbl		RNT_TSC_BASE+4(%edi),%edx
 

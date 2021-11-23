@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -31,14 +31,14 @@
  *
  * Implements the "wrappers" to the KEXT.
  */
-#include <kern/machine.h>
-#include <i386/machine_routines.h>
-#include <i386/machine_cpu.h>
-#include <i386/misc_protos.h>
-#include <i386/pmap.h>
 #include <i386/asm.h>
+#include <i386/machine_cpu.h>
 #include <i386/mp.h>
+#include <i386/machine_routines.h>
 #include <i386/proc_reg.h>
+#include <i386/pmap.h>
+#include <i386/misc_protos.h>
+#include <kern/machine.h>
 #include <kern/pms.h>
 #include <kern/processor.h>
 #include <i386/cpu_threads.h>
@@ -46,6 +46,7 @@
 #include <i386/cpuid.h>
 #include <i386/rtclock.h>
 #include <kern/sched_prim.h>
+#include <i386/lapic.h>
 
 /*
  * Kernel parameter determining whether threads are halted unconditionally
@@ -162,7 +163,7 @@ pmCPUHalt(uint32_t reason)
     default:
 	__asm__ volatile ("cli");
 
-	if (pmInitDone
+    if (pmInitDone
 	    && pmDispatch != NULL
 	    && pmDispatch->pmCPUHalt != NULL) {
 	    /*
@@ -282,7 +283,7 @@ pmCPUGetDeadline(cpu_data_t *cpu)
 {
     uint64_t	deadline	= EndOfAllTime;
 
-    if (pmInitDone
+	if (pmInitDone
 	&& pmDispatch != NULL
 	&& pmDispatch->GetDeadline != NULL)
 	deadline = (*pmDispatch->GetDeadline)(&cpu->lcpu);
@@ -297,7 +298,7 @@ pmCPUGetDeadline(cpu_data_t *cpu)
 uint64_t
 pmCPUSetDeadline(cpu_data_t *cpu, uint64_t deadline)
 {
-    if (pmInitDone
+   if (pmInitDone
 	&& pmDispatch != NULL
 	&& pmDispatch->SetDeadline != NULL)
 	deadline = (*pmDispatch->SetDeadline)(&cpu->lcpu, deadline);
@@ -344,6 +345,19 @@ pmCPUExitHalt(int cpu)
 	&& pmDispatch != NULL
 	&& pmDispatch->exitHalt != NULL)
 	rc = pmDispatch->exitHalt(cpu_to_lcpu(cpu));
+
+    return(rc);
+}
+
+kern_return_t
+pmCPUExitHaltToOff(int cpu)
+{
+    kern_return_t	rc	= KERN_INVALID_ARGUMENT;
+
+    if (pmInitDone
+	&& pmDispatch != NULL
+	&& pmDispatch->exitHaltToOff != NULL)
+	rc = pmDispatch->exitHaltToOff(cpu_to_lcpu(cpu));
 
     return(rc);
 }
@@ -534,6 +548,34 @@ pmSafeMode(x86_lcpu_t *lcpu, uint32_t flags)
     }
 }
 
+static uint32_t		saved_run_count = 0;
+
+void
+machine_run_count(uint32_t count)
+{
+    if (pmDispatch != NULL
+	&& pmDispatch->pmSetRunCount != NULL)
+	pmDispatch->pmSetRunCount(count);
+    else
+	saved_run_count = count;
+}
+
+boolean_t
+machine_cpu_is_inactive(int cpu)
+{
+    if (pmDispatch != NULL
+	&& pmDispatch->pmIsCPUUnAvailable != NULL)
+	return(pmDispatch->pmIsCPUUnAvailable(cpu_to_lcpu(cpu)));
+    else
+	return(FALSE);
+}
+
+static uint32_t
+pmGetSavedRunCount(void)
+{
+    return(saved_run_count);
+}
+
 /*
  * Returns the root of the package tree.
  */
@@ -555,6 +597,28 @@ pmLCPUtoProcessor(int lcpu)
     return(cpu_datap(lcpu)->cpu_processor);
 }
 
+static void
+pmReSyncDeadlines(int cpu)
+{
+    static boolean_t	registered	= FALSE;
+
+    if (!registered) {
+	PM_interrupt_register(&etimer_resync_deadlines);
+	registered = TRUE;
+    }
+
+    if ((uint32_t)cpu == current_cpu_datap()->lcpu.cpu_num)
+	etimer_resync_deadlines();
+    else
+	cpu_PM_interrupt(cpu);
+}
+
+static void
+pmSendIPI(int cpu)
+{
+    lapic_send_ipi(cpu, LAPIC_PM_INTERRUPT);
+}
+
 /*
  * Called by the power management kext to register itself and to get the
  * callbacks it might need into other kernel functions.  This interface
@@ -566,27 +630,35 @@ pmKextRegister(uint32_t version, pmDispatch_t *cpuFuncs,
 	       pmCallBacks_t *callbacks)
 {
     if (callbacks != NULL && version == PM_DISPATCH_VERSION) {
-	callbacks->setRTCPop   = setPop;
-	callbacks->resyncDeadlines = etimer_resync_deadlines;
-	callbacks->initComplete= pmInitComplete;
-	callbacks->GetLCPU     = pmGetLogicalCPU;
-	callbacks->GetCore     = pmGetCore;
-	callbacks->GetDie      = pmGetDie;
-	callbacks->GetPackage  = pmGetPackage;
-	callbacks->GetMyLCPU   = pmGetMyLogicalCPU;
-	callbacks->GetMyCore   = pmGetMyCore;
-	callbacks->GetMyDie    = pmGetMyDie;
-	callbacks->GetMyPackage= pmGetMyPackage;
-	callbacks->GetPkgRoot  = pmGetPkgRoot;
-	callbacks->LockCPUTopology = pmLockCPUTopology;
-	callbacks->GetHibernate    = pmCPUGetHibernate;
-	callbacks->LCPUtoProcessor = pmLCPUtoProcessor;
-	callbacks->ThreadBind      = thread_bind;
-	callbacks->topoParms       = &topoParms;
+	callbacks->setRTCPop            = setPop;
+	callbacks->resyncDeadlines      = pmReSyncDeadlines;
+	callbacks->initComplete         = pmInitComplete;
+	callbacks->GetLCPU              = pmGetLogicalCPU;
+	callbacks->GetCore              = pmGetCore;
+	callbacks->GetDie               = pmGetDie;
+	callbacks->GetPackage           = pmGetPackage;
+	callbacks->GetMyLCPU            = pmGetMyLogicalCPU;
+	callbacks->GetMyCore            = pmGetMyCore;
+	callbacks->GetMyDie             = pmGetMyDie;
+	callbacks->GetMyPackage         = pmGetMyPackage;
+	callbacks->GetPkgRoot           = pmGetPkgRoot;
+	callbacks->LockCPUTopology      = pmLockCPUTopology;
+	callbacks->GetHibernate         = pmCPUGetHibernate;
+	callbacks->LCPUtoProcessor      = pmLCPUtoProcessor;
+	callbacks->ThreadBind           = thread_bind;
+	callbacks->GetSavedRunCount     = pmGetSavedRunCount;
+	callbacks->pmSendIPI		= pmSendIPI;
+	callbacks->topoParms            = &topoParms;
+    } else {
+	panic("Version mis-match between Kernel and CPU PM");
     }
 
     if (cpuFuncs != NULL) {
 	pmDispatch = cpuFuncs;
+
+	if (pmDispatch->pmIPIHandler != NULL) {
+	    lapic_set_pm_func((i386_intr_func_t)pmDispatch->pmIPIHandler);
+	}
     }
 }
 

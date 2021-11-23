@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -93,8 +93,6 @@
 
 #include <net/net_osdep.h>
 
-extern u_long  route_generation;
-
 int ip_gif_ttl = GIF_TTL;
 SYSCTL_INT(_net_inet_ip, IPCTL_GIF_TTL, gifttl, CTLFLAG_RW,
 	&ip_gif_ttl,	0, "");
@@ -113,6 +111,7 @@ in_gif_output(
 	struct ip iphdr;	/* capsule IP header, host byte ordered */
 	int proto, error;
 	u_int8_t tos;
+	struct ip_out_args ipoa = { IFSCOPE_NONE };
 
 	if (sin_src == NULL || sin_dst == NULL ||
 	    sin_src->sin_family != AF_INET ||
@@ -195,7 +194,7 @@ in_gif_output(
 	    (sc->gif_ro.ro_rt != NULL &&
 	    (sc->gif_ro.ro_rt->generation_id != route_generation ||
 	    sc->gif_ro.ro_rt->rt_ifp == ifp))) {
-		/* cache route doesn't match */
+		/* cache route doesn't match or recursive route */
 		dst->sin_family = sin_dst->sin_family;
 		dst->sin_len = sizeof(struct sockaddr_in);
 		dst->sin_addr = sin_dst->sin_addr;
@@ -216,7 +215,9 @@ in_gif_output(
 		}
 
 		/* if it constitutes infinite encapsulation, punt. */
+		RT_LOCK(sc->gif_ro.ro_rt);
 		if (sc->gif_ro.ro_rt->rt_ifp == ifp) {
+			RT_UNLOCK(sc->gif_ro.ro_rt);
 			m_freem(m);
 			return ENETUNREACH;	/*XXX*/
 		}
@@ -224,9 +225,10 @@ in_gif_output(
 		ifp->if_mtu = sc->gif_ro.ro_rt->rt_ifp->if_mtu
 			- sizeof(struct ip);
 #endif
+		RT_UNLOCK(sc->gif_ro.ro_rt);
 	}
 
-	error = ip_output(m, NULL, &sc->gif_ro, 0, NULL, NULL);
+	error = ip_output(m, NULL, &sc->gif_ro, IP_OUTARGS, NULL, &ipoa);
 	return(error);
 }
 
@@ -248,7 +250,7 @@ in_gif_input(m, off)
 
 	if (gifp == NULL || (gifp->if_flags & IFF_UP) == 0) {
 		m_freem(m);
-		OSAddAtomic(1, (SInt32*)&ipstat.ips_nogif);
+		OSAddAtomic(1, &ipstat.ips_nogif);
 		return;
 	}
 
@@ -296,7 +298,7 @@ in_gif_input(m, off)
 	    }
 #endif /* INET6 */
 	default:
-		OSAddAtomic(1, (SInt32*)&ipstat.ips_nogif);
+		OSAddAtomic(1, &ipstat.ips_nogif);
 		m_freem(m);
 		return;
 	}
@@ -344,7 +346,7 @@ gif_encapcheck4(
 	src = (struct sockaddr_in *)sc->gif_psrc;
 	dst = (struct sockaddr_in *)sc->gif_pdst;
 
-	mbuf_copydata(m, 0, sizeof(ip), &ip);
+	mbuf_copydata((struct mbuf *)(size_t)m, 0, sizeof(ip), &ip);
 
 	/* check for address match */
 	addrmatch = 0;
@@ -363,18 +365,18 @@ gif_encapcheck4(
 		return 0;
 	}
 	/* reject packets with broadcast on source */
-	lck_mtx_lock(rt_mtx);
+	lck_rw_lock_shared(in_ifaddr_rwlock);
 	for (ia4 = TAILQ_FIRST(&in_ifaddrhead); ia4;
 	     ia4 = TAILQ_NEXT(ia4, ia_link))
 	{
 		if ((ifnet_flags(ia4->ia_ifa.ifa_ifp) & IFF_BROADCAST) == 0)
 			continue;
 		if (ip.ip_src.s_addr == ia4->ia_broadaddr.sin_addr.s_addr) {
-			lck_mtx_unlock(rt_mtx);
+			lck_rw_done(in_ifaddr_rwlock);
 			return 0;
 		}
 	}
-	lck_mtx_unlock(rt_mtx);
+	lck_rw_done(in_ifaddr_rwlock);
 
 	/* ingress filters on outer source */
 	if ((ifnet_flags(sc->gif_if) & IFF_LINK2) == 0 &&
@@ -386,17 +388,23 @@ gif_encapcheck4(
 		sin.sin_family = AF_INET;
 		sin.sin_len = sizeof(struct sockaddr_in);
 		sin.sin_addr = ip.ip_src;
-		rt = rtalloc1((struct sockaddr *)&sin, 0, 0UL);
-		if (!rt || rt->rt_ifp != m->m_pkthdr.rcvif) {
+		rt = rtalloc1_scoped((struct sockaddr *)&sin, 0, 0,
+		    m->m_pkthdr.rcvif->if_index);
+		if (rt != NULL)
+			RT_LOCK(rt);
+		if (rt == NULL || rt->rt_ifp != m->m_pkthdr.rcvif) {
 #if 0
 			log(LOG_WARNING, "%s: packet from 0x%x dropped "
 			    "due to ingress filter\n", if_name(&sc->gif_if),
 			    (u_int32_t)ntohl(sin.sin_addr.s_addr));
 #endif
-			if (rt)
+			if (rt != NULL) {
+				RT_UNLOCK(rt);
 				rtfree(rt);
+			}
 			return 0;
 		}
+		RT_UNLOCK(rt);
 		rtfree(rt);
 	}
 
