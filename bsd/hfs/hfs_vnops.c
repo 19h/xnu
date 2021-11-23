@@ -289,7 +289,7 @@ hfs_vnop_getattr(struct vnop_getattr_args *ap)
 			if (vnode_isvroot(vp)) {
 				if (hfsmp->hfs_privdir_desc.cd_cnid != 0)
 					--entries;     /* hide private dir */
-				if (hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY)))
+				if (hfsmp->jnl)
 					entries -= 2;  /* hide the journal files */
 			}
 			VATTR_RETURN(vap, va_nlink, (uint64_t)entries);
@@ -1565,17 +1565,18 @@ hfs_removefile(struct vnode *dvp, struct vnode *vp, struct componentname *cnp,
 	if ((cp->c_flag & C_HARDLINK) == 0 &&
 	    (!dataforkbusy || !rsrcforkbusy)) {
 		/*
-		 * A ubc_setsize can cause a pagein so defer it
-		 * until after the cnode lock is dropped.  The
-		 * cnode lock cannot be dropped/reacquired here
-		 * since we might already hold the journal lock.
+		 * A ubc_setsize can cause a pagein here 
+		 * so we need to the drop cnode lock. Note
+		 * that we still hold the truncate lock.
 		 */
+		hfs_unlock(cp);
 		if (!dataforkbusy && cp->c_datafork->ff_blocks && !isbigfile) {
-			cp->c_flag |= C_NEED_DATA_SETSIZE;
+			ubc_setsize(vp, 0);
 		}
 		if (!rsrcforkbusy && rvp) {
-			cp->c_flag |= C_NEED_RSRC_SETSIZE;
+			ubc_setsize(rvp, 0);
 		}
+		hfs_lock(cp, HFS_FORCE_LOCK);
 	} else {
 	    struct cat_desc cndesc;
 
@@ -1889,10 +1890,6 @@ out:
 __private_extern__ void
 replace_desc(struct cnode *cp, struct cat_desc *cdp)
 {
-	if (&cp->c_desc == cdp) {
-		return;
-	}
-
 	/* First release allocated name buffer */
 	if (cp->c_desc.cd_flags & CD_HASBUF && cp->c_desc.cd_nameptr != 0) {
 		char *name = cp->c_desc.cd_nameptr;
@@ -2828,7 +2825,7 @@ hfs_update(struct vnode *vp, __unused int waitfor)
 	 * we have to do the update.
 	 */
 	if (ISSET(cp->c_flag, C_FORCEUPDATE) == 0 &&
-	    (ISSET(cp->c_flag, C_DELETED) ||
+	    (ISSET(cp->c_flag, C_DELETED) || 
 	    (dataforkp && cp->c_datafork->ff_unallocblocks) ||
 	    (rsrcforkp && cp->c_rsrcfork->ff_unallocblocks))) {
 	//	cp->c_flag &= ~(C_ACCESS | C_CHANGE | C_UPDATE);
@@ -3169,22 +3166,6 @@ hfs_vgetrsrc(struct hfsmount *hfsmp, struct vnode *vp, struct vnode **rvpp, __un
 		struct cat_fork rsrcfork;
 		struct componentname cn;
 		int lockflags;
-
-		/*
-		 * Make sure cnode lock is exclusive, if not upgrade it.
-		 *
-		 * We assume that we were called from a read-only VNOP (getattr)
-		 * and that its safe to have the cnode lock dropped and reacquired.
-		 */
-		if (cp->c_lockowner != current_thread()) {
-			/*
-			 * If the upgrade fails we loose the lock and
-			 * have to take the exclusive lock on our own.
-			 */
-			if (lck_rw_lock_shared_to_exclusive(&cp->c_rwlock) != 0)
-				lck_rw_lock_exclusive(&cp->c_rwlock);
-			cp->c_lockowner = current_thread();
-		}
 
 		lockflags = hfs_systemfile_lock(hfsmp, SFL_CATALOG, HFS_SHARED_LOCK);
 
@@ -3712,6 +3693,7 @@ struct vnodeopv_entry_desc hfs_specop_entries[] = {
 	{ &vnop_pathconf_desc, (VOPFUNC)spec_pathconf },		/* pathconf */
 	{ &vnop_advlock_desc, (VOPFUNC)err_advlock },		/* advlock */
 	{ &vnop_bwrite_desc, (VOPFUNC)hfs_vnop_bwrite },
+	{ &vnop_devblocksize_desc, (VOPFUNC)spec_devblocksize }, /* devblocksize */
 	{ &vnop_pagein_desc, (VOPFUNC)hfs_vnop_pagein },		/* Pagein */
 	{ &vnop_pageout_desc, (VOPFUNC)hfs_vnop_pageout },	/* Pageout */
         { &vnop_copyfile_desc, (VOPFUNC)err_copyfile },		/* copyfile */

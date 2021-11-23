@@ -192,3 +192,4 @@ errno_t iflt_attach(ifnet_t interface, const struct iff_filter* filter,
  */
 void iflt_detach(interface_filter_t filter_ref);
 
+#endif

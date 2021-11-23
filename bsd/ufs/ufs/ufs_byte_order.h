@@ -46,7 +46,7 @@ void byte_swap_ints(int *, int);
 void byte_swap_shorts(short *, int);
 
 /* void byte_swap_superblock(struct fs *); */
-int byte_swap_sbin(struct fs *);
+void byte_swap_sbin(struct fs *);
 void byte_swap_sbout(struct fs *);
 void byte_swap_csum(struct csum *);
 void byte_swap_ocylgroup(struct cg *);

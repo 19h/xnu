@@ -66,7 +66,9 @@
 #include <mach/vm_prot.h>
 #include <mach/memory_object_types.h>
 
-#pragma pack(4)
+#if __DARWIN_ALIGN_POWER
+#pragma options align=power
+#endif
 
 /*
  *	Remember to update the mig type definitions
@@ -140,6 +142,8 @@ typedef struct vm_info_object {
 
 typedef vm_info_object_t *vm_info_object_array_t;
 
-#pragma pack()
+#if __DARWIN_ALIGN_POWER
+#pragma options align=reset
+#endif
 
 #endif	/* _MACH_DEBUG_VM_INFO_H_ */

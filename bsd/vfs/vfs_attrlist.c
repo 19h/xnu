@@ -383,28 +383,6 @@ getattrlist_setupvattr(struct attrlist *alp, struct vnode_attr *vap, ssize_t *si
 	return(0);
 }
 
-static int
-setattrlist_setfinderinfo(vnode_t vp, char *fndrinfo, struct vfs_context *ctx)
-{
-	uio_t	auio;
-	char	uio_buf[UIO_SIZEOF(1)];
-	int	error;
-
-	if ((auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_WRITE, uio_buf, sizeof(uio_buf))) == NULL) {
-		error = ENOMEM;
-	} else {
-		uio_addiov(auio, CAST_USER_ADDR_T(fndrinfo), 32);
-		error = vn_setxattr(vp, XATTR_FINDERINFO_NAME, auio, XATTR_NOSECURITY, ctx);
-		uio_free(auio);
-	}
-
-	if (error == 0 && need_fsevent(FSE_FINDER_INFO_CHANGED, vp)) {
-	    add_fsevent(FSE_FINDER_INFO_CHANGED, ctx, FSE_ARG_VNODE, vp, FSE_ARG_DONE);
-	}
-
-	return (error);
-}
-
 
 /*
  * Find something resembling a terminal component name in the mountedonname for vp
@@ -1579,24 +1557,6 @@ setattrlist(struct proc *p, register struct setattrlist_args *uap, __unused regi
 	}
 
 	/*
-	 * When we're setting both the access mask and the finder info, then
-	 * check if were about to remove write access for the owner.  Since
-	 * vnode_setattr and vn_setxattr invoke two separate vnops, we need
-	 * to consider their ordering.
-	 *
-	 * If were about to remove write access for the owner we'll set the
-	 * Finder Info here before vnode_setattr.  Otherwise we'll set it
-	 * after vnode_setattr since it may be adding owner write access.
-	 */
-	if ((fndrinfo != NULL) && !(al.volattr & ATTR_VOL_INFO) &&
-	    (al.commonattr & ATTR_CMN_ACCESSMASK) && !(va.va_mode & S_IWUSR)) {
-		if ((error = setattrlist_setfinderinfo(vp, fndrinfo, &context)) != 0) {
-			goto out;
-		}
-		fndrinfo = NULL;  /* it was set here so skip setting below */
-	}
-
-	/*
 	 * Write the attributes if we have any.
 	 */
 	if ((va.va_active != 0LL) && ((error = vnode_setattr(vp, &va, &context)) != 0)) {
@@ -1616,8 +1576,26 @@ setattrlist(struct proc *p, register struct setattrlist_args *uap, __unused regi
 			} else {
 				/* XXX should never get here */
 			}
-		} else if ((error = setattrlist_setfinderinfo(vp, fndrinfo, &context)) != 0) {
-			goto out;
+		} else {
+			/* write Finder Info EA */
+			uio_t	auio;
+			char	uio_buf[UIO_SIZEOF(1)];
+
+			if ((auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_WRITE, uio_buf, sizeof(uio_buf))) == NULL) {
+				error = ENOMEM;
+			} else {
+				uio_addiov(auio, CAST_USER_ADDR_T(fndrinfo), 32);
+				error = vn_setxattr(vp, XATTR_FINDERINFO_NAME, auio, XATTR_NOSECURITY, &context);
+				uio_free(auio);
+			}
+
+			if (error == 0 && need_fsevent(FSE_FINDER_INFO_CHANGED, vp)) {
+			    add_fsevent(FSE_FINDER_INFO_CHANGED, ctx, FSE_ARG_VNODE, vp, FSE_ARG_DONE);
+			}
+
+			if (error != 0) {
+				goto out;
+			}
 		}
 	}
 

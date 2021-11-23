@@ -896,7 +896,6 @@ static OSErr BlockAllocateKnown(
 	UInt32			*actualStartBlock,
 	UInt32			*actualNumBlocks)
 {
-	OSErr			err;
 	UInt32			i;
 	UInt32			foundBlocks;
 	UInt32			newStartBlock, newBlockCount;
@@ -947,21 +946,12 @@ static OSErr BlockAllocateKnown(
 	
 	// sanity check
 	if ((*actualStartBlock + *actualNumBlocks) > vcb->totalBlocks)
-	{
-		printf("BlockAllocateKnown: allocation overflow on \"%s\"", vcb->vcbVN);
-		*actualStartBlock = 0;
-		*actualNumBlocks = 0;
-		err = EIO;
-	}
+		panic("BlockAllocateKnown: allocation overflow on \"%s\"", vcb->vcbVN);
 
-	else
-	{
-		//
-		//	Now mark the found extent in the bitmap
-		//
-	err = BlockMarkAllocated(vcb, *actualStartBlock, *actualNumBlocks);
-	}
-	return err;	
+	//
+	//	Now mark the found extent in the bitmap
+	//
+	return BlockMarkAllocated(vcb, *actualStartBlock, *actualNumBlocks);
 }
 
 
@@ -1170,10 +1160,8 @@ OSErr BlockMarkFree(
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
 
 	if (startingBlock + numBlocks > vcb->totalBlocks) {
-	    printf("hfs: block mark free: trying to free non-existent blocks (%d %d %d)\n",
+	    panic("hfs: block mark free: trying to free non-existent blocks (%d %d %d)\n",
 		  startingBlock, numBlocks, vcb->totalBlocks);
-	    err = EIO;
-	    goto Exit;
 	}
 
 
@@ -1365,20 +1353,13 @@ static OSErr BlockFindContiguous(
 	UInt32  blockRef;
 	UInt32  wordsPerBlock;
 
-	/*
-	 * When we're skipping the metadata zone and the start/end
-	 * range overlaps with the metadata zone then adjust the 
-	 * start to be outside of the metadata zone.  If the range
-	 * is entirely inside the metadata zone then we can deny the
-	 * request (dskFulErr).
-	 */
-	if (!useMetaZone && (vcb->hfs_flags & HFS_METADATA_ZONE)) {
-		if (startingBlock <= vcb->hfs_metazone_end) {
-			if (endingBlock > (vcb->hfs_metazone_end + 2))
-				startingBlock = vcb->hfs_metazone_end + 1;
-			else
-				goto DiskFull;
-		}
+	if (!useMetaZone) {
+		struct hfsmount *hfsmp = VCBTOHFS(vcb);
+
+		
+		if ((hfsmp->hfs_flags & HFS_METADATA_ZONE) &&
+		    (startingBlock <= hfsmp->hfs_metazone_end))
+			startingBlock = hfsmp->hfs_metazone_end + 1;
 	}
 
 	if ((endingBlock - startingBlock) < minBlocks)

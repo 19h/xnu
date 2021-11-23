@@ -27,9 +27,6 @@
  *
  *	File: rd.c
  */
- 
-#ifdef AURP_SUPPORT
-
 #include <sys/errno.h>
 #include <sys/types.h>
 #include <sys/param.h>
@@ -118,4 +115,3 @@ void AURPrcvRDReq(state, m)
 	/* respond to the going-down peer with an RI Ack packet */
 	AURPsndRIAck(state, m, 0);
 }
-

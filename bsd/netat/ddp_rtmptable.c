@@ -86,6 +86,7 @@ char errstr[512];		/* used to display meaningfull router errors*/
 extern at_ifaddr_t *ifID_table[];
 extern at_ifaddr_t *ifID_home;
 extern snmpStats_t	snmpStats;
+extern atlock_t	ddpinp_lock;
 
 short ErrorRTMPoverflow = 0;	/* flag if RTMP table is too small for this net */
 short ErrorZIPoverflow  = 0;	/* flag if ZIP table is too small for this net */
@@ -145,10 +146,12 @@ at_net_al NetNumber;
 
 	RT_entry *ptree = &RT_table_start;
 	at_net_al LowEnd;
+	register unsigned int s;
 /*
 	dPrintf(D_M_RTMP_LOW, D_L_ROUTING, ("%s : Lookup for Net=%d\n",
 		 "rt_blookup", NetNumber));
 */	
+	ATDISABLE(s, ddpinp_lock);
 	while (ptree) {
 
 		if (NetNumber > ptree->NetStop) {
@@ -173,6 +176,7 @@ at_net_al NetNumber;
 			ptree = ptree->left;
 			continue;
 		   }
+		   ATENABLE(s, ddpinp_lock);
 		   
 		   /* we're in the range (either extended or not)
 		    * return the entry found.
@@ -186,6 +190,7 @@ at_net_al NetNumber;
 		   return (ptree);
 		}	
 	}
+	ATENABLE(s, ddpinp_lock);
 
 	dPrintf(D_M_RTMP_LOW, D_L_ROUTING, ("%s : %04d : NOT FOUND\n",
 		 "rt_blookup", NetNumber));
@@ -491,19 +496,23 @@ int zt_add_zonename(zname)
 at_nvestr_t *zname;
 {
 	register short res,i;
+	register unsigned int s;
 
 	if (res = zt_find_zname(zname))
 		return(res);
 
+	ATDISABLE(s, ddpinp_lock);
 	for (i = 0; i < ZT_maxentry ; i++) {
 		if (ZT_table[i].ZoneCount == 0 && ZT_table[i].Zone.len == 0) {/* free entry */
 			ZT_table[i].Zone = *zname;
 			dPrintf(D_M_RTMP, D_L_VERBOSE, ("zt_add_zonename: zone #%d %s len=%d\n",
 				i, ZT_table[i].Zone.str, ZT_table[i].Zone.len));
 			at_state.flags |= AT_ST_ZT_CHANGED;
+			ATENABLE(s, ddpinp_lock);
 			return(i+1);
 		}
 	}
+	ATENABLE(s, ddpinp_lock);
 	/* table full... */
 	return (ZT_MAXEDOUT);
 }
@@ -698,10 +707,14 @@ RT_entry *ent;
 	register u_char *zmap;
 	register u_short i,j;
 	register int	   zone_count = 0 ;
+	register unsigned int s;
 
+	ATDISABLE(s, ddpinp_lock);
 
-	if (!RT_ALL_ZONES_KNOWN(ent))
+	if (!RT_ALL_ZONES_KNOWN(ent)) {
+			ATENABLE(s, ddpinp_lock);
 			return (0);
+	}
 	zmap = ent->ZoneBitMap;
 
 	for (i = 0 ; i < ZT_BYTES ; i++) {
@@ -714,6 +727,7 @@ RT_entry *ent;
 		zmap++;
 	}
 
+	ATENABLE(s, ddpinp_lock);
 	return (zone_count);
 }
 
@@ -725,11 +739,13 @@ at_nvestr_t *zname;
 {
 	register short i, j, found;
 	register char c1, c2;
+	register unsigned int s;
 
 
 	if (!zname->len)
 		return(0);
 
+	ATDISABLE(s, ddpinp_lock);
 	for (i = 0 ; i < ZT_maxentry ; i++) {
 			if (!ZT_table[i].ZoneCount || zname->len != ZT_table[i].Zone.len)
 					continue;
@@ -753,10 +769,13 @@ at_nvestr_t *zname;
 				}
 			}
 
-			if (found)
+			if (found) {
+				ATENABLE(s, ddpinp_lock);
 				return (i+1);
+			}
 	}
 
+	ATENABLE(s, ddpinp_lock);
 	return(0);
 }
 
@@ -769,11 +788,14 @@ void zt_set_zmap(znum, zmap)
      char *zmap;
 {
 	register u_short num = znum -1;
+	register unsigned int s;
 
+	ATDISABLE(s, ddpinp_lock);
 	if (!(zmap[num >> 3] & 0x80 >> (num % 8))) {
 		zmap[num >> 3] |= 0x80 >> (num % 8);
 		ZT_table[num].ZoneCount++;
 	}
+	ATENABLE(s, ddpinp_lock);
 }
 
 
@@ -785,11 +807,14 @@ void zt_clr_zmap(znum, zmap)
      char *zmap;
 {
 	register u_short num = znum -1;
+	register unsigned int s;
 
+	ATDISABLE(s, ddpinp_lock);
 	if (zmap[num >> 3] & 0x80 >> (num % 8)) {
 		zmap[num >> 3] ^= 0x80 >> (num % 8);
 		ZT_table[num].ZoneCount--;
 	}
+	ATENABLE(s, ddpinp_lock);
 }
 
 
@@ -1104,7 +1129,7 @@ void getIfUsage(zone, ifs_in_zone)
 	at_ifaddr_t 	*ifID;
 
 	if (!MULTIPORT_MODE) {
-		strlcpy(ifs_in_zone->at_if[cnt], ifID_home->ifName, 
+		strncpy(ifs_in_zone->at_if[cnt], ifID_home->ifName, 
 			IFNAMESIZ);
 		return;
 	}
@@ -1119,7 +1144,7 @@ void getIfUsage(zone, ifs_in_zone)
 		if (route->ZoneBitMap[zmi] & zmb) {
 			dPrintf(D_M_NBP_LOW, D_L_USR3, ("zone in port %d \n",
 				route->NetPort));
-			strlcpy(ifs_in_zone->at_if[cnt], 
+			strncpy(ifs_in_zone->at_if[cnt], 
 				ifID_table[route->NetPort]->ifName, IFNAMESIZ);
 			cnt++;
 		}

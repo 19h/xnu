@@ -204,7 +204,7 @@ socket(p, uap, retval)
 		fp->f_data = (caddr_t)so;
 
 		proc_fdlock(p);
-		procfdtbl_releasefd(p, fd, NULL);
+		*fdflags(p, fd) &= ~UF_RESERVED;
 		
 		fp_drop(p, fd, fp, 1);
 		proc_fdunlock(p);
@@ -377,7 +377,7 @@ accept1(struct proc *p, struct accept_args *uap, register_t *retval, int compat)
 		socket_unlock(head, 1);
 		goto out;
 	} 
-	procfdtbl_releasefd(p, newfd, NULL);
+	*fdflags(p, newfd) &= ~UF_RESERVED;
 	*retval = newfd;
 	fp->f_type = DTYPE_SOCKET;
 	fp->f_flag = fflag;
@@ -561,8 +561,8 @@ socketpair(struct proc *p, struct socketpair_args *uap, __unused register_t *ret
 	}
 
 	proc_fdlock(p);
-	procfdtbl_releasefd(p, sv[0], NULL);
-	procfdtbl_releasefd(p, sv[1], NULL);
+	*fdflags(p, sv[0]) &= ~UF_RESERVED;
+	*fdflags(p, sv[1]) &= ~UF_RESERVED;
 	fp_drop(p, sv[0], fp1, 1);
 	fp_drop(p, sv[1], fp2, 1);
 	proc_fdunlock(p);
@@ -1770,7 +1770,6 @@ sendfile(struct proc *p, struct sendfile_args *uap)
 	struct sf_hdtr hdtr;
 	off_t off, xfsize, sbytes = 0;
 	int error = 0, s;
-	kauth_cred_t safecred;
 
 	if (sf_bufs == NULL) {
 		/* Fail if initialization failed */
@@ -1925,10 +1924,8 @@ retry_lookup:
 			auio.uio_segflg = UIO_NOCOPY;
 			auio.uio_rw = UIO_READ;
 			uio_setresid(&auio, MAXBSIZE);
-			safecred = kauth_cred_proc_ref(p);
 			error = VOP_READ(vp, &auio, IO_VMIO | ((MAXBSIZE / bsize) << 16),
-			        safecred);
-			kauth_cred_unref(&safecred);
+			        p->p_ucred);
 			vm_page_flag_clear(pg, PG_ZERO);
 			vm_page_io_finish(pg);
 			if (error) {

@@ -75,7 +75,9 @@ MALLOC_DECLARE(M_LOCKF);
  */
 TAILQ_HEAD(locklist, lockf);
 
-#pragma pack(4)
+#if __DARWIN_ALIGN_POWER
+#pragma options align=power
+#endif
 
 struct lockf {
 	short	lf_flags;	    /* Semantics: F_POSIX, F_FLOCK, F_WAIT */
@@ -90,7 +92,9 @@ struct lockf {
 	TAILQ_ENTRY(lockf) lf_block;/* A request waiting for a lock */
 };
 
-#pragma pack()
+#if __DARWIN_ALIGN_POWER
+#pragma options align=reset
+#endif
 
 /* Maximum length of sleep chains to traverse to try and detect deadlock. */
 #define MAXDEPTH 50

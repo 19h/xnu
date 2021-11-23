@@ -90,7 +90,6 @@ struct	nfsmount {
 	int	nm_timeouts;		/* Request timeouts */
 	int	nm_rsize;		/* Max size of read rpc */
 	int	nm_wsize;		/* Max size of write rpc */
-	int	nm_biosize;		/* buffer I/O size */
 	int	nm_readdirsize;		/* Size of a readdir rpc */
 	int	nm_readahead;		/* Num. of blocks to readahead */
 	int	nm_acregmin;		/* reg file min attr cache timeout */
@@ -103,7 +102,7 @@ struct	nfsmount {
 	char	*nm_authstr;		/* Authenticator string */
 	char	*nm_verfstr;		/* and the verifier */
 	int	nm_verflen;
-	uint64_t nm_verf;		/* V3 write verifier */
+	u_char	nm_verf[NFSX_V3WRITEVERF]; /* V3 write verifier */
 	NFSKERBKEY_T nm_key;		/* and the session key */
 	int	nm_numuids;		/* Number of nfsuid mappings */
 	TAILQ_HEAD(, nfsuid) nm_uidlruhead; /* Lists of nfsuid mappings */

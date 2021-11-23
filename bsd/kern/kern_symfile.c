@@ -89,7 +89,7 @@ static int
 output_kernel_symbols(struct proc *p)
 {
     struct vnode		*vp;
-    kauth_cred_t		cred = p->p_ucred;	/* XXX unsafe */
+    kauth_cred_t		cred = p->p_ucred;	/* XXX */
     struct vnode_attr		va;
     struct vfs_context		context;
     struct load_command		*cmd;
@@ -114,9 +114,6 @@ output_kernel_symbols(struct proc *p)
     orig_mh	= NULL;
     orig_st	= NULL;
     
-    context.vc_proc = p;
-    context.vc_ucred = kauth_cred_proc_ref(p);
-
     // Dispose of unnecessary gumf, the booter doesn't need to load these
     rc_mh = IODTGetLoaderInfo("Kernel-__HEADER",
 				(void **)&orig_mh, &orig_mhsize);
@@ -136,6 +133,9 @@ output_kernel_symbols(struct proc *p)
     // Check to see if the root is 'e' or 'n', is this a test for network?
     if (rootdevice[0] == 'e' && rootdevice[1] == 'n')
 	goto out;
+
+    context.vc_proc = p;
+    context.vc_ucred = cred;
 
     if ((error = vnode_open("mach.sym", (O_CREAT | FWRITE), (S_IRUSR | S_IRGRP | S_IROTH), 0, &vp, &context)))
         goto out;
@@ -325,7 +325,6 @@ out:
 	if (!error) error = error1;
     }
 
-    kauth_cred_unref(&context.vc_ucred);
     return(error);
 }
 /*
@@ -374,6 +373,7 @@ kern_open_file_for_direct_io(const char * name,
     struct kern_direct_file_io_ref_t * ref;
 
     struct proc 		*p;
+    struct ucred 		*cred;
     struct vnode_attr		va;
     int				error;
     off_t			f_offset;
@@ -397,8 +397,9 @@ kern_open_file_for_direct_io(const char * name,
 
     ref->vp = NULL;
     p = current_proc();		// kernproc;
+    cred = p->p_ucred;
     ref->context.vc_proc = p;
-    ref->context.vc_ucred = kauth_cred_proc_ref(p);
+    ref->context.vc_ucred = cred;
 
     if ((error = vnode_open(name, (O_CREAT | FWRITE), (0), 0, &ref->vp, &ref->context)))
         goto out;
@@ -535,14 +536,10 @@ out:
     kprintf("kern_open_file_for_direct_io(%d)\n", error);
 
     if (error && ref) {
-		if (ref->vp) {
-			vnode_close(ref->vp, FWRITE, &ref->context);
-			ref->vp = NULLVP;
-		}
+	if (ref->vp)
+	    vnode_close(ref->vp, FWRITE, &ref->context);
 
-		kauth_cred_unref(&ref->context.vc_ucred);
-		kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
-		ref = NULL;
+	kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
     }
 
     return(ref);
@@ -568,9 +565,7 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref)
 	if (ref->vp) {
 	    error = vnode_close(ref->vp, FWRITE, &ref->context);
 	    kprintf("vnode_close(%d)\n", error);
-		ref->vp = NULLVP;
 	}
-	kauth_cred_unref(&ref->context.vc_ucred);
 	kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
     }
 }

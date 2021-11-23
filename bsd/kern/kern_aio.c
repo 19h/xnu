@@ -2061,15 +2061,11 @@ do_aio_write( aio_workq_entry *entryp )
 		return(EBADF);
 	}
 	if ( fp != NULL ) {
-		/* NB: tell dofilewrite the offset, and to use the proc cred */
-		error = dofilewrite( entryp->procp,
-				     fp,
-				     entryp->aiocb.aio_fildes,
-				     entryp->aiocb.aio_buf,
-				     entryp->aiocb.aio_nbytes,
-				     entryp->aiocb.aio_offset,
-				     FOF_OFFSET | FOF_PCRED,
-				     &entryp->returnval);
+		error = dofilewrite( entryp->procp, fp, entryp->aiocb.aio_fildes, 
+							 entryp->aiocb.aio_buf, 
+							 entryp->aiocb.aio_nbytes,
+							 entryp->aiocb.aio_offset, FOF_OFFSET, 
+							 &entryp->returnval );
 		
 		fp_drop(entryp->procp, entryp->aiocb.aio_fildes, fp, 0);
 	}
@@ -2202,8 +2198,10 @@ aio_init( void )
 	int			i;
 	
 	aio_lock_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_attr_setstat(aio_lock_grp_attr);
 	aio_lock_grp = lck_grp_alloc_init("aio", aio_lock_grp_attr);
 	aio_lock_attr = lck_attr_alloc_init();
+	//lck_attr_setdebug(aio_lock_attr);
 
 	aio_lock = lck_mtx_alloc_init(aio_lock_grp, aio_lock_attr);
 

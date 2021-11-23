@@ -301,11 +301,6 @@ ipf_injectv4_out(
 		m_freem(m);
 		return ENETUNREACH;
 	}
-	
-	/* Put ip_len and ip_off in host byte order, ip_output expects that */
-	NTOHS(ip->ip_len);
-	NTOHS(ip->ip_off);
-	
 	/* Send  */
 	error = ip_output(m, NULL, &ro, IP_ALLOWBROADCAST | IP_RAWOUTPUT, imo);
 	
@@ -454,6 +449,7 @@ ipf_init(void)
 		error = ENOMEM;
 		goto done;
 	}
+	lck_grp_attr_setdefault(grp_attributes);
 	
 	lck_grp = lck_grp_alloc_init("IP Filter", grp_attributes);
 	if (lck_grp == 0) {
@@ -468,6 +464,7 @@ ipf_init(void)
 		error = ENOMEM;
 		goto done;
 	}
+	lck_attr_setdefault(lck_attributes);
 	
 	kipf_lock = lck_mtx_alloc_init(lck_grp, lck_attributes);
 	if (kipf_lock == 0) {

@@ -39,7 +39,6 @@ struct exception_action {
 	struct ipc_port		*port;		/* exception port */
 	thread_state_flavor_t	flavor;		/* state flavor to send */
 	exception_behavior_t	behavior;	/* exception type to raise */
-	boolean_t		privileged;	/* survives ipc_task_reset */
 };
 
 /* Make an up-call to a thread's exception server */

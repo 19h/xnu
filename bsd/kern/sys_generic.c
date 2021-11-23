@@ -1434,8 +1434,7 @@ poll_callback(__unused struct kqueue *kq, struct kevent *kevp, void *data)
 {
 	struct poll_continue_args *cont = (struct poll_continue_args *)data;
 	struct pollfd *fds = CAST_DOWN(struct pollfd *, kevp->udata);
-	short mask;
-
+	
 	/* convert the results back into revents */
 	if (kevp->flags & EV_EOF)
 		fds->revents |= POLLHUP;
@@ -1445,16 +1444,10 @@ poll_callback(__unused struct kqueue *kq, struct kevent *kevp, void *data)
 
 	switch (kevp->filter) {
 	case EVFILT_READ:
-		if (fds->revents & POLLHUP)
-			mask = (POLLIN | POLLRDNORM | POLLPRI | POLLRDBAND );
-		else {
-			mask = 0;
-			if (kevp->data != 0)
-				mask |= (POLLIN | POLLRDNORM );
-			if (kevp->flags & EV_OOBAND)
-				mask |= ( POLLPRI | POLLRDBAND );
-		}
-		fds->revents |= (fds->events & mask);
+		if (kevp->data != 0)
+			fds->revents |= (fds->events & ( POLLIN | POLLRDNORM ));
+		if (kevp->flags & EV_OOBAND)
+			fds->revents |= (fds->events & ( POLLPRI | POLLRDBAND ));
 		break;
 
 	case EVFILT_WRITE:
@@ -1699,6 +1692,8 @@ selthreadclear(sip)
 
 
 
+
+#define DBG_EVENT	0x10
 
 #define DBG_POST	0x10
 #define DBG_WATCH	0x11

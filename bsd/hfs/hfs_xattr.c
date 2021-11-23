@@ -27,7 +27,6 @@
 #include <sys/utfconv.h>
 #include <sys/vnode.h>
 #include <sys/xattr.h>
-#include <sys/kauth.h>
 
 #include "hfs.h"
 #include "hfs_cnode.h"
@@ -70,7 +69,7 @@ int  hfs_vnop_removexattr(struct vnop_removexattr_args *ap);
 int  hfs_vnop_listxattr(struct vnop_listxattr_args *ap);
 int  hfs_attrkeycompare(HFSPlusAttrKey *searchKey, HFSPlusAttrKey *trialKey);
 
-static int file_attribute_exist(struct hfsmount *hfsmp, uint32_t fileID);
+
 
 static int  listattr_callback(const HFSPlusAttrKey *key, const HFSPlusAttrData *data,
                        struct listattr_callback_state *state);
@@ -146,12 +145,7 @@ hfs_vnop_getxattr(struct vnop_getxattr_args *ap)
 			if ( !RESOURCE_FORK_EXISTS(vp)) {
 				return (ENOATTR);
 			}
-			if ((result = hfs_lock(VTOC(vp), HFS_EXCLUSIVE_LOCK))) {
-				return (result);
-			}
-			result = hfs_vgetrsrc(hfsmp, vp, &rvp, vfs_context_proc(ap->a_context));
-			hfs_unlock(VTOC(vp));
-			if (result) {
+			if ((result = hfs_vgetrsrc(hfsmp, vp, &rvp, vfs_context_proc(ap->a_context)))) {
 				return (result);
 			}
 			if (uio == NULL) {
@@ -298,12 +292,7 @@ hfs_vnop_setxattr(struct vnop_setxattr_args *ap)
 				return (ENOATTR);
 			}
 		}
-		if ((result = hfs_lock(VTOC(vp), HFS_EXCLUSIVE_LOCK))) {
-			return (result);
-		}
-		result = hfs_vgetrsrc(hfsmp, vp, &rvp, vfs_context_proc(ap->a_context));
-		hfs_unlock(VTOC(vp));
-		if (result) {
+		if ((result = hfs_vgetrsrc(hfsmp, vp, &rvp, vfs_context_proc(ap->a_context)))) {
 			return (result);
 		}
 		result = VNOP_WRITE(rvp, uio, 0, ap->a_context);
@@ -479,12 +468,7 @@ hfs_vnop_removexattr(struct vnop_removexattr_args *ap)
 		if ( !RESOURCE_FORK_EXISTS(vp) ) {
 			return (ENOATTR);
 		}
-		if ((result = hfs_lock(VTOC(vp), HFS_EXCLUSIVE_LOCK))) {
-			return (result);
-		}
-		result = hfs_vgetrsrc(hfsmp, vp, &rvp, p);
-		hfs_unlock(VTOC(vp));
-		if (result) {
+		if ((result = hfs_vgetrsrc(hfsmp, vp, &rvp, p))) {
 			return (result);
 		}
 		hfs_lock_truncate(VTOC(rvp), TRUE);
@@ -548,25 +532,6 @@ exit1:
 	if (result == 0) {
 		VTOC(vp)->c_touch_chgtime = TRUE;
 		HFS_KNOTE(vp, NOTE_ATTRIB);
-
-		/* If no more attributes exist, clear the attribute bit */
-		lockflags = hfs_systemfile_lock(hfsmp, SFL_ATTRIBUTE, HFS_SHARED_LOCK);
-		result = file_attribute_exist(hfsmp, VTOC(vp)->c_fileid);
-		if (result == 0) {
-			VTOC(vp)->c_attr.ca_recflags &= ~kHFSHasAttributesMask;
-			VTOC(vp)->c_flag |= C_MODIFIED;
-		} else if (result == EEXIST) {
-			result = 0;
-		}
-		hfs_systemfile_unlock(hfsmp, lockflags);
-
-		/* If ACL was removed, clear security bit */
-		if ((bcmp(ap->a_name, KAUTH_FILESEC_XATTR, sizeof(KAUTH_FILESEC_XATTR)) == 0)) {
-			VTOC(vp)->c_attr.ca_recflags &= ~kHFSHasSecurityMask;
-			VTOC(vp)->c_flag |= C_MODIFIED;
-		}
-
-		(void) hfs_update(vp, 0);
 	}
 exit2:
 	if (result == btNotFound) {
@@ -578,69 +543,6 @@ exit2:
 
 	return MacToVFSError(result);
 }
-
-/* Check if any attribute record exist for given fileID.  This function 
- * is called by hfs_vnop_removexattr to determine if it should clear the 
- * attribute bit in the catalog record or not.
- * 
- * Note - you must acquire a shared lock on the attribute btree before
- *        calling this function.
- * 
- * Output: 
- * 	EEXIST	- If attribute record was found
- *	0	- Attribute was not found
- *	(other)	- Other error (such as EIO) 
- */
-static int
-file_attribute_exist(struct hfsmount *hfsmp, uint32_t fileID)
-{
-	HFSPlusAttrKey *key;
-	struct BTreeIterator * iterator = NULL;
-	struct filefork *btfile;
-	int result = 0;
-
-	// if there's no attribute b-tree we sure as heck
-	// can't have any attributes!
-	if (hfsmp->hfs_attribute_vp == NULL) {
-	    return false;
-	}
-
-	MALLOC(iterator, BTreeIterator *, sizeof(*iterator), M_TEMP, M_WAITOK);
-	if (iterator == NULL) {
-		result = ENOMEM;
-		goto out;
-	} 
-	bzero(iterator, sizeof(*iterator));
-	key = (HFSPlusAttrKey *)&iterator->key;
-
-	result = buildkey(fileID, NULL, key);
-	if (result) {
-		goto out;
-	}
-
-	btfile = VTOF(hfsmp->hfs_attribute_vp);
-	result = BTSearchRecord(btfile, iterator, NULL, NULL, NULL);
-	if (result && (result != btNotFound)) {
-		goto out;
-	}
-
-	result = BTIterateRecord(btfile, kBTreeNextRecord, iterator, NULL, NULL);
-	/* If no next record was found or fileID for next record did not match,
-	 * no more attributes exist for this fileID
-	 */
-	if ((result && (result == btNotFound)) || (key->fileID != fileID)) {
-		result = 0;	
-	} else {
-		result = EEXIST;
-	}
-
-out:
-	if (iterator) {
-		FREE(iterator, M_TEMP);
-	}
-	return result;
-}
-
 
 
 /*

@@ -56,3 +56,4 @@ errno_t	net_init_add(net_init_func_ptr	init_func);
 extern void net_init_run(void);
 #endif /* BSD_KERNEL_PRIVATE */
 
+#endif /* _NET_INIT_H_ */

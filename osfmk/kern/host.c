@@ -530,7 +530,7 @@ host_processor_info(
 	unsigned int			icount, tcount;
 	unsigned int			pcount, i;
 	vm_offset_t				addr;
-	vm_size_t				size, needed;
+	vm_size_t				size;
 	vm_map_copy_t			copy;
 
 	if (host == HOST_NULL)
@@ -543,8 +543,7 @@ host_processor_info(
 	pcount = processor_count;
 	assert(pcount != 0);
 
-	needed = pcount * icount * sizeof(natural_t);
-	size = round_page(needed);
+	size = round_page(pcount * icount * sizeof(natural_t));
 	result = kmem_alloc(ipc_kernel_map, &addr, size);
 	if (result != KERN_SUCCESS)
 		return (KERN_RESOURCE_SHORTAGE);
@@ -574,9 +573,6 @@ host_processor_info(
 			}
 		}
 	}
-
-	if (size != needed) 
-		bzero((char *) addr + needed, size - needed);
 
 	result = vm_map_unwire(ipc_kernel_map, vm_map_trunc_page(addr),
 			       vm_map_round_page(addr + size), FALSE);

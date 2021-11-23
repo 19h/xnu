@@ -1969,6 +1969,19 @@ LEXT(current_act)
 
 			mfsprg	r3,1
 			blr
+
+			.align	5
+			.globl	EXT(clock_get_uptime)
+LEXT(clock_get_uptime)
+1:			mftbu	r9
+			mftb	r0
+			mftbu	r11
+			cmpw	r11,r9
+			bne--	1b
+			stw		r0,4(r3)
+			stw		r9,0(r3)
+			blr
+
 		
 			.align	5
 			.globl	EXT(mach_absolute_time)
@@ -2289,7 +2302,7 @@ spOver:		mftbu	r8									; Get upper time
 			andc	r7,r7,r0							; Pin time at 0 if under minimum
 			subfe	r2,r2,r2							; 0 if diff > 2**32, -1 otherwise		
 			sub		r7,r7,r10							; Negative if duration is less than (max - min)
-			or		r2,r2,r0							; If the duration is negative, it is not too big
+			or		r2,r2,r0							; If the duration is negative, it isn't too big
 			srawi	r0,r7,31							; -1 if duration is too small
 			and		r7,r7,r2							; Clear duration if high part too big
 			and		r7,r7,r0							; Clear duration if low part too big

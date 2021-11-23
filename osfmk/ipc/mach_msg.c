@@ -183,9 +183,6 @@ mach_msg_send(
 	if ((send_size < sizeof(mach_msg_header_t)) || (send_size & 3))
 		return MACH_SEND_MSG_TOO_SMALL;
 
-	if (send_size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
-		return MACH_SEND_TOO_LARGE;
-	
 	msg_and_trailer_size = send_size + MAX_TRAILER_SIZE;
 
 	kmsg = ipc_kmsg_alloc(msg_and_trailer_size);
@@ -585,7 +582,6 @@ mach_msg_overwrite_trap(
 	mach_port_name_t	notify = args->notify;
 	mach_vm_address_t	rcv_msg_addr = args->rcv_msg;
         mach_msg_size_t		scatter_list_size = 0; /* NOT INITIALIZED - but not used in pactice */
-	mach_port_seqno_t temp_seqno = 0;
 
 	register mach_msg_header_t *hdr;
 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
@@ -1169,7 +1165,6 @@ mach_msg_overwrite_trap(
 		  }
 		  if (ipc_kmsg_queue_first(&rcv_mqueue->imq_messages) != IKM_NULL) {
 			imq_unlock(rcv_mqueue);
-			splx(s);
 			HOT(c_mmot_cold_033++);
 			goto fall_off;
 		  }
@@ -1493,6 +1488,7 @@ mach_msg_overwrite_trap(
 
 	    slow_copyin:
 	    {
+		mach_port_seqno_t temp_seqno = 0;
 		register mach_port_name_t reply_name =
 			        (mach_port_name_t)hdr->msgh_local_port;
 
@@ -1585,6 +1581,7 @@ mach_msg_overwrite_trap(
 
 	    {
 		register ipc_port_t	reply_port;
+		mach_port_seqno_t	local_seqno;
 		spl_t s;
 
 		/*
@@ -1661,7 +1658,7 @@ mach_msg_overwrite_trap(
 		 * no threads blocked waiting to send.
 		 */
 		dest_port = reply_port;
-		temp_seqno = rcv_mqueue->imq_seqno++;
+		local_seqno = rcv_mqueue->imq_seqno++;
 		imq_unlock(rcv_mqueue);
 		splx(s);
 
@@ -1673,7 +1670,7 @@ mach_msg_overwrite_trap(
 		ip_check_unlock(reply_port);
 
 		if (option & MACH_RCV_TRAILER_MASK) {
-			trailer->msgh_seqno = temp_seqno;	
+			trailer->msgh_seqno = local_seqno;	
 			trailer->msgh_trailer_size = REQUESTED_TRAILER_SIZE(option);
 		}
 		/* copy out the kernel reply */
@@ -1758,7 +1755,6 @@ mach_msg_overwrite_trap(
 		/* LP64support - have to compute real size as it would be received */
 		reply_size = ipc_kmsg_copyout_size(kmsg, current_map()) +
 		             REQUESTED_TRAILER_SIZE(option);
-		temp_seqno = trailer->msgh_seqno;
 		if (rcv_size < reply_size) {
 			if (msg_receive_error(kmsg, msg_addr, option, temp_seqno,
 				        space) == MACH_RCV_INVALID_DATA) {

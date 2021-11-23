@@ -46,6 +46,7 @@
 #include <netat/adsp.h>
 #include <netat/adsp_internal.h>
 
+atlock_t adsptmr_lock;
 
 extern	void DoTimerElem();	/* (TimerElemPtr t);  
 				 * External routine called to 
@@ -68,13 +69,17 @@ void InsertTimerElem(qhead, t, val)
 {
     TimerElemPtr p;		/* parent pointer */
     TimerElemPtr n;		/* current */
-		
+    int	s;
+	
+    ATDISABLE(s, adsptmr_lock);
+	
     if (t->onQ) {
         /*
-	 	* someone else beat us to the punch and put this
-	 	* element back on the queue, just return in this case
-	 	*/
-		return;
+	 * someone else beat us to the punch and put this
+	 * element back on the queue, just return in this case
+	 */
+        ATENABLE(s, adsptmr_lock);
+	return;
     }
     p = (TimerElemPtr)qhead;
 
@@ -96,6 +101,7 @@ void InsertTimerElem(qhead, t, val)
     t->timer = val;		/* this is our value */
     t->link = n;		/* we point to n */
     
+    ATENABLE(s, adsptmr_lock);
 }
 
 
@@ -113,13 +119,17 @@ void RemoveTimerElem(qhead, t)	/* (TimerElemPtr *qhead, TimerElemPtr t) */
 {
     TimerElemPtr p;		/* parent pointer */
     TimerElemPtr n;		/* current */
-		
+    int	s;
+	
+    ATDISABLE(s, adsptmr_lock);
+	
     if ( !t->onQ) {
         /*
-	 	* someone else beat us to the punch and took this
-	 	* element off of the queue, just return in this case
-	 	*/
-		return;
+	 * someone else beat us to the punch and took this
+	 * element off of the queue, just return in this case
+	 */
+        ATENABLE(s, adsptmr_lock);
+	return;
     }
     p = (TimerElemPtr)qhead;
 
@@ -137,6 +147,7 @@ void RemoveTimerElem(qhead, t)	/* (TimerElemPtr *qhead, TimerElemPtr t) */
 	p = n;
     }				/* while */
 	
+    ATENABLE(s, adsptmr_lock);
 }
 
 
@@ -154,19 +165,29 @@ void TimerQueueTick(qhead)	/* (TimerElemPtr *qhead) */
 {
     TimerElemPtr p;		/* parent pointer */
     TimerElemPtr n;		/* current */
-		
+    int	s;
+	
+    ATDISABLE(s, adsptmr_lock);
+	
     p = (TimerElemPtr)qhead;
-    if (p->link) {		/* Is anything on queue? */
+    if (p->link)		/* Is anything on queue? */
 	p->link->timer--;	/* Yes, decrement by a tick */
-	while ((n = p->link) && 
-	       (n->timer == 0)) /* Next guy needs to be serviced */
-	{
-		p->link = n->link;	/* Unlink us */
-		n->onQ	= 0;
+    else
+	goto done;		/* No, we're outta' here */
+		
+    while ((n = p->link) && 
+	   (n->timer == 0)) /* Next guy needs to be serviced */
+    {
+	p->link = n->link;	/* Unlink us */
+	n->onQ	= 0;
 
-		DoTimerElem(n);
+	ATENABLE(s, adsptmr_lock);
+	DoTimerElem(n);
+	ATDISABLE(s, adsptmr_lock);
 
-		p = (TimerElemPtr)qhead;
-	}				/* while */
-    }
+	p = (TimerElemPtr)qhead;
+    }				/* while */
+	
+done:
+    ATENABLE(s, adsptmr_lock);
 }

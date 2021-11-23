@@ -1082,7 +1082,7 @@ ttioctl(register struct tty *tp,
 		register int t = *(int *)data;
 		dev_t device = tp->t_dev;
 
-		if (t >= nlinesw || t < 0)
+		if (t >= nlinesw)
 			return (ENXIO);
 		if (t != tp->t_line) {
 			s = spltty();

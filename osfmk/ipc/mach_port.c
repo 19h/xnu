@@ -623,16 +623,12 @@ mach_port_allocate_full(
 	}
 
 	if (qosp->prealloc) {
-		if (qosp->len > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE) {
-			return KERN_RESOURCE_SHORTAGE;
-		} else {
-			mach_msg_size_t size = qosp->len + MAX_TRAILER_SIZE;
-			if (right != MACH_PORT_RIGHT_RECEIVE)
-				return (KERN_INVALID_VALUE);
-			kmsg = (ipc_kmsg_t)ipc_kmsg_alloc(size);
-			if (kmsg == IKM_NULL)
-				return (KERN_RESOURCE_SHORTAGE);
-		}
+		mach_msg_size_t size = qosp->len + MAX_TRAILER_SIZE;
+		if (right != MACH_PORT_RIGHT_RECEIVE)
+			return (KERN_INVALID_VALUE);
+		kmsg = (ipc_kmsg_t)ipc_kmsg_alloc(size);
+		if (kmsg == IKM_NULL)
+			return (KERN_RESOURCE_SHORTAGE);
 	}
 
 	switch (right) {

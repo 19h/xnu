@@ -71,5 +71,13 @@ const char * gIOKernelConfigTables =
 "       'IONameMatch'           = nvram;"
 "   }"
 #endif /* PPC */
+#ifdef i386
+"   ,"
+"   {"
+"       'IOClass'           = AppleIntelClock;"
+"       'IOProviderClass'   = IOPlatformDevice;"
+"       'IONameMatch'       = intel-clock;"
+"   }"
+#endif /* i386 */
 ")";
 

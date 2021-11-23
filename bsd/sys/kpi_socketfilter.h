@@ -601,3 +601,4 @@ errno_t	sockopt_copyin(sockopt_t sopt, void *data, size_t length);
  */
 errno_t	sockopt_copyout(sockopt_t sopt, void *data, size_t length);
 
+#endif

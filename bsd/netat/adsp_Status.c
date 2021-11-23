@@ -108,6 +108,7 @@ int adspStatus(sp, pb)	/* (DSPPBPtr pb) */
 {
     short err;
     short bytes;
+    int	s;
 
     if (sp == 0) {
 	pb->ioResult = errRefNum;
@@ -115,6 +116,7 @@ int adspStatus(sp, pb)	/* (DSPPBPtr pb) */
     }
 	
     pb->u.statusParams.ccbPtr 	= (TPCCB)sp;
+    ATDISABLE(s, sp->lock);	
 	
     /*
      * pending bytes in send queue
@@ -140,6 +142,7 @@ int adspStatus(sp, pb)	/* (DSPPBPtr pb) */
 				/* available buffer space in receive queue */
     pb->u.statusParams.recvQFree = CalcRecvWdw(sp);
 
+    ATENABLE(s, sp->lock);	
     pb->ioResult = 0;
     adspioc_ack(0, pb->ioc, pb->gref);
     return 0;

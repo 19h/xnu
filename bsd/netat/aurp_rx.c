@@ -28,8 +28,6 @@
  *
  *	File: rx.c
  */
-#ifdef AURP_SUPPORT
-
 #include <sys/errno.h>
 #include <sys/types.h>
 #include <sys/param.h>
@@ -209,4 +207,3 @@ at_insert(m, type, node)
 
 	return 0;
 }
-

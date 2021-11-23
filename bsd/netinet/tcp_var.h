@@ -84,23 +84,6 @@ extern int	tcp_reass_qsize;
 MALLOC_DECLARE(M_TSEGQ);
 #endif
 
-struct sackblk {
-	tcp_seq start;		/* start seq no. of sack block */
-	tcp_seq end;		/* end seq no. */
-};
-
-struct sackhole {
-	tcp_seq start;		/* start seq no. of hole */
-	tcp_seq end;		/* end seq no. */
-	tcp_seq rxmit;		/* next seq. no in hole to be retransmitted */
-	TAILQ_ENTRY(sackhole) scblink;	/* scoreboard linkage */
-};
-
-struct sackhint {
-	struct sackhole	*nexthole;
-	int	sack_bytes_rexmit;
-};
-
 struct tcptemp {
 	u_char	tt_ipgen[40]; /* the size must be of max ip header, now IPv6 */
 	struct	tcphdr tt_t;
@@ -142,13 +125,6 @@ struct tcpcb {
 #define	TF_LQ_OVERFLOW	0x20000		/* listen queue overflow */
 #define	TF_RXWIN0SENT	0x40000		/* sent a receiver win 0 in response */
 #define	TF_SLOWLINK	0x80000		/* route is a on a modem speed link */
-
-
-#define	TF_LASTIDLE	0x100000		/* connection was previously idle */
-#define	TF_FASTRECOVERY	0x200000	/* in NewReno Fast Recovery */
-#define	TF_WASFRECOVERY	0x400000	/* was in NewReno Fast Recovery */
-#define	TF_SIGNATURE	0x800000	/* require MD5 digests (RFC2385) */
-#define	TF_MAXSEGSNT	0x1000000	/* last segment sent was a full segment */
 
 	int	t_force;		/* 1 if forcing out a byte */
 
@@ -226,29 +202,7 @@ struct tcpcb {
 	tcp_seq snd_high;		/* for use in NewReno Fast Recovery */
 	tcp_seq snd_high_prev;	/* snd_high prior to retransmit */
 
-	tcp_seq	snd_recover_prev;	/* snd_recover prior to retransmit */
-	u_char	snd_limited;		/* segments limited transmitted */
-/* anti DoS counters */
-	u_long	rcv_second;		/* start of interval second */
-/* SACK related state */
-	int	sack_enable;		/* enable SACK for this connection */
-	int	snd_numholes;		/* number of holes seen by sender */
-
-	TAILQ_HEAD(sackhole_head, sackhole) snd_holes;
-						/* SACK scoreboard (sorted) */
-	tcp_seq	snd_fack;		/* last seq number(+1) sack'd by rcv'r*/
-	int	rcv_numsacks;		/* # distinct sack blks present */
-	struct sackblk sackblks[MAX_SACK_BLKS]; /* seq nos. of sack blocks */
-	tcp_seq sack_newdata;		/* New data xmitted in this recovery
-   					   episode starts at this seq number */
-	struct sackhint	sackhint;	/* SACK scoreboard hint */
-	int	t_rttlow;		/* smallest observerved RTT */
 };
-
-#define IN_FASTRECOVERY(tp)	(tp->t_flags & TF_FASTRECOVERY)
-#define ENTER_FASTRECOVERY(tp)	tp->t_flags |= TF_FASTRECOVERY
-#define EXIT_FASTRECOVERY(tp)	tp->t_flags &= ~TF_FASTRECOVERY
-
 
 /*
  * Structure to hold TCP options that are only used during segment
@@ -257,19 +211,16 @@ struct tcpcb {
  * to tcp_dooptions.
  */
 struct tcpopt {
-	u_long	to_flags;		/* which options are present */
+	u_long	to_flag;		/* which options are present */
 #define TOF_TS		0x0001		/* timestamp */
-#define	TOF_MSS		0x0010
-#define	TOF_SCALE	0x0020
-#define	TOF_SIGNATURE	0x0040	/* signature option present */
-#define	TOF_SIGLEN	0x0080	/* signature length valid (RFC2385) */
-#define	TOF_SACK	0x0100		/* Peer sent SACK option */
-	u_long		to_tsval;
-	u_long		to_tsecr;
-	u_int16_t	to_mss;
-	u_int8_t	to_requested_s_scale;
-	u_int8_t	to_nsacks;	/* number of SACK blocks */
-	u_char		*to_sacks;	/* pointer to the first SACK blocks */
+#define TOF_CC		0x0002		/* CC and CCnew are exclusive */
+#define TOF_CCNEW	0x0004
+#define	TOF_CCECHO	0x0008
+	u_long	to_tsval;
+	u_long	to_tsecr;
+	tcp_cc	to_cc;		/* holds CC or CCnew */
+	tcp_cc	to_ccecho;
+	u_short 	reserved;		/* unused now: was to_maxseg */
 };
 
 /*
@@ -504,15 +455,6 @@ struct	tcpstat {
 	u_long	tcps_badsyn;		/* bogus SYN, e.g. premature ACK */
 	u_long	tcps_mturesent;		/* resends due to MTU discovery */
 	u_long	tcps_listendrop;	/* listen queue overflows */
-
-	/* SACK related stats */
-	u_long	tcps_sack_recovery_episode; /* SACK recovery episodes */
-	u_long  tcps_sack_rexmits;	    /* SACK rexmit segments   */
-	u_long  tcps_sack_rexmit_bytes;	    /* SACK rexmit bytes      */
-	u_long  tcps_sack_rcv_blocks;	    /* SACK blocks (options) received */
-	u_long  tcps_sack_send_blocks;	    /* SACK blocks (options) sent     */
-	u_long  tcps_sack_sboverflow;	    /* SACK sendblock overflow   */
-
 };
 
 /*
@@ -590,7 +532,6 @@ extern	u_long tcp_now;		/* for RFC 1323 timestamps */
 extern	int tcp_delack_enabled;
 #endif /* __APPLE__ */
 
-extern	int tcp_do_sack;	/* SACK enabled/disabled */
 
 void	 tcp_canceltimers(struct tcpcb *);
 struct tcpcb *
@@ -625,15 +566,6 @@ void	 tcp_fillheaders(struct tcpcb *, void *, void *);
 struct tcpcb *
 	 tcp_timers(struct tcpcb *, int);
 void	 tcp_trace(int, int, struct tcpcb *, void *, struct tcphdr *, int);
-
-void	 tcp_update_sack_list(struct tcpcb *tp, tcp_seq rcv_laststart, tcp_seq rcv_lastend);
-void	 tcp_clean_sackreport(struct tcpcb *tp);
-void	 tcp_sack_adjust(struct tcpcb *tp);
-struct sackhole *tcp_sack_output(struct tcpcb *tp, int *sack_bytes_rexmt);
-void	 tcp_sack_partialack(struct tcpcb *, struct tcphdr *);
-void	 tcp_free_sackholes(struct tcpcb *tp);
-
-
 int	 tcp_lock (struct socket *, int, int);
 int	 tcp_unlock (struct socket *, int, int);
 #ifdef _KERN_LOCKS_H_

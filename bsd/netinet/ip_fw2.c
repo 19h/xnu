@@ -1304,7 +1304,6 @@ send_reject(struct ip_fw_args *args, int code, int offset, int ip_len)
 			ip->ip_len = ntohs(ip->ip_len);
 			ip->ip_off = ntohs(ip->ip_off);
 		}
-                args->m->m_flags |= M_SKIP_FIREWALL;
 		icmp_error(args->m, ICMP_UNREACH, code, 0L, 0);
 	} else if (offset == 0 && args->f_id.proto == IPPROTO_TCP) {
 		struct tcphdr *const tcp =
@@ -2942,10 +2941,8 @@ ipfw_ctl(struct sockopt *sopt)
 			int	i, len = 0;
 			struct ip_old_fw	*buf2, *rule_vers0;
 			
-			lck_mtx_lock(ipfw_mutex);
 			buf2 = _MALLOC(static_count * sizeof(struct ip_old_fw), M_TEMP, M_WAITOK);
 			if (buf2 == 0) {
-				lck_mtx_unlock(ipfw_mutex);
 				error = ENOBUFS;
 			}
 			
@@ -2961,7 +2958,6 @@ ipfw_ctl(struct sockopt *sopt)
 					len += sizeof(*rule_vers0);
 					rule_vers0++;
 				}
-				lck_mtx_unlock(ipfw_mutex);
 				error = sooptcopyout(sopt, buf2, len);
 				_FREE(buf2, M_TEMP);
 			}
@@ -2971,13 +2967,11 @@ ipfw_ctl(struct sockopt *sopt)
 			struct ipfw_dyn_rule_compat	*dyn_rule_vers1, *dyn_last = NULL;
 			ipfw_dyn_rule 	*p;
 
-			lck_mtx_lock(ipfw_mutex);
 			buf_size = static_count * sizeof(struct ip_fw_compat) +
 						dyn_count * sizeof(struct ipfw_dyn_rule_compat);
 						
 			buf2 = _MALLOC(buf_size, M_TEMP, M_WAITOK);
 			if (buf2 == 0) {
-				lck_mtx_unlock(ipfw_mutex);
 				error = ENOBUFS;
 			}
 			
@@ -3022,7 +3016,6 @@ ipfw_ctl(struct sockopt *sopt)
 						dyn_last->next = NULL;
 					}
 				}
-				lck_mtx_unlock(ipfw_mutex);
 				
 				error = sooptcopyout(sopt, buf2, len);
 				_FREE(buf2, M_TEMP);
@@ -3118,21 +3111,20 @@ ipfw_ctl(struct sockopt *sopt)
 		/*
 		 * IP_FW_DEL is used for deleting single rules or sets,
 		 * and (ab)used to atomically manipulate sets. 
-		 * rule->rulenum != 0 indicates single rule delete
-		 * rule->set_masks used to manipulate sets
-		 * rule->set_masks[0] contains info on sets to be 
-		 *	disabled, swapped, or moved
-		 * rule->set_masks[1] contains sets to be enabled.
+		 * rule->set_masks is used to distinguish between the two:
+		 *    rule->set_masks[0] == 0
+		 *	delete single rule or set of rules,
+		 *	or reassign rules (or sets) to a different set.
+		 *    rule->set_masks[0] != 0
+		 *	atomic disable/enable sets.
+		 *	rule->set_masks[0] contains sets to be disabled,
+		 *	rule->set_masks[1] contains sets to be enabled.
 		 */
-		 
 		/* there is only a simple rule passed in
 		 * (no cmds), so use a temp struct to copy
 		 */
-		struct ip_fw	temp_rule;
-		u_int32_t	arg;
-		u_int8_t	cmd;
+		struct ip_fw	temp_rule = { 0 };
 		
-		bzero(&temp_rule, sizeof(struct ip_fw));
 		if (api_version != IP_FW_CURRENT_API_VERSION) {
 			error = ipfw_convert_to_latest(sopt, &temp_rule, api_version);
 		}
@@ -3147,31 +3139,21 @@ ipfw_ctl(struct sockopt *sopt)
 			 */
 			lck_mtx_lock(ipfw_mutex);
 			
-			arg = temp_rule.set_masks[0];
-			cmd = (arg >> 24) & 0xff;
-			
-			if (temp_rule.rulenum) {
+			if (temp_rule.set_masks[0] != 0) {
+				/* set manipulation */
+				set_disable =
+					(set_disable | temp_rule.set_masks[0]) & ~temp_rule.set_masks[1] &
+					~(1<<RESVD_SET); /* set RESVD_SET always enabled */
+			}
+			else {
 				/* single rule */
 				error = del_entry(&layer3_chain, temp_rule.rulenum);
 #if DEBUG_INACTIVE_RULES
 				print_chain(&layer3_chain);
 #endif
+
 			}
-			else if (cmd) {
-				/* set reassignment - see comment above del_entry() for details */
-				error = del_entry(&layer3_chain, temp_rule.set_masks[0]);
-#if DEBUG_INACTIVE_RULES
-				print_chain(&layer3_chain);
-#endif
-			}
-			else if (temp_rule.set_masks[0] != 0 ||
-				temp_rule.set_masks[1] != 0) {
-				/* set enable/disable */
-				set_disable =
-					(set_disable | temp_rule.set_masks[0]) & ~temp_rule.set_masks[1] &
-					~(1<<RESVD_SET); /* set RESVD_SET always enabled */
-			}
-						
+			
 			lck_mtx_unlock(ipfw_mutex);
 		}
 		break;
@@ -3269,6 +3251,7 @@ ipfw_init(void)
 	ipfw_mutex_grp_attr = lck_grp_attr_alloc_init();
 	ipfw_mutex_grp = lck_grp_alloc_init("ipfw", ipfw_mutex_grp_attr);
 	ipfw_mutex_attr = lck_attr_alloc_init();
+	lck_attr_setdefault(ipfw_mutex_attr);
 
 	if ((ipfw_mutex = lck_mtx_alloc_init(ipfw_mutex_grp, ipfw_mutex_attr)) == NULL) {
 		printf("ipfw_init: can't alloc ipfw_mutex\n");

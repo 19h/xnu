@@ -162,8 +162,6 @@ public:
     OSMetaClassDeclareReservedUnused(OSObject, 13);
     OSMetaClassDeclareReservedUnused(OSObject, 14);
     OSMetaClassDeclareReservedUnused(OSObject, 15);
-
-#ifdef __ppc__
     OSMetaClassDeclareReservedUnused(OSObject, 16);
     OSMetaClassDeclareReservedUnused(OSObject, 17);
     OSMetaClassDeclareReservedUnused(OSObject, 18);
@@ -180,7 +178,6 @@ public:
     OSMetaClassDeclareReservedUnused(OSObject, 29);
     OSMetaClassDeclareReservedUnused(OSObject, 30);
     OSMetaClassDeclareReservedUnused(OSObject, 31);
-#endif
 };
 
 #endif /* !_LIBKERN_OSOBJECT_H */

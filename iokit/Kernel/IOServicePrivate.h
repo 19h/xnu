@@ -192,8 +192,6 @@ public:
 
 extern const OSSymbol * gIOConsoleUsersKey;
 extern const OSSymbol * gIOConsoleSessionUIDKey;
-extern const OSSymbol * gIOConsoleSessionOnConsoleKey;
-extern const OSSymbol * gIOConsoleSessionSecureInputPIDKey;
 
 #endif /* ! _IOKIT_IOSERVICEPRIVATE_H */
 

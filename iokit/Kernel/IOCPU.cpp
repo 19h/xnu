@@ -221,12 +221,9 @@ bool IOCPU::setProperty(const OSSymbol *aKey, OSObject *anObject)
 
 bool IOCPU::serializeProperties(OSSerialize *serialize) const
 {
-	bool result;
-	OSDictionary *dict = dictionaryWithProperties();
-	dict->setObject(gIOCPUStateKey, gIOCPUStateNames[_cpuState]);
-	result = dict->serialize(serialize);
-	dict->release();  
-	return result;
+  super::setProperty(gIOCPUStateKey, gIOCPUStateNames[_cpuState]);
+  
+  return super::serializeProperties(serialize);
 }
 
 IOReturn IOCPU::setProperties(OSObject *properties)
@@ -389,10 +386,8 @@ void IOCPUInterruptController::setCPUInterruptProperties(IOService *service)
 
 void IOCPUInterruptController::enableCPUInterrupt(IOCPU *cpu)
 {
-	IOInterruptHandler handler = OSMemberFunctionCast(
-		IOInterruptHandler, this, &IOCPUInterruptController::handleInterrupt);
-
-	ml_install_interrupt_handler(cpu, cpu->getCPUNumber(), this, handler, 0);
+  ml_install_interrupt_handler(cpu, cpu->getCPUNumber(), this,
+                               (IOInterruptHandler)&IOCPUInterruptController::handleInterrupt, 0);
   
   enabledCPUs++;
   

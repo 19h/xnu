@@ -45,7 +45,6 @@ extern void	*memmove(void *, const void *, size_t);
 extern void	*memset(void *, int, size_t);
 
 extern size_t	strlen(const char *);
-extern size_t   strnlen(const char *, size_t);
 extern char	*strcpy(char *, const char *);
 extern char	*strncpy(char *, const char *, size_t);
 extern char	*strcat(char *, const char *);

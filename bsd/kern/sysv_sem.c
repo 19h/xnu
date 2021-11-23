@@ -97,7 +97,7 @@ static void semundo_clear(int semid, int semnum);
 /* XXX casting to (sy_call_t *) is bogus, as usual. */
 static sy_call_t *semcalls[] = {
 	(sy_call_t *)semctl, (sy_call_t *)semget,
-	(sy_call_t *)semop
+	(sy_call_t *)semop, (sy_call_t *)semconfig
 };
 
 static int		semtot = 0;		/* # of used semaphores */
@@ -122,10 +122,12 @@ sysv_sem_lock_init( void )
 {
 
     sysv_sem_subsys_lck_grp_attr = lck_grp_attr_alloc_init();
+    lck_grp_attr_setstat(sysv_sem_subsys_lck_grp_attr);
 
-    sysv_sem_subsys_lck_grp = lck_grp_alloc_init("sysv_sem_subsys_lock", sysv_sem_subsys_lck_grp_attr);
+    sysv_sem_subsys_lck_grp = lck_grp_alloc_init("sysv_shm_subsys_lock", sysv_sem_subsys_lck_grp_attr);
 
     sysv_sem_subsys_lck_attr = lck_attr_alloc_init();
+    lck_attr_setdebug(sysv_sem_subsys_lck_attr); 
     lck_mtx_init(&sysv_sem_subsys_mutex, sysv_sem_subsys_lck_grp, sysv_sem_subsys_lck_attr);
 }
 
@@ -193,6 +195,46 @@ semsys(struct proc *p, struct semsys_args *uap, register_t *retval)
 	if (uap->which >= sizeof(semcalls)/sizeof(semcalls[0]))
 		return (EINVAL);
 	return ((*semcalls[uap->which])(p, &uap->a2, retval));
+}
+
+/*
+ * Lock or unlock the entire semaphore facility.
+ *
+ * This will probably eventually evolve into a general purpose semaphore
+ * facility status enquiry mechanism (I don't like the "read /dev/kmem"
+ * approach currently taken by ipcs and the amount of info that we want
+ * to be able to extract for ipcs is probably beyond what the capability
+ * of the getkerninfo facility.
+ *
+ * At the time that the current version of semconfig was written, ipcs is
+ * the only user of the semconfig facility.  It uses it to ensure that the
+ * semaphore facility data structures remain static while it fishes around
+ * in /dev/kmem.
+ */
+
+int
+semconfig(__unused struct proc *p, struct semconfig_args *uap, register_t *retval)
+{
+	int eval = 0;
+
+	switch (uap->flag) {
+	case SEM_CONFIG_FREEZE:
+		SYSV_SEM_SUBSYS_LOCK();
+		break;
+
+	case SEM_CONFIG_THAW:
+		SYSV_SEM_SUBSYS_UNLOCK();
+		break;
+
+	default:
+		printf("semconfig: unknown flag parameter value (%d) - ignored\n",
+		    uap->flag);
+		eval = EINVAL;
+		break;
+	}
+
+	*retval = 0;
+	return(eval);
 }
 
 /*

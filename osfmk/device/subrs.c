@@ -323,28 +323,6 @@ atoi_term(
 }
 
 /*
- * Does the same thing as strlen, except only looks up
- * to max chars inside the buffer. 
- * Taken from archive/kern-stuff/sbf_machine.c in 
- * seatbelt. 
- * inputs:
- *     s       string whose length is to be measured
- *     max     maximum length of string to search for null
- * outputs:
- *     length of s or max; whichever is smaller
- */
-size_t 
-strnlen(const char *s, size_t max) {
-	const char *es = s + max, *p = s;
-	while(*p && p != es) 
-		p++;
-
-	return p - s;
-}
-
-
-
-/*
  * convert an integer to an ASCII string.
  * inputs:
  *	num	integer to be converted

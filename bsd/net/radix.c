@@ -507,7 +507,6 @@ rn_addmask(n_arg, search, skip)
 		R_Free(saved_x);
 		return (x);
 	}
-	mask_rnhead->rnh_cnt++;
 	/*
 	 * Calculate index of mask, and check for normalcy.
 	 */
@@ -646,7 +645,6 @@ rn_addroute(v_arg, n_arg, head, treenodes)
 		tt->rn_bit = -1;
 		tt->rn_flags = RNF_ACTIVE;
 	}
-	head->rnh_cnt++;
 	/*
 	 * Put mask in tree.
 	 */
@@ -795,7 +793,6 @@ on1:
 	 */
 	if (tt->rn_flags & RNF_ROOT)
 		return (0);
-	head->rnh_cnt--;
 #ifdef RN_DEBUG
 	/* Get us out of the creation list */
 	for (t = rn_clist; t && t->rn_ybro != tt; t = t->rn_ybro) {}
@@ -923,40 +920,28 @@ rn_walktree_from(h, a, m, f, w)
 	struct radix_node *base, *next;
 	u_char *xa = (u_char *)a;
 	u_char *xm = (u_char *)m;
-	struct radix_node *rn, *last;
-	int stopping;
+	register struct radix_node *rn, *last = 0 /* shut up gcc */;
+	int stopping = 0;
 	int lastb;
-	int rnh_cnt;
-
-	/*
-	 * This gets complicated because we may delete the node while
-	 * applying the function f to it; we cannot simply use the next
-	 * leaf as the successor node in advance, because that leaf may
-	 * be removed as well during deletion when it is a clone of the
-	 * current node.  When that happens, we would end up referring
-	 * to an already-freed radix node as the successor node.  To get
-	 * around this issue, if we detect that the radix tree has changed
-	 * in dimension (smaller than before), we simply restart the walk
-	 * from the top of tree.
-	 */
-restart:
-	last = NULL;
-	stopping = 0;
-	rnh_cnt = h->rnh_cnt;
 
 	/*
 	 * rn_search_m is sort-of-open-coded here.
 	 */
+	/* printf("about to search\n"); */
 	for (rn = h->rnh_treetop; rn->rn_bit >= 0; ) {
 		last = rn;
-		if (!(rn->rn_bmask & xm[rn->rn_offset]))
+		/* printf("rn_bit %d, rn_bmask %x, xm[rn_offset] %x\n",
+		       rn->rn_bit, rn->rn_bmask, xm[rn->rn_offset]); */
+		if (!(rn->rn_bmask & xm[rn->rn_offset])) {
 			break;
-
-		if (rn->rn_bmask & xa[rn->rn_offset])
+		}
+		if (rn->rn_bmask & xa[rn->rn_offset]) {
 			rn = rn->rn_right;
-		else
+		} else {
 			rn = rn->rn_left;
+		}
 	}
+	/* printf("done searching\n"); */
 
 	/*
 	 * Two cases: either we stepped off the end of our mask,
@@ -967,11 +952,18 @@ restart:
 	rn = last;
 	lastb = rn->rn_bit;
 
-	/* First time through node, go left */
+	/* printf("rn %p, lastb %d\n", rn, lastb);*/
+
+	/*
+	 * This gets complicated because we may delete the node
+	 * while applying the function f to it, so we need to calculate
+	 * the successor node in advance.
+	 */
 	while (rn->rn_bit >= 0)
 		rn = rn->rn_left;
 
 	while (!stopping) {
+		/* printf("node %p (%d)\n", rn, rn->rn_bit); */
 		base = rn;
 		/* If at right child go back up, otherwise, go right */
 		while (rn->rn_parent->rn_right == rn
@@ -979,35 +971,31 @@ restart:
 			rn = rn->rn_parent;
 
 			/* if went up beyond last, stop */
-			if (rn->rn_bit <= lastb) {
+			if (rn->rn_bit < lastb) {
 				stopping = 1;
-				/*
-				 * XXX we should jump to the 'Process leaves'
-				 * part, because the values of 'rn' and 'next'
-				 * we compute will not be used. Not a big deal
-				 * because this loop will terminate, but it is
-				 * inefficient and hard to understand!
-				 */
+				/* printf("up too far\n"); */
 			}
 		}
 
-		/* Find the next *leaf* to start from */
+		/* Find the next *leaf* since next node might vanish, too */
 		for (rn = rn->rn_parent->rn_right; rn->rn_bit >= 0;)
 			rn = rn->rn_left;
 		next = rn;
 		/* Process leaves */
 		while ((rn = base) != 0) {
 			base = rn->rn_dupedkey;
+			/* printf("leaf %p\n", rn); */
 			if (!(rn->rn_flags & RNF_ROOT)
 			    && (error = (*f)(rn, w)))
 				return (error);
 		}
-		/* If one or more nodes got deleted, restart from top */
-		if (h->rnh_cnt < rnh_cnt)
-			goto restart;
 		rn = next;
-		if (rn->rn_flags & RNF_ROOT)
+
+		if (rn->rn_flags & RNF_ROOT) {
+			/* printf("root, stopping"); */
 			stopping = 1;
+		}
+
 	}
 	return 0;
 }
@@ -1020,48 +1008,44 @@ rn_walktree(h, f, w)
 {
 	int error;
 	struct radix_node *base, *next;
-	struct radix_node *rn;
-	int rnh_cnt;
-
+	register struct radix_node *rn = h->rnh_treetop;
 	/*
-	 * This gets complicated because we may delete the node while
-	 * applying the function f to it; we cannot simply use the next
-	 * leaf as the successor node in advance, because that leaf may
-	 * be removed as well during deletion when it is a clone of the
-	 * current node.  When that happens, we would end up referring
-	 * to an already-freed radix node as the successor node.  To get
-	 * around this issue, if we detect that the radix tree has changed
-	 * in dimension (smaller than before), we simply restart the walk
-	 * from the top of tree.
+	 * This gets complicated because we may delete the node
+	 * while applying the function f to it, so we need to calculate
+	 * the successor node in advance.
 	 */
-restart:
-	rn = h->rnh_treetop;
-	rnh_cnt = h->rnh_cnt;
-
 	/* First time through node, go left */
-	while (rn->rn_bit >= 0)
-		rn = rn->rn_left;
+	while (rn->rn_bit >= 0) 
+		if (rn)
+			rn = rn->rn_left;
+		else return(0);
 	for (;;) {
 		base = rn;
 		/* If at right child go back up, otherwise, go right */
-		while (rn->rn_parent->rn_right == rn &&
-		    (rn->rn_flags & RNF_ROOT) == 0)
+		while (rn != NULL && rn->rn_parent != NULL && rn->rn_parent->rn_right == rn
+		       && (rn->rn_flags & RNF_ROOT) == 0)
 			rn = rn->rn_parent;
-		/* Find the next *leaf* to start from */
-		for (rn = rn->rn_parent->rn_right; rn->rn_bit >= 0;)
+		/* Find the next *leaf* since next node might vanish, too */
+		if (rn == NULL || rn->rn_parent == NULL || rn->rn_parent->rn_right == NULL)
+			return (0);
+		for (rn = rn->rn_parent->rn_right; rn->rn_bit >= 0;) {
+			if (rn == NULL || rn->rn_parent == NULL || rn->rn_parent->rn_right == NULL || rn->rn_left == NULL)
+				return(0);
 			rn = rn->rn_left;
+		}
 		next = rn;
 		/* Process leaves */
-		while ((rn = base) != NULL) {
+		while ((rn = base)) {
+			if (rn == NULL)
+				return(0);
 			base = rn->rn_dupedkey;
 			if (!(rn->rn_flags & RNF_ROOT)
 			    && (error = (*f)(rn, w)))
 				return (error);
 		}
-		/* If one or more nodes got deleted, restart from top */
-		if (h->rnh_cnt < rnh_cnt)
-			goto restart;
 		rn = next;
+		if (rn == NULL)
+			return (0);
 		if (rn->rn_flags & RNF_ROOT)
 			return (0);
 	}
@@ -1098,7 +1082,6 @@ rn_inithead(head, off)
 	rnh->rnh_walktree = rn_walktree;
 	rnh->rnh_walktree_from = rn_walktree_from;
 	rnh->rnh_treetop = t;
-	rnh->rnh_cnt = 3;
 	return (1);
 }
 

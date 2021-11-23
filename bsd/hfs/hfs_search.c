@@ -99,7 +99,7 @@ static int CheckCriteria(	ExtendedVCB *vcb,
 							searchinfospec_t *searchInfo2,
 							Boolean lookForDup );
 
-static int CheckAccess(ExtendedVCB *vcb, u_long searchBits, CatalogKey *key, struct vfs_context *ctx);
+static int CheckAccess(ExtendedVCB *vcb, u_long searchBits, CatalogKey *key, struct proc *p);
 
 static int InsertMatch(struct hfsmount *hfsmp, uio_t a_uio, CatalogRecord *rec,
 			CatalogKey *key, struct attrlist *returnAttrList,
@@ -206,7 +206,7 @@ hfs_vnop_search(ap)
 		attrs = ap->a_searchattrs->commonattr | ap->a_returnattrs->commonattr;
 		if (attrs & (ATTR_CMN_NAME | ATTR_CMN_PAROBJID))
 			return (EINVAL);
-		if ((err = vfs_context_suser(ap->a_context)))
+		if ((err = suser(kauth_cred_get(), 0)))
 			return (err);
 	}
 
@@ -307,7 +307,7 @@ hfs_vnop_search(ap)
 				hfs_systemfile_unlock(hfsmp, lockflags);
 				if (CheckCriteria(vcb, ap->a_options, ap->a_searchattrs, &rec,
 								  keyp, &searchInfo1, &searchInfo2, false) &&
-					CheckAccess(vcb, ap->a_options, keyp, ap->a_context)) {
+					CheckAccess(vcb, ap->a_options, keyp, p)) {
 		
 					result = InsertMatch(hfsmp, ap->a_uio, &rec, 
 									  keyp, ap->a_returnattrs,
@@ -365,7 +365,7 @@ hfs_vnop_search(ap)
 		}
 		if (CheckCriteria( vcb, ap->a_options, ap->a_searchattrs, myCurrentDataPtr,
 				myCurrentKeyPtr, &searchInfo1, &searchInfo2, true )
-		&&  CheckAccess(vcb, ap->a_options, myCurrentKeyPtr, ap->a_context)) {
+		&&  CheckAccess(vcb, ap->a_options, myCurrentKeyPtr, p)) {
 			err = InsertMatch(hfsmp, ap->a_uio, myCurrentDataPtr, 
 					myCurrentKeyPtr, ap->a_returnattrs,
 					attributesBuffer, variableBuffer, ap->a_nummatches);
@@ -537,7 +537,7 @@ is_inappropriate_name(char *name, int len)
  */
 
 static int
-CheckAccess(ExtendedVCB *theVCBPtr, u_long searchBits, CatalogKey *theKeyPtr, struct vfs_context *ctx)
+CheckAccess(ExtendedVCB *theVCBPtr, u_long searchBits, CatalogKey *theKeyPtr, struct proc *theProcPtr)
 {
 	Boolean				isHFSPlus;
 	int					myErr;
@@ -546,10 +546,13 @@ CheckAccess(ExtendedVCB *theVCBPtr, u_long searchBits, CatalogKey *theKeyPtr, st
 	hfsmount_t *		hfsmp;
 	struct FndrDirInfo	*finfop;
 	struct vnode * 		vp = NULL;
+	struct vfs_context 	my_context;
 
 	myResult = 0;	/* default to "no access" */
+	my_context.vc_proc = theProcPtr;
+	my_context.vc_ucred = kauth_cred_get();
 		
-	if (!vfs_context_suser(ctx))  {
+	if (!proc_suser(theProcPtr)) {
 		myResult = 1;	/* allow access */
 		goto ExitThisRoutine; /* root always has access */
 	}
@@ -599,9 +602,9 @@ CheckAccess(ExtendedVCB *theVCBPtr, u_long searchBits, CatalogKey *theKeyPtr, st
 		myNodeID = cp->c_parentcnid;	/* move up the hierarchy */
 		hfs_unlock(VTOC(vp));
 		if (vp->v_type == VDIR) {
-		    myErr = vnode_authorize(vp, NULL, (KAUTH_VNODE_SEARCH | KAUTH_VNODE_LIST_DIRECTORY), ctx);
+		    myErr = vnode_authorize(vp, NULL, (KAUTH_VNODE_SEARCH | KAUTH_VNODE_LIST_DIRECTORY), &my_context);
 		} else {
-		    myErr = vnode_authorize(vp, NULL, (KAUTH_VNODE_SEARCH), ctx);
+		    myErr = vnode_authorize(vp, NULL, (KAUTH_VNODE_SEARCH), &my_context);
 		}
 		vnode_put(vp);
 		vp = NULL;

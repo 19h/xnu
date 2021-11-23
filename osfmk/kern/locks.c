@@ -348,17 +348,6 @@ lck_attr_setdebug(
 
 
 /*
- * Routine:	lck_attr_rw_shared_priority
- */
-void
-lck_attr_rw_shared_priority(
-	lck_attr_t	*attr)
-{
-	(void)hw_atomic_or((uint32_t *)&attr->lck_attr_val, LCK_ATTR_RW_SHARED_PRIORITY);
-}
-
-
-/*
  * Routine:	lck_attr_free
  */
 void
@@ -1046,7 +1035,7 @@ unsigned int
 usimple_lock_try_EXT(
 	lck_spin_t		*lock)
 {
-	return(lck_spin_try_lock(lock));
+	lck_spin_try_lock(lock);
 }
 
 void

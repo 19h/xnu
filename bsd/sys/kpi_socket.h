@@ -33,7 +33,6 @@
 
 #include <sys/types.h>
 #include <sys/kernel_types.h>
-#include <sys/socket.h>
 
 struct timeval;
 

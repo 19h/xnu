@@ -586,22 +586,10 @@ sock_send_internal(
 		control->m_len = msg->msg_controllen;
 	}
 	
-	error = sock->so_proto->pr_usrreqs->pru_sosend(sock, msg != NULL ?
-	    (struct sockaddr*)msg->msg_name : NULL, auio, data, control, flags);
-
-	/*
-	 * Residual data is possible in the case of IO vectors but not
-	 * in the mbuf case since the latter is treated as atomic send.
-	 * If pru_sosend() consumed a portion of the iovecs data and
-	 * the error returned is transient, treat it as success; this
-	 * is consistent with sendit() behavior.
-	 */
-	if (auio != NULL && uio_resid(auio) != datalen &&
-	    (error == ERESTART || error == EINTR || error == EWOULDBLOCK))
-		error = 0;
-
-	if (error == 0 && sentlen != NULL) {
-		if (auio != NULL)
+	error = sock->so_proto->pr_usrreqs->pru_sosend(sock, msg ? (struct sockaddr*)msg->msg_name : 0,
+				auio, data, control, flags);
+	if (error == 0 && sentlen) {
+		if (auio)
 			*sentlen = datalen - uio_resid(auio);
 		else
 			*sentlen = datalen;

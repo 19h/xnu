@@ -35,7 +35,8 @@
 #include	<mach/boolean.h>
 #include	<mach/vm_param.h>
 #include	<kern/cpu_number.h>
-#include	<machine/exec.h>
+
+int grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype);
 
 /*
  * Routine: grade_binary()

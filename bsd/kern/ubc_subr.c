@@ -45,7 +45,6 @@
 #include <sys/proc_internal.h>
 #include <sys/kauth.h>
 #include <sys/buf.h>
-#include <sys/user.h>
 
 #include <mach/mach_types.h>
 #include <mach/memory_object_types.h>
@@ -55,7 +54,6 @@
 
 #include <kern/kern_types.h>
 #include <kern/zalloc.h>
-#include <kern/thread.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_protos.h> /* last */
 
@@ -70,9 +68,9 @@
 #endif /* DIAGNOSTIC */
 
 int ubc_info_init_internal(struct vnode *vp, int withfsize, off_t filesize);
-static int ubc_umcallback(vnode_t, void *);
+int ubc_umcallback(vnode_t, void *);
 int ubc_isinuse_locked(vnode_t, int, int);
-static int ubc_msync_internal(vnode_t, off_t, off_t, off_t *, int, int *);
+int ubc_msync_internal(vnode_t, off_t, off_t, off_t *, int, int *);
 
 struct zone	*ubc_info_zone;
 
@@ -193,8 +191,12 @@ ubc_info_init_internal(struct vnode *vp, int withfsize, off_t filesize)
 static void
 ubc_info_free(struct ubc_info *uip)
 {
-	if (IS_VALID_CRED(uip->ui_ucred)) {
-		kauth_cred_unref(&uip->ui_ucred);
+	kauth_cred_t credp;
+	
+	credp = uip->ui_ucred;
+	if (credp != NOCRED) {
+		uip->ui_ucred = NOCRED;
+		kauth_cred_rele(credp);
 	}
 
 	if (uip->ui_control != MEMORY_OBJECT_CONTROL_NULL)
@@ -344,35 +346,6 @@ ubc_getcred(struct vnode *vp)
 	return (NOCRED);
 }
 
-int
-ubc_setthreadcred(struct vnode *vp, struct proc *p, thread_t thread)
-{
-	struct ubc_info *uip;
-	kauth_cred_t credp;
-	struct uthread *uthread = get_bsdthread_info(thread);
-
-	if (!UBCINFOEXISTS(vp))
-		return (1);
-
-	vnode_lock(vp);
-
-	uip = vp->v_ubcinfo;
-	credp = uip->ui_ucred;
-
-	if (!IS_VALID_CRED(credp)) {
-		/* use per-thread cred, if assumed identity, else proc cred */
-		if (uthread == NULL || (uthread->uu_flag & UT_SETUID) == 0) {
-			uip->ui_ucred = kauth_cred_proc_ref(p);
-		} else {
-			uip->ui_ucred = uthread->uu_ucred;
-			kauth_cred_ref(uip->ui_ucred);
-		}
-	}
-	vnode_unlock(vp);
-
-	return (0);
-}
-
 /*
  * Set the credentials
  * existing credentials are not changed
@@ -392,7 +365,7 @@ ubc_setcred(struct vnode *vp, struct proc *p)
 	uip = vp->v_ubcinfo;
 	credp = uip->ui_ucred;
 
-	if (!IS_VALID_CRED(credp)) {
+	if (credp == NOCRED) {
 		uip->ui_ucred = kauth_cred_proc_ref(p);
 	} 
 	vnode_unlock(vp);

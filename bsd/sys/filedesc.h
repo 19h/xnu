@@ -112,9 +112,6 @@ struct filedesc {
 #define UF_RESERVED	0x04		/* open pending / in progress */
 #define UF_CLOSING	0x08		/* close in progress */
 
-#ifdef KERNEL
-#define UF_RESVWAIT	0x10		/* close in progress */
-#endif
 /*
  * Storage required per open file descriptor.
  */

@@ -513,18 +513,6 @@ cat_idlookup(struct hfsmount *hfsmp, cnid_t cnid, struct cat_desc *outdescp,
 	}
 
 	result = cat_lookupbykey(hfsmp, keyp, 0, 0, outdescp, attrp, forkp, NULL);
-	if (!result && outdescp) {
-		cnid_t dcnid = outdescp->cd_cnid;
-		/*
-		 * Just for sanity's sake, let's make sure that
-		 * the key in the thread matches the key in the record.
-		 */
-		if (cnid != dcnid) {
-			printf("Requested cnid (%d / 0x%08lx) != dcnid (%d / 0x%08lx)\n", cnid, cnid, dcnid, dcnid);			
-			result = ENOENT;
-		}
-	}
-
 exit:
 	FREE(recp, M_TEMP);
 	FREE(iterator, M_TEMP);
@@ -548,15 +536,8 @@ cat_lookupmangled(struct hfsmount *hfsmp, struct cat_desc *descp, int wantrsrc,
 		return (ENOENT);
 
 	fileID = GetEmbeddedFileID(descp->cd_nameptr, descp->cd_namelen, &prefixlen);
-
-	if (fileID < (cnid_t)kHFSFirstUserCatalogNodeID)
+	if (fileID < kHFSFirstUserCatalogNodeID)
 		return (ENOENT);
-
-	if(fileID == hfsmp->hfs_privdir_desc.cd_cnid ||
-		fileID == hfsmp->hfs_jnlfileid ||
-		fileID == hfsmp->hfs_jnlinfoblkid) {
-		return (ENOENT);
-	}
 
 	result = cat_idlookup(hfsmp, fileID, outdescp, attrp, forkp);
 	if (result)
@@ -615,7 +596,7 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 	hint = iterator->hint.nodeNum;
 
 	/* Hide the journal files (if any) */
-	if ((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY))) &&
+	if (hfsmp->jnl &&
 		((cnid == hfsmp->hfs_jnlfileid) ||
 		 (cnid == hfsmp->hfs_jnlinfoblkid))) {
 
@@ -672,9 +653,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 			bcopy(&recp->hfsPlusFile.resourceFork.extents[0],
 			      &forkp->cf_extents[0], sizeof(HFSPlusExtentRecord));
 		} else {
-			int i;
-			u_int32_t validblks;
-
 			/* Convert the data fork. */
 			forkp->cf_size = recp->hfsPlusFile.dataFork.logicalSize;
 			forkp->cf_blocks = recp->hfsPlusFile.dataFork.totalBlocks;
@@ -689,36 +667,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 			forkp->cf_vblocks = 0;
 			bcopy(&recp->hfsPlusFile.dataFork.extents[0],
 			      &forkp->cf_extents[0], sizeof(HFSPlusExtentRecord));
-
-			/* Validate the fork's resident extents. */
-			validblks = 0;
-			for (i = 0; i < kHFSPlusExtentDensity; ++i) {
-				if (forkp->cf_extents[i].startBlock + forkp->cf_extents[i].blockCount >= hfsmp->totalBlocks) {
-					/* Suppress any bad extents so a remove can succeed. */
-					forkp->cf_extents[i].startBlock = 0;
-					forkp->cf_extents[i].blockCount = 0;
-					/* Disable writes */
-					if (attrp != NULL) {
-						attrp->ca_mode &= S_IFMT | S_IRUSR | S_IRGRP | S_IROTH;
-					}
-				} else {
-					validblks += forkp->cf_extents[i].blockCount;
-				}
-			}
-			/* Adjust for any missing blocks. */
-			if ((validblks < forkp->cf_blocks) && (forkp->cf_extents[7].blockCount == 0)) {
-				u_int64_t psize;
-
-				forkp->cf_blocks = validblks;
-				if (attrp != NULL) {
-					attrp->ca_blocks = validblks + recp->hfsPlusFile.resourceFork.totalBlocks;
-				}
-				psize = (u_int64_t)validblks * (u_int64_t)hfsmp->blockSize;
-				if (psize < forkp->cf_size) {
-					forkp->cf_size = psize;
-				}
-
-			}
 		}
 	}
 	if (descp != NULL) {
@@ -1074,14 +1022,11 @@ cat_rename (
 
 		/* Find cnode data at new location */
 		result = BTSearchRecord(fcb, to_iterator, &btdata, &datasize, NULL);
-		if (result)
-			goto exit;
 		
 		if ((fromtype != recp->recordType) ||
-		    (from_cdp->cd_cnid != getcnid(recp))) {
-			result = EEXIST;
+		    (from_cdp->cd_cnid != getcnid(recp)))
 			goto exit; /* EEXIST */
-		}
+		
 		/* The old name is a case variant and must be removed */
 		result = BTDeleteRecord(fcb, from_iterator);
 		if (result)
@@ -1618,7 +1563,7 @@ cat_readattr(const CatalogKey *key, const CatalogRecord *rec,
 		    (rec->hfsPlusFolder.folderID == hfsmp->hfs_privdir_desc.cd_cnid)) {
 			return (1);	/* continue */
 		}
-		if ((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY))) &&
+		if (hfsmp->jnl &&
 		    (rec->recordType == kHFSPlusFileRecord) &&
 		    ((rec->hfsPlusFile.fileID == hfsmp->hfs_jnlfileid) ||
 		     (rec->hfsPlusFile.fileID == hfsmp->hfs_jnlinfoblkid))) {
@@ -1934,7 +1879,7 @@ cat_packdirentry(const CatalogKey *ckp, const CatalogRecord *crp,
 				cnid = crp->hfsPlusFile.fileID;
 				/* Hide the journal files */
 				if ((curID == kHFSRootFolderID) &&
-					((hfsmp->jnl || ((HFSTOVCB(hfsmp)->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY)))) &&
+					(hfsmp->jnl) &&
 					((cnid == hfsmp->hfs_jnlfileid) ||
 					 (cnid == hfsmp->hfs_jnlinfoblkid))) {
 					hide = 1;
@@ -2218,20 +2163,6 @@ cat_getdirentries(struct hfsmount *hfsmp, int entrycnt, directoryhint_t *dirhint
 	 */
 	result = BTIterateRecords(fcb, op, iterator,
 	                          (IterateCallBackProcPtr)cat_packdirentry, &state);
-
-	/* If readdir is called for NFS and BTIterateRecords reaches the end of the
-	 * Catalog BTree, call cat_packdirentry() with dummy values to copy previous 
-	 * direntry stored in state to the user buffer.
-	 */
-	if (state.cbs_extended && (result == fsBTRecordNotFoundErr)) {
-		CatalogKey ckp;
-		CatalogRecord crp;
-
-		bzero(&ckp, sizeof(ckp));
-		bzero(&crp, sizeof(crp));
-
-		result = cat_packdirentry(&ckp, &crp, &state);
-	}
 
 	/* Note that state.cbs_index is still valid on errors */
 	*items = state.cbs_index - index;

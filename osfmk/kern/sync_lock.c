@@ -132,16 +132,13 @@ lock_set_create (
 {
 	lock_set_t 	lock_set = LOCK_SET_NULL;
 	ulock_t		ulock;
-	vm_size_t 	size;
+	int 		size;
 	int 		x;
 
 	*new_lock_set = LOCK_SET_NULL;
 
 	if (task == TASK_NULL || n_ulocks <= 0 || policy > SYNC_POLICY_MAX)
 		return KERN_INVALID_ARGUMENT;
-
-	if (VM_MAX_ADDRESS/sizeof(struct ulock) - sizeof(struct lock_set) < (unsigned)n_ulocks)
-		return KERN_RESOURCE_SHORTAGE;
 
 	size = sizeof(struct lock_set) + (sizeof(struct ulock) * (n_ulocks-1));
 	lock_set = (lock_set_t) kalloc (size);

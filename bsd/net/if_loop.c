@@ -462,9 +462,7 @@ loopattach(
 		ifp->if_set_bpf_tap = lo_set_bpf_tap;
 		ifp->if_output = lo_output;
 		ifp->if_type = IFT_LOOP;
-		ifp->if_hwassist = IF_HWASSIST_CSUM_IP | IF_HWASSIST_CSUM_TCP |
-		    IF_HWASSIST_CSUM_UDP | IF_HWASSIST_CSUM_IP_FRAGS |
-		    IF_HWASSIST_CSUM_FRAGMENT;
+		ifp->if_hwassist = IF_HWASSIST_CSUM_IP | IF_HWASSIST_CSUM_TCP | IF_HWASSIST_CSUM_UDP;
 		ifp->if_hdrlen = sizeof(struct loopback_header);
 		lo_ifp = ifp;
 		dlil_if_attach(ifp);

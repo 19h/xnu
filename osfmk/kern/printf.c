@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -766,8 +766,6 @@ printf(const char *fmt, ...)
 	enable_preemption();
 }
 
-extern unsigned int disableSerialOuput;
-
 void
 consdebug_putc(
 	char c)
@@ -779,9 +777,10 @@ consdebug_putc(
 
 	debug_putc(c);
 
+#ifdef __ppc__
 	if (!console_is_serial())
-		if (!disableSerialOuput)
-			PE_kputc(c);
+                PE_kputc(c);
+#endif
 }
 
 void

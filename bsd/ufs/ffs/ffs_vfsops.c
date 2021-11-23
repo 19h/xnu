@@ -87,7 +87,7 @@
 #include <ufs/ffs/ffs_extern.h>
 #if REV_ENDIAN_FS
 #include <ufs/ufs/ufs_byte_order.h>
-#include <libkern/OSByteOrder.h>
+#include <architecture/byte_order.h>
 #endif /* REV_ENDIAN_FS */
 
 int ffs_sbupdate(struct ufsmount *, int);
@@ -353,11 +353,7 @@ ffs_reload(struct mount *mountp, kauth_cred_t cred, struct proc *p)
 	newfs = (struct fs *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian) {
-		error = byte_swap_sbin(newfs);
-		if (error) {
-			buf_brelse(bp);
-			return (error);
-		}
+		byte_swap_sbin(newfs);
 	}
 #endif /* REV_ENDIAN_FS */
 	if (newfs->fs_magic != FS_MAGIC || newfs->fs_bsize > MAXBSIZE ||
@@ -506,9 +502,7 @@ ffs_mountfs(devvp, mp, context)
 			error = EINVAL;
 			goto out;
 	    	}
-		if (error = byte_swap_sbin(fs))
-			goto out;
-
+		byte_swap_sbin(fs);
 		if (fs->fs_magic != FS_MAGIC || fs->fs_bsize > MAXBSIZE ||
 	    		fs->fs_bsize < sizeof(struct fs)) {
 			byte_swap_sbout(fs);
@@ -528,13 +522,6 @@ ffs_mountfs(devvp, mp, context)
 		goto out;
 	}
 
-	if (fs->fs_sbsize < 0 || fs->fs_sbsize > SBSIZE) {
-		error = EINVAL;
-		goto out;
-	}
- 
-        /*
-         * Buffer cache does not handle multiple pages in a buf when
 
 	/*
 	 * Buffer cache does not handle multiple pages in a buf when
@@ -644,28 +631,10 @@ ffs_mountfs(devvp, mp, context)
 	bp = NULL;
 	fs = ump->um_fs;
 	fs->fs_ronly = ronly;
-	if (fs->fs_cssize < 1 || fs->fs_fsize < 1 || fs->fs_ncg < 1) {
-		error = EINVAL;
-		goto out;
-	}
-	if (fs->fs_frag < 1 || fs->fs_frag > MAXFRAG) {
-		error = EINVAL;
-		goto out;
-	}
-
 	size = fs->fs_cssize;
 	blks = howmany(size, fs->fs_fsize);
-	if (fs->fs_contigsumsize > 0) {
-		if (fs->fs_ncg > INT_MAX / sizeof(int32_t) || size > INT_MAX - fs->fs_ncg * sizeof(int32_t)) {
-			error = EINVAL;
-			goto out;
-		}
+	if (fs->fs_contigsumsize > 0)
 		size += fs->fs_ncg * sizeof(int32_t);
-	}
-	if (fs->fs_ncg > INT_MAX / sizeof(u_int8_t) || size > INT_MAX - fs->fs_ncg * sizeof(u_int8_t)) {
-		error = EINVAL;
-		goto out;
-	}
 	size += fs->fs_ncg * sizeof(u_int8_t);
 	space = _MALLOC((u_long)size, M_UFSMNT, M_WAITOK);
 	fs->fs_csp = space;
@@ -977,7 +946,7 @@ ffs_vfs_getattr(mp, fsap, context)
 			length = ulp->ul_namelen;
 #if REV_ENDIAN_FS
 			if (mp->mnt_flag & MNT_REVEND)
-				length = OSSwapInt16(length);
+				length = NXSwapShort(length);
 #endif
 			if (length > 0 && length <= UFS_MAX_LABEL_NAME) {
 				bcopy(ulp->ul_name, fsap->f_vol_name, length);
@@ -1105,14 +1074,13 @@ ffs_vfs_setattr(mp, fsap, context)
 
 		/* Copy new name over existing name */
 		ulp->ul_namelen = strlen(fsap->f_vol_name);
+#if REV_ENDIAN_FS
+		if (mp->mnt_flag & MNT_REVEND)
+			ulp->ul_namelen = NXSwapShort(ulp->ul_namelen);
+#endif
 		bcopy(fsap->f_vol_name, ulp->ul_name, ulp->ul_namelen);
 		ulp->ul_name[UFS_MAX_LABEL_NAME - 1] = '\0';
 		ulp->ul_name[ulp->ul_namelen] = '\0';
-
-#if REV_ENDIAN_FS
-		if (mp->mnt_flag & MNT_REVEND)
-			ulp->ul_namelen = OSSwapInt16(ulp->ul_namelen);
-#endif
 
 		/* Update the checksum */
 		ulp->ul_checksum = 0;
@@ -1455,22 +1423,21 @@ ffs_fhtovp(mp, fhlen, fhp, vpp, context)
 	struct vnode *nvp;
 	struct fs *fs;
 	int error;
-	ino_t	  ino;
 
 	if (fhlen < (int)sizeof(struct ufid))
 		return (EINVAL);
 	ufhp = (struct ufid *)fhp;
 	fs = VFSTOUFS(mp)->um_fs;
-	ino = ntohl(ufhp->ufid_ino);
-	if (ino < ROOTINO || ino >= fs->fs_ncg * fs->fs_ipg)
+	if (ufhp->ufid_ino < ROOTINO ||
+	    ufhp->ufid_ino >= fs->fs_ncg * fs->fs_ipg)
 		return (ESTALE);
-	error = ffs_vget_internal(mp, ino, &nvp, NULL, NULL, 0, 1);
+	error = ffs_vget_internal(mp, ufhp->ufid_ino, &nvp, NULL, NULL, 0, 1);
 	if (error) {
 		*vpp = NULLVP;
 		return (error);
 	}
 	ip = VTOI(nvp);
-	if (ip->i_mode == 0 || ip->i_gen != ntohl(ufhp->ufid_gen)) {
+	if (ip->i_mode == 0 || ip->i_gen != ufhp->ufid_gen) {
 		vnode_put(nvp);
 		*vpp = NULLVP;
 		return (ESTALE);
@@ -1497,8 +1464,8 @@ ffs_vptofh(vp, fhlenp, fhp, context)
 		return (EOVERFLOW);
 	ip = VTOI(vp);
 	ufhp = (struct ufid *)fhp;
-	ufhp->ufid_ino = htonl(ip->i_number);
-	ufhp->ufid_gen = htonl(ip->i_gen);
+	ufhp->ufid_ino = ip->i_number;
+	ufhp->ufid_gen = ip->i_gen;
 	*fhlenp = sizeof(struct ufid);
 	return (0);
 }
@@ -1624,7 +1591,7 @@ ffs_sbupdate(mp, waitfor)
 	*  before writing
 	*/
 	if (rev_endian) {
-		dfs->fs_maxfilesize = OSSwapInt64(mp->um_savedmaxfilesize);		/* XXX */
+		dfs->fs_maxfilesize = NXSwapLongLong(mp->um_savedmaxfilesize);		/* XXX */
 	} else {
 #endif /* REV_ENDIAN_FS */
 		dfs->fs_maxfilesize = mp->um_savedmaxfilesize;	/* XXX */

@@ -245,11 +245,6 @@ OSErr hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 	hfs_unlock(VTOC(hfsmp->hfs_catalog_vp));
 	hfs_unlock(VTOC(hfsmp->hfs_extents_vp));
 
-	if (error == noErr)
-	  {
-	    error = cat_idlookup(hfsmp, kHFSRootFolderID, NULL, NULL, NULL);
-	  }
-
     if ( error == noErr )
       {
         if ( !(vcb->vcbAtrb & kHFSVolumeHardwareLockMask) )		//	if the disk is not write protected
@@ -534,8 +529,6 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	/* Pick up volume name and create date */
 	retval = cat_idlookup(hfsmp, kHFSRootFolderID, &cndesc, &cnattr, NULL);
 	if (retval) {
-		if (hfsmp->hfs_attribute_vp)
-			hfs_unlock(VTOC(hfsmp->hfs_attribute_vp));
 		hfs_unlock(VTOC(hfsmp->hfs_allocation_vp));
 		hfs_unlock(VTOC(hfsmp->hfs_catalog_vp));
 		hfs_unlock(VTOC(hfsmp->hfs_extents_vp));
@@ -569,7 +562,7 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	//
 	if (   (vcb->vcbAtrb & kHFSVolumeJournaledMask)
 		&& (SWAP_BE32(vhp->lastMountedVersion) != kHFSJMountVersion)
-	        && (hfsmp->jnl == NULL)) {
+		&& (hfsmp->jnl == NULL)) {
 
 		retval = hfs_late_journal_init(hfsmp, vhp, args);
 		if (retval != 0) {
@@ -611,13 +604,9 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 		} else if (hfsmp->jnl) {
 			vfs_setflags(hfsmp->hfs_mp, (uint64_t)((unsigned int)MNT_JOURNALED));
 		}
-	} else if (hfsmp->jnl || ((vcb->vcbAtrb & kHFSVolumeJournaledMask) && (hfsmp->hfs_flags & HFS_READ_ONLY))) {
+	} else if (hfsmp->jnl) {
 		struct cat_attr jinfo_attr, jnl_attr;
 		
-		if (hfsmp->hfs_flags & HFS_READ_ONLY) {
-		    vcb->vcbAtrb &= ~kHFSVolumeJournaledMask;
-		}
-
 		// if we're here we need to fill in the fileid's for the
 		// journal and journal_info_block.
 		hfsmp->hfs_jnlinfoblkid = GetFileInfo(vcb, kRootDirID, ".journal_info_block", &jinfo_attr, NULL);
@@ -625,10 +614,6 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 		if (hfsmp->hfs_jnlinfoblkid == 0 || hfsmp->hfs_jnlfileid == 0) {
 			printf("hfs: danger! couldn't find the file-id's for the journal or journal_info_block\n");
 			printf("hfs: jnlfileid %d, jnlinfoblkid %d\n", hfsmp->hfs_jnlfileid, hfsmp->hfs_jnlinfoblkid);
-		}
-
-		if (hfsmp->hfs_flags & HFS_READ_ONLY) {
-		    vcb->vcbAtrb |= kHFSVolumeJournaledMask;
 		}
 	}
 
@@ -741,14 +726,7 @@ overflow_extents(struct filefork *fp)
 {
 	u_long blocks;
 
-       //
-       // If the vnode pointer is NULL then we're being called
-       // from hfs_remove_orphans() with a faked-up filefork
-       // and therefore it has to be an HFS+ volume.  Otherwise
-       // we check through the volume header to see what type
-       // of volume we're on.
-       //
-       if (FTOV(fp) == NULL || VTOVCB(FTOV(fp))->vcbSigWord == kHFSPlusSigWord) {
+	if (VTOVCB(FTOV(fp))->vcbSigWord == kHFSPlusSigWord) {
 		if (fp->ff_extents[7].blockCount == 0)
 			return (0);
 
@@ -1312,7 +1290,7 @@ hfs_remove_orphans(struct hfsmount * hfsmp)
 				cnode.c_rsrcfork = NULL;
 				fsize = (u_int64_t)dfork.ff_blocks * (u_int64_t)HFSTOVCB(hfsmp)->blockSize;
 				while (fsize > 0) {
-					if (fsize > HFS_BIGFILE_SIZE && overflow_extents(&dfork)) {
+					if (fsize > HFS_BIGFILE_SIZE) {
 						fsize -= HFS_BIGFILE_SIZE;
 					} else {
 						fsize = 0;
@@ -1750,28 +1728,6 @@ hfs_early_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 	hfsmp->jnl_start = jibp->offset / SWAP_BE32(vhp->blockSize);
 	hfsmp->jnl_size  = jibp->size;
 
-	if ((hfsmp->hfs_flags & HFS_READ_ONLY) && (vfs_flags(hfsmp->hfs_mp) & MNT_ROOTFS) == 0) {
-	    // if the file system is read-only, check if the journal is empty.
-	    // if it is, then we can allow the mount.  otherwise we have to
-	    // return failure.
-	    retval = journal_is_clean(hfsmp->jvp,
-		                      jibp->offset + embeddedOffset,
-				      jibp->size,
-				      devvp,
-		                      hfsmp->hfs_phys_block_size);
-
-	    hfsmp->jnl = NULL;
-
-	    buf_brelse(jinfo_bp);
-
-	    if (retval) {
-	      printf("hfs: early journal init: volume on %s is read-only and journal is dirty.  Can not mount volume.\n",
-                     vnode_name(devvp));
-	    }
-
-	    return retval;
-	}
-
 	if (jibp->flags & kJIJournalNeedInitMask) {
 		printf("hfs: Initializing the journal (joffset 0x%llx sz 0x%llx)...\n",
 			   jibp->offset + embeddedOffset, jibp->size);
@@ -1958,28 +1914,6 @@ hfs_late_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp, void *_a
 	// save this off for the hack-y check in hfs_remove()
 	hfsmp->jnl_start = jibp->offset / SWAP_BE32(vhp->blockSize);
 	hfsmp->jnl_size  = jibp->size;
-
-	if ((hfsmp->hfs_flags & HFS_READ_ONLY) && (vfs_flags(hfsmp->hfs_mp) & MNT_ROOTFS) == 0) {
-	    // if the file system is read-only, check if the journal is empty.
-	    // if it is, then we can allow the mount.  otherwise we have to
-	    // return failure.
-	    retval = journal_is_clean(hfsmp->jvp,
-		                      jibp->offset + (off_t)vcb->hfsPlusIOPosOffset,
-				      jibp->size,
-				      devvp,
-		                      hfsmp->hfs_phys_block_size);
-
-	    hfsmp->jnl = NULL;
-
-	    buf_brelse(jinfo_bp);
-
-	    if (retval) {
-	      printf("hfs: late journal init: volume on %s is read-only and journal is dirty.  Can not mount volume.\n",
-		     vnode_name(devvp));
-	    }
-
-	    return retval;
-	}
 
 	if (jibp->flags & kJIJournalNeedInitMask) {
 		printf("hfs: Initializing the journal (joffset 0x%llx sz 0x%llx)...\n",
@@ -2190,7 +2124,7 @@ hfs_metadatazone_init(struct hfsmount *hfsmp)
 	 * The extra space goes to the catalog file and hot file area.
 	 */
 	temp = zonesize;
-	zonesize = roundup(zonesize, (u_int64_t)vcb->vcbVBMIOSize * 8 * vcb->blockSize);
+	zonesize = roundup(zonesize, vcb->vcbVBMIOSize * 8 * vcb->blockSize);
 	temp = zonesize - temp;  /* temp has extra space */
 	filesize += temp / 3;
 	hfsmp->hfs_catalog_maxblks += (temp - (temp / 3)) / vcb->blockSize;

@@ -295,20 +295,20 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 #pragma unused (maxEOF)
 
 	OSStatus	retval = 0, ret = 0;
-	int64_t		actualBytesAdded, origSize;
-	u_int64_t	bytesToAdd;
+	UInt64		actualBytesAdded, origSize;
+	UInt64		bytesToAdd;
 	u_int32_t	startAllocation;
 	u_int32_t	fileblocks;
-	BTreeInfoRec 	btInfo;
+	BTreeInfoRec btInfo;
 	ExtendedVCB	*vcb;
-	FCB		*filePtr;
-    	struct proc 	*p = NULL;
-	int64_t 	trim = 0;
-	int  		lockflags = 0;
+	FCB			*filePtr;
+    struct proc *p = NULL;
+	UInt64 		trim = 0;
+	int  lockflags = 0;
 
 	filePtr = GetFileControlBlock(vp);
 
-	if ( (off_t)minEOF > filePtr->fcbEOF )
+	if ( minEOF > filePtr->fcbEOF )
 	{
 		bytesToAdd = minEOF - filePtr->fcbEOF;
 
@@ -358,29 +358,27 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 	// of the btree node size.  if we can't get a contiguous chunk that
 	// is at least the node size then we break out of the loop and let
 	// the error propagate back up.
-	while((off_t)bytesToAdd >= btInfo.nodeSize) {
-	    do {
+	do {
 		retval = ExtendFileC(vcb, filePtr, bytesToAdd, 0,
-		                     kEFContigMask | kEFMetadataMask | kEFNoClumpMask,
-		                     (int64_t *)&actualBytesAdded);
+		                     kEFContigMask | kEFMetadataMask,
+		                     &actualBytesAdded);
 		if (retval == dskFulErr && actualBytesAdded == 0) {
-		    bytesToAdd >>= 1;
-		    if (bytesToAdd < btInfo.nodeSize) {
-			break;
-		    } else if ((bytesToAdd % btInfo.nodeSize) != 0) {
-			// make sure it's an integer multiple of the nodeSize
-			bytesToAdd -= (bytesToAdd % btInfo.nodeSize);
-		    }
+
+			if (bytesToAdd == btInfo.nodeSize || bytesToAdd < (minEOF - origSize)) {
+				// if we're here there's nothing else to try, we're out
+				// of space so we break and bail out.
+				break;
+			} else {
+				bytesToAdd >>= 1;
+				if (bytesToAdd < btInfo.nodeSize) {
+					bytesToAdd = btInfo.nodeSize;
+				} else if ((bytesToAdd % btInfo.nodeSize) != 0) {
+					// make sure it's an integer multiple of the nodeSize
+					bytesToAdd -= (bytesToAdd % btInfo.nodeSize);
+				}
+			}
 		}
-	    } while (retval == dskFulErr && actualBytesAdded == 0);
-
-	    if (retval == dskFulErr && actualBytesAdded == 0 && bytesToAdd <= btInfo.nodeSize) {
-		break;
-	    }
-
-	    filePtr->fcbEOF = (u_int64_t)filePtr->ff_blocks * (u_int64_t)vcb->blockSize;
-	    bytesToAdd = minEOF - filePtr->fcbEOF;
-	}
+	} while (retval == dskFulErr && actualBytesAdded == 0);
 
 	/*
 	 * If a new extent was added then move the roving allocator
@@ -400,7 +398,7 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 	// it grew the file to be big enough for our needs.  If this is
 	// the case, we don't care about retval so we blow it away.
 	//
-	if (filePtr->fcbEOF >= (off_t)minEOF && retval != 0) {
+	if (filePtr->fcbEOF >= minEOF && retval != 0) {
 		retval = 0;
 	}
 
@@ -410,9 +408,9 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 	// size.  otherwise we trim back to be an even multiple of the
 	// btree node size.
 	//
-	if ((filePtr->fcbEOF < (off_t)minEOF) || ((filePtr->fcbEOF - origSize) % btInfo.nodeSize) != 0) {
+	if ((filePtr->fcbEOF < minEOF) || (actualBytesAdded % btInfo.nodeSize) != 0) {
 
-		if (filePtr->fcbEOF < (off_t)minEOF) {
+		if (filePtr->fcbEOF < minEOF) {
 			retval = dskFulErr;
 			
 			if (filePtr->fcbEOF < origSize) {
@@ -421,8 +419,12 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 			}
 			
 			trim = filePtr->fcbEOF - origSize;
+			if (trim != actualBytesAdded) {
+				panic("hfs: trim == %lld but actualBytesAdded == %lld\n",
+					  trim, actualBytesAdded);
+			}
 		} else {
-			trim = ((filePtr->fcbEOF - origSize) % btInfo.nodeSize);
+			trim = (actualBytesAdded % btInfo.nodeSize);
 		}
 
 		ret = TruncateFileC(vcb, filePtr, filePtr->fcbEOF - trim, 0);
@@ -430,16 +432,17 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 
 		// XXXdbg - panic if the file didn't get trimmed back properly
 		if ((filePtr->fcbEOF % btInfo.nodeSize) != 0) {
-			panic("hfs: truncate file didn't! fcbEOF %lld nsize %d fcb %p\n",
+			panic("hfs: truncate file didn't! fcbEOF %lld nsize %d fcb 0x%x\n",
 				  filePtr->fcbEOF, btInfo.nodeSize, filePtr);
 		}
 
 		if (ret) {
 			// XXXdbg - this probably doesn't need to be a panic()
-			panic("hfs: error truncating btree files (sz 0x%llx, trim %lld, ret %ld)\n",
-			      filePtr->fcbEOF, trim, ret);
+			panic("hfs: error truncating btree files (sz 0x%llx, trim %lld, ret %d)\n",
+				  filePtr->fcbEOF, trim, ret);
 			goto out;
 		}
+		actualBytesAdded -= trim;
 	}
 
 	if(VTOC(vp)->c_fileid != kHFSExtentsFileID) {
@@ -453,7 +456,7 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 	lockflags = 0;
 
 	if ((filePtr->fcbEOF % btInfo.nodeSize) != 0) {
-		panic("hfs: extendbtree: fcb %p has eof 0x%llx not a multiple of 0x%x (trim %llx)\n",
+		panic("hfs: extendbtree: fcb 0x%x has eof 0x%llx not a multiple of 0x%x (trim %llx)\n",
 			  filePtr, filePtr->fcbEOF, btInfo.nodeSize, trim);
 	}
 
@@ -473,7 +476,7 @@ OSStatus ExtendBTreeFile(FileReference vp, FSSize minEOF, FSSize maxEOF)
 		(void) hfs_update(vp, TRUE);
 	}
 
-	ret = ClearBTNodes(vp, btInfo.nodeSize, origSize, (filePtr->fcbEOF - origSize));
+	ret = ClearBTNodes(vp, btInfo.nodeSize, filePtr->fcbEOF - actualBytesAdded, actualBytesAdded);
 out:
 	if (retval == 0)
 		retval = ret;

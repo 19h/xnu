@@ -162,7 +162,7 @@ rts_attach(struct socket *so, int proto, __unused struct proc *p)
 		so->so_flags |= SOF_PCBCLEARING;
 		return error;
 	}
-
+	socket_lock(so, 1);
 	switch(rp->rcb_proto.sp_protocol) {
 //####LD route_cb needs looking
 	case AF_INET:
@@ -180,9 +180,9 @@ rts_attach(struct socket *so, int proto, __unused struct proc *p)
 	}
 	rp->rcb_faddr = &route_src;
 	route_cb.any_count++;
-	/* the socket is already locked when we enter rts_attach */ 
 	soisconnected(so);
 	so->so_options |= SO_USELOOPBACK;
+	socket_unlock(so, 1);
 	return 0;
 }
 

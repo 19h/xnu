@@ -63,7 +63,6 @@
 #include <sys/domain.h>
 #include <sys/syslog.h>
 #include <kern/lock.h>
-#include <kern/zalloc.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -88,15 +87,9 @@ lck_grp_attr_t 	*rt_mtx_grp_attr;
 lck_mtx_t 	*route_domain_mtx;	/*### global routing tables mutex for now */
 __private_extern__ int	rttrash = 0;		/* routes not in table but not freed */
 
-static struct zone *rte_zone;			/* special zone for rtentry */
-#define	RTE_ZONE_MAX		65536		/* maximum elements in zone */
-#define	RTE_ZONE_NAME		"rtentry"	/* name of rtentry zone */
-
 static void rt_maskedcopy(struct sockaddr *,
 	    struct sockaddr *, struct sockaddr *);
 static void rtable_init(void **);
-static struct rtentry *rte_alloc(void);
-static void rte_free(struct rtentry *);
 
 __private_extern__ u_long route_generation = 0;
 extern int use_routegenid;
@@ -118,9 +111,13 @@ route_init()
 {
 	rt_mtx_grp_attr = lck_grp_attr_alloc_init();
 
+	lck_grp_attr_setdefault(rt_mtx_grp_attr);
+
 	rt_mtx_grp = lck_grp_alloc_init("route", rt_mtx_grp_attr);
 
 	rt_mtx_attr = lck_attr_alloc_init();
+
+	lck_attr_setdefault(rt_mtx_attr);
 
 	if ((rt_mtx = lck_mtx_alloc_init(rt_mtx_grp, rt_mtx_attr)) == NULL) {
 		printf("route_init: can't alloc rt_mtx\n");
@@ -132,13 +129,6 @@ route_init()
 	lck_mtx_unlock(rt_mtx);
 	rtable_init((void **)rt_tables);
 	route_domain_mtx = routedomain.dom_mtx;
-
-	rte_zone = zinit(sizeof (struct rtentry),
-	    RTE_ZONE_MAX * sizeof (struct rtentry), 0, RTE_ZONE_NAME);
-	if (rte_zone == NULL)
-		panic("route_init: failed allocating rte_zone");
-
-	zone_change(rte_zone, Z_EXPAND, TRUE);
 }
 
 /*
@@ -346,7 +336,7 @@ rtfree_locked(rt)
 		/*
 		 * and the rtentry itself of course
 		 */
-		rte_free(rt);
+		R_Free(rt);
 	}
 }
 
@@ -768,7 +758,8 @@ rtrequest_locked(
 			senderr(ENETUNREACH);
 
 	makeroute:
-		if ((rt = rte_alloc()) == NULL)
+		R_Malloc(rt, struct rtentry *, sizeof(*rt));
+		if (rt == 0)
 			senderr(ENOBUFS);
 		Bzero(rt, sizeof(*rt));
 		rt->rt_flags = RTF_UP | flags;
@@ -777,7 +768,7 @@ rtrequest_locked(
 		 * also add the rt_gwroute if possible.
 		 */
 		if ((error = rt_setgate(rt, dst, gateway)) != 0) {
-			rte_free(rt);
+			R_Free(rt);
 			senderr(error);
 		}
 
@@ -842,7 +833,7 @@ rtrequest_locked(
 				ifafree(rt->rt_ifa);
 			}
 			R_Free(rt_key(rt));
-			rte_free(rt);
+			R_Free(rt);
 			senderr(EEXIST);
 		}
 
@@ -1347,20 +1338,3 @@ rtinit_locked(ifa, cmd, flags)
 	}	
 	return (error);
 }
-
-static struct rtentry *
-rte_alloc(void)
-{
-	return ((struct rtentry *)zalloc(rte_zone));
-}
-
-static void
-rte_free(struct rtentry *p)
-{
-	if (p->rt_refcnt != 0)
-		panic("rte_free: rte=%p refcnt=%d non-zero\n", p, p->rt_refcnt);
-
-	bzero((caddr_t)p, sizeof (*p));
-	zfree(rte_zone, p);
-}
-

@@ -348,10 +348,13 @@ ip_init()
 		ipf_init();
 
 		ip_mutex_grp_attr  = lck_grp_attr_alloc_init();
+		lck_grp_attr_setdefault(ip_mutex_grp_attr);
 
 		ip_mutex_grp = lck_grp_alloc_init("ip", ip_mutex_grp_attr);
 
 		ip_mutex_attr = lck_attr_alloc_init();
+
+		lck_attr_setdefault(ip_mutex_attr);
 
 		if ((ip_mutex = lck_mtx_alloc_init(ip_mutex_grp, ip_mutex_attr)) == NULL) {
 			printf("ip_init: can't alloc ip_mutex\n");
@@ -2274,12 +2277,8 @@ ip_savecontrol(
 		ifnet_head_lock_shared();
 		if (((ifp = m->m_pkthdr.rcvif)) 
 		&& ( ifp->if_index && (ifp->if_index <= if_index))) {
-			struct ifaddr *ifa = ifnet_addrs[ifp->if_index - 1];
-			
-			if (!ifa || !ifa->ifa_addr)
-				goto makedummy;
-			
-			sdp = (struct sockaddr_dl *)ifa->ifa_addr;
+			sdp = (struct sockaddr_dl *)(ifnet_addrs
+					[ifp->if_index - 1]->ifa_addr);
 			/*
 			 * Change our mind and don't try copy.
 			 */

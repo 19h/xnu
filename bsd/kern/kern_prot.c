@@ -245,21 +245,21 @@ getgroups(__unused struct proc *p, struct getgroups_args *uap, register_t *retva
 
 	if ((ngrp = uap->gidsetsize) == 0) {
 		*retval = cred->cr_ngroups;
-		kauth_cred_unref(&cred);
+		kauth_cred_rele(cred);
 		return (0);
 	}
 	if (ngrp < cred->cr_ngroups) {
-		kauth_cred_unref(&cred);
+		kauth_cred_rele(cred);
 		return (EINVAL);
 	}
 	ngrp = cred->cr_ngroups;
 	if ((error = copyout((caddr_t)cred->cr_groups,
 	    				uap->gidset, 
 	    				ngrp * sizeof(gid_t)))) {
-		kauth_cred_unref(&cred);
+		kauth_cred_rele(cred);
 		return (error);
 	}
-	kauth_cred_unref(&cred);
+	kauth_cred_rele(cred);
 	*retval = ngrp;
 	return (0);
 }
@@ -388,11 +388,8 @@ setuid(struct proc *p, struct setuid_args *uap, __unused register_t *retval)
 		my_cred = kauth_cred_proc_ref(p);
 		
 		/* 
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
+		 * set the credential with new info.  If there is no change we get back 
+		 * the same credential we passed in.
 		 */
 		my_new_cred = kauth_cred_setuid(my_cred, uid);
 		if (my_cred != my_new_cred) {
@@ -403,7 +400,8 @@ setuid(struct proc *p, struct setuid_args *uap, __unused register_t *retval)
 			 */
 			if (p->p_ucred != my_cred) {
 				proc_unlock(p);
-				kauth_cred_unref(&my_new_cred);
+				kauth_cred_rele(my_cred);
+				kauth_cred_rele(my_new_cred);
 				/* try again */
 				continue;
 			}
@@ -411,8 +409,8 @@ setuid(struct proc *p, struct setuid_args *uap, __unused register_t *retval)
 			p->p_flag |= P_SUGID;
 			proc_unlock(p);
 		}
-		/* drop old proc reference or our extra reference */
-		kauth_cred_unref(&my_cred);
+		/* drop our extra reference */
+		kauth_cred_rele(my_cred);
 		break;
 	}
 	
@@ -442,25 +440,21 @@ seteuid(struct proc *p, struct seteuid_args *uap, __unused register_t *retval)
 		my_cred = kauth_cred_proc_ref(p);
 	
 		/* 
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
+		 * set the credential with new info.  If there is no change we get back 
+		 * the same credential we passed in.
 		 */
-		my_new_cred = kauth_cred_seteuid(my_cred, euid);
+		my_new_cred = kauth_cred_seteuid(p->p_ucred, euid);
 	
 		if (my_cred != my_new_cred) {
 			proc_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we should
-			 * restart this again with the new cred.
+			/* need to protect for a race where another thread also changed
+			 * the credential after we took our reference.  If p_ucred has 
+			 * changed then we should restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
 				proc_unlock(p);
-				kauth_cred_unref(&my_new_cred);
+				kauth_cred_rele(my_cred);
+				kauth_cred_rele(my_new_cred);
 				/* try again */
 				continue;
 			}
@@ -468,8 +462,8 @@ seteuid(struct proc *p, struct seteuid_args *uap, __unused register_t *retval)
 			p->p_flag |= P_SUGID;
 			proc_unlock(p);
 		}
-		/* drop old proc reference or our extra reference */
-		kauth_cred_unref(&my_cred);
+		/* drop our extra reference */
+		kauth_cred_rele(my_cred);
 		break;
 	}
 
@@ -495,24 +489,20 @@ setgid(struct proc *p, struct setgid_args *uap, __unused register_t *retval)
 		my_cred = kauth_cred_proc_ref(p);
 		
 		/* 
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
+		 * set the credential with new info.  If there is no change we get back 
+		 * the same credential we passed in.
 		 */
-		my_new_cred = kauth_cred_setgid(my_cred, gid);
+		my_new_cred = kauth_cred_setgid(p->p_ucred, gid);
 		if (my_cred != my_new_cred) {
 			proc_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we should
-			 * restart this again with the new cred.
+			/* need to protect for a race where another thread also changed
+			 * the credential after we took our reference.  If p_ucred has 
+			 * changed then we should restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
 				proc_unlock(p);
-				kauth_cred_unref(&my_new_cred);
+				kauth_cred_rele(my_cred);
+				kauth_cred_rele(my_new_cred);
 				/* try again */
 				continue;
 			}
@@ -520,8 +510,8 @@ setgid(struct proc *p, struct setgid_args *uap, __unused register_t *retval)
 			p->p_flag |= P_SUGID;
 			proc_unlock(p);
 		}
-		/* drop old proc reference or our extra reference */
-		kauth_cred_unref(&my_cred);
+		/* drop our extra reference */
+		kauth_cred_rele(my_cred);
 		break;
 	}
 	
@@ -548,13 +538,10 @@ setegid(struct proc *p, struct setegid_args *uap, __unused register_t *retval)
 		my_cred = kauth_cred_proc_ref(p);
 		
 		/* 
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
+		 * set the credential with new info.  If there is no change we get back 
+		 * the same credential we passed in.
 		 */
-		my_new_cred = kauth_cred_setegid(my_cred, egid);
+		my_new_cred = kauth_cred_setegid(p->p_ucred, egid);
 		if (my_cred != my_new_cred) {
 			proc_lock(p);
 			/* need to protect for a race where another thread also changed
@@ -563,7 +550,8 @@ setegid(struct proc *p, struct setegid_args *uap, __unused register_t *retval)
 			 */
 			if (p->p_ucred != my_cred) {
 				proc_unlock(p);
-				kauth_cred_unref(&my_new_cred);
+				kauth_cred_rele(my_cred);
+				kauth_cred_rele(my_new_cred);
 				/* try again */
 				continue;
 			}
@@ -571,8 +559,8 @@ setegid(struct proc *p, struct setegid_args *uap, __unused register_t *retval)
 			p->p_flag |= P_SUGID;
 			proc_unlock(p);
 		}
-		/* drop old proc reference or our extra reference */
-		kauth_cred_unref(&my_cred);
+		/* drop our extra reference */
+		kauth_cred_rele(my_cred);
 		break;
 	}
 
@@ -612,7 +600,7 @@ settid(struct proc *p, struct settid_args *uap, __unused register_t *retval)
 
 		/* revert to delayed binding of process credential */
 		uc = kauth_cred_proc_ref(p);
-		kauth_cred_unref(&uthread->uu_ucred);
+		kauth_cred_rele(uthread->uu_ucred);
 		uthread->uu_ucred = uc;
 		uthread->uu_flag &= ~UT_SETUID;
 	} else {
@@ -636,7 +624,7 @@ settid(struct proc *p, struct settid_args *uap, __unused register_t *retval)
 		uthread->uu_flag |= UT_SETUID;
 
 		/* drop our extra reference */
-		kauth_cred_unref(&my_cred);
+		kauth_cred_rele(my_cred);
 	}
 	/*
 	 * XXX should potentially set per thread security token (there is
@@ -705,8 +693,8 @@ settid_with_pid(struct proc *p, struct settid_with_pid_args *uap, __unused regis
 		uthread->uu_flag |= UT_SETUID;
 		
 		/* drop our extra references */
-		kauth_cred_unref(&my_cred);
-		kauth_cred_unref(&my_target_cred);
+		kauth_cred_rele(my_cred);
+		kauth_cred_rele(my_target_cred);
 
 		return (0);
 	}
@@ -719,7 +707,7 @@ settid_with_pid(struct proc *p, struct settid_with_pid_args *uap, __unused regis
 
 	/* revert to delayed binding of process credential */
 	my_new_cred = kauth_cred_proc_ref(p);
-	kauth_cred_unref(&uthread->uu_ucred);
+	kauth_cred_rele(uthread->uu_ucred);
 	uthread->uu_ucred = my_new_cred;
 	uthread->uu_flag &= ~UT_SETUID;
 	
@@ -734,7 +722,6 @@ setgroups1(struct proc *p, u_int gidsetsize, user_addr_t gidset, uid_t gmuid, __
 	gid_t	newgroups[NGROUPS] = { 0 };
 	int 	error;
 	kauth_cred_t my_cred, my_new_cred;
-	struct uthread *uthread = get_bsdthread_info(current_thread());
 
 	if ((error = suser(p->p_ucred, &p->p_acflag)))
 		return (error);
@@ -753,67 +740,39 @@ setgroups1(struct proc *p, u_int gidsetsize, user_addr_t gidset, uid_t gmuid, __
 		}
 	}
 
-	if ((uthread->uu_flag & UT_SETUID) != 0) {
-		/*
-		 * If this thread is under an assumed identity, set the
-		 * supplementary grouplist on the thread credential instead
-		 * of the process one.  If we were the only reference holder,
-		 * the credential is updated in place, otherwise, our reference
-		 * is dropped and we get back a different cred with a reference
-		 * already held on it.  Because this is per-thread, we don't
-		 * need the referencing/locking/retry required for per-process.
-		 *
-		 * Hack: this opts into memberd to avoid needing to use a per
-		 * thread credential initgroups() instead of setgroups() in
-		 * AFP server to address <rdar://4561060>
-		 */
-		my_cred = uthread->uu_ucred;
-		uthread->uu_ucred = kauth_cred_setgroups(my_cred, &newgroups[0], ngrp, my_cred->cr_gmuid);
-	} else {
+	/* get current credential and take a reference while we muck with it */
+	for (;;) {
+		my_cred = kauth_cred_proc_ref(p);
 
-		/*
-		 * get current credential and take a reference while we muck
-		 * with it
+		/* 
+		 * set the credential with new info.  If there is no change we get back 
+		 * the same credential we passed in.
 		 */
-		for (;;) {
-			my_cred = kauth_cred_proc_ref(p);
-
-			/* 
-			 * Set the credential with new info.  If there is no
-			 * change, we get back the same credential we passed
-			 * in; if there is a change, we drop the reference on
-			 * the credential we passed in.  The subsequent
-			 * compare is safe, because it is a pointer compare
-			 * rather than a contents compare.
+		my_new_cred = kauth_cred_setgroups(p->p_ucred, &newgroups[0], ngrp, gmuid);
+		if (my_cred != my_new_cred) {
+			proc_lock(p);
+			/* need to protect for a race where another thread also changed
+			 * the credential after we took our reference.  If p_ucred has 
+			 * changed then we should restart this again with the new cred.
 			 */
-			my_new_cred = kauth_cred_setgroups(my_cred, &newgroups[0], ngrp, gmuid);
-			if (my_cred != my_new_cred) {
-				proc_lock(p);
-				/*
-				 * need to protect for a race where another
-				 * thread also changed the credential after we
-				 * took our reference.  If p_ucred has 
-				 * changed then we should restart this again
-				 * with the new cred.
-				 */
-				if (p->p_ucred != my_cred) {
-					proc_unlock(p);
-					kauth_cred_unref(&my_new_cred);
-					/* try again */
-					continue;
-				}
-				p->p_ucred = my_new_cred;
-				p->p_flag |= P_SUGID;
+			if (p->p_ucred != my_cred) {
 				proc_unlock(p);
+				kauth_cred_rele(my_cred);
+				kauth_cred_rele(my_new_cred);
+				/* try again */
+				continue;
 			}
-			/* drop old proc reference or our extra reference */
-			kauth_cred_unref(&my_cred);
-			break;
+			p->p_ucred = my_new_cred;
+			p->p_flag |= P_SUGID;
+			proc_unlock(p);
 		}
-
-		AUDIT_ARG(groupset, p->p_ucred->cr_groups, ngrp);
-		set_security_token(p);
+		/* drop our extra reference */
+		kauth_cred_rele(my_cred);
+		break;
 	}
+
+	AUDIT_ARG(groupset, p->p_ucred->cr_groups, ngrp);
+	set_security_token(p);
 
 	return (0);
 }
@@ -877,7 +836,7 @@ int
 suser(kauth_cred_t cred, u_short *acflag)
 {
 #if DIAGNOSTIC
-	if (!IS_VALID_CRED(cred))
+	if (cred == NOCRED || cred == FSCRED)
 		panic("suser");
 #endif
 	if (kauth_cred_getuid(cred) == 0) {
@@ -974,7 +933,7 @@ set_security_token(struct proc * p)
 	}
 		
 	/* XXX mach_init doesn't have a p_ucred when it calls this function */
-	if (IS_VALID_CRED(p->p_ucred)) {
+	if (p->p_ucred != NOCRED && p->p_ucred != FSCRED) {
 		sec_token.val[0] = kauth_cred_getuid(p->p_ucred);
 		sec_token.val[1] = p->p_ucred->cr_gid;
 	} else {

@@ -92,7 +92,7 @@ extern	struct vfsops devfs_vfsops;
 /*
  * Set up the filesystem operations for vnodes.
  */
-static struct vfstable vfstbllist[] = {
+static struct vfstable vfsconflist[] = {
 	/* HFS/HFS+ Filesystem */
 #if HFS
 	{ &hfs_vfsops, "hfs", 17, 0, MNT_LOCAL | MNT_DOVOLFS, hfs_mountroot, NULL, 0, {0}, VFC_VFSLOCALARGS, 0, 0 },
@@ -168,10 +168,10 @@ static struct vfstable vfstbllist[] = {
  * Initially the size of the list, vfs_init will set maxvfsconf
  * to the highest defined type number.
  */
-int maxvfsslots = sizeof(vfstbllist) / sizeof (struct vfstable);
+int maxvfsslots = sizeof(vfsconflist) / sizeof (struct vfsconf);
 int numused_vfsslots = 0;
-int maxvfsconf = sizeof(vfstbllist) / sizeof (struct vfstable);
-struct vfstable *vfsconf = vfstbllist;
+int maxvfsconf = sizeof(vfsconflist) / sizeof (struct vfsconf);
+struct vfstable *vfsconf = vfsconflist;
 
 /*
  *

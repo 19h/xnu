@@ -129,6 +129,7 @@ void CheckSend(sp)		/* (CCBPtr sp) */
 {
     int i;
     int	attnMsg;		/* True if attention message */
+    int	s;
     register gbuf_t *mp;	/* send message block */
 #ifdef notdef
     register gbuf_t *tmp;
@@ -154,6 +155,7 @@ top:
 		gbuf_freel(mlist);
 	return;		/* can't get buffers... do nothing! */
     }
+    ATDISABLE(s, sp->lock);
     sp->callSend = 0;		/* Clear flag */
     use_attention_code = 0;
     len = 0;
@@ -174,24 +176,24 @@ top:
 
 	    /* point past ADSP header (no attention) */
 	    dp = ((char *) gbuf_wptr(mp)) + ADSP_FRAME_LEN; 
-	    UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->firstRtmtSeq);
+	    UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->firstRtmtSeq));
 	    
-	    UAS_ASSIGN_HTON(sp->of.version, netw(0x0100)); /* Fill in open connection parms */
-	    UAS_ASSIGN_HTON(sp->of.dstCID, sp->remCID);	/* Destination CID */
-	    UAL_ASSIGN_HTON(sp->of.pktAttnRecvSeq, sp->attnRecvSeq);
+	    UAS_ASSIGN(sp->of.version, netw(0x0100)); /* Fill in open connection parms */
+	    UAS_ASSIGN(sp->of.dstCID, sp->remCID);	/* Destination CID */
+	    UAL_ASSIGN(sp->of.pktAttnRecvSeq, netdw(sp->attnRecvSeq));
 	    bcopy((caddr_t) &sp->of, (caddr_t) dp, ADSP_OPEN_FRAME_LEN);
 	    len += ADSP_OPEN_FRAME_LEN;
 
 	    if (i & B_CTL_OREQ) {
-		UAS_ASSIGN_HTON(sp->f.CID, sp->locCID);
+		UAS_ASSIGN(sp->f.CID, sp->locCID);
 		mask = B_CTL_OREQ;
 		sp->f.descriptor = ADSP_CONTROL_BIT | ADSP_CTL_OREQ;
 	    } else if (i & B_CTL_OACK) {
-		UAS_ASSIGN_HTON(sp->f.CID, sp->locCID);
+		UAS_ASSIGN(sp->f.CID, sp->locCID);
 		mask = B_CTL_OACK;
 		sp->f.descriptor = ADSP_CONTROL_BIT | ADSP_CTL_OACK;
 	    } else if (i & B_CTL_OREQACK) {
-		UAS_ASSIGN_HTON(sp->f.CID, sp->locCID);
+		UAS_ASSIGN(sp->f.CID, sp->locCID);
 		mask = B_CTL_OREQACK;
 		sp->f.descriptor = ADSP_CONTROL_BIT | ADSP_CTL_OREQACK;
 	    } else 		/* Deny */
@@ -217,7 +219,7 @@ top:
 	    }
 	} else {
 	    /* seq # of next byte to send */
-	    UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->sendSeq);	
+	    UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->sendSeq));	
 			
 	    if (i & B_CTL_CLOSE) {
 		sp->state = sClosed; /* Now we're closed */
@@ -296,7 +298,7 @@ top:
     }
 
     if (sp->sendDataAck) {
-	UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->sendSeq); /* seq # of next byte */
+	UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->sendSeq)); /* seq # of next byte */
 	attnMsg = 0;
 	sp->f.descriptor = ADSP_CONTROL_BIT;
 	goto sendit;
@@ -307,6 +309,7 @@ top:
      */
     if (mp)
 	gbuf_freem(mp);
+    ATENABLE(s, sp->lock);
     if (mlist)
 	adsp_sendddp(sp, mlist, 0, &sp->remoteAddress, DDP_ADSP);
     return;
@@ -314,13 +317,13 @@ top:
 sendit:
 
     if (attnMsg) {
-	UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->attnSendSeq);
-	UAL_ASSIGN_HTON(sp->f.pktNextRecvSeq, sp->attnRecvSeq);
+	UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->attnSendSeq));
+	UAL_ASSIGN(sp->f.pktNextRecvSeq, netdw(sp->attnRecvSeq));
 	UAS_ASSIGN(sp->f.pktRecvWdw, 0);	/* Always zero in attn pkt */
     } else {
 	sp->sendDataAck = 0;
-	UAL_ASSIGN_HTON(sp->f.pktNextRecvSeq, sp->recvSeq);
-	UAS_ASSIGN_HTON(sp->f.pktRecvWdw, CalcRecvWdw(sp));
+	UAL_ASSIGN(sp->f.pktNextRecvSeq, netdw(sp->recvSeq));
+	UAS_ASSIGN(sp->f.pktRecvWdw, netw(CalcRecvWdw(sp)));
     }
     if (use_attention_code) {
 	bcopy((caddr_t) &sp->f, (caddr_t) gbuf_wptr(mp), ADSP_FRAME_LEN + 2);
@@ -338,10 +341,12 @@ sendit:
 
     if (sp->state == sClosed) {	/* must have sent a close advice */
 				/* send header + data */
+	ATENABLE(s, sp->lock);
 	adsp_sendddp(sp, mlist, 0, &sp->remoteAddress, DDP_ADSP);
 	DoClose(sp, 0, -1);	/* complete close! */
 	return;
     }
+    ATENABLE(s, sp->lock);
     if (sp->state == sClosing) /* See if we were waiting on this write */
 	CheckOkToClose(sp);
     goto top;
@@ -396,7 +401,7 @@ attachData(sp, mp)
      * The easiest fix to this timing dilemma seems to be to reset 
      * sendSeq to first Rtmt Seq if we're sending the first packet.
      */
-    UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->sendSeq);
+    UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->sendSeq));
 		
     if (smp = sp->sbuf_mb) /* Get oldest header */
 	eom = 1;

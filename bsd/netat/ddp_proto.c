@@ -79,10 +79,9 @@ void ddp_putmsg(gref, mp)
 			}
 		}
 
-		if ((gref == 0) || (gref->lport == 0)) {
+		if (gref && (gref->lport == 0)) {
 			gbuf_freel(mp);
-			if (gref)
-				atalk_notify(gref, ENOTCONN);
+			atalk_notify(gref, ENOTCONN);
 			return;
 		}
 		if ((error = ddp_output(&mp, gref->lport, 0)) != 0) {

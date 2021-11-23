@@ -94,7 +94,6 @@
 #ifndef NFS_MAXDIRATTRTIMO
 #define	NFS_MAXDIRATTRTIMO 60
 #endif
-#define	NFS_IOSIZE	(256 * 1024)	/* suggested I/O size */
 #define	NFS_WSIZE	16384		/* Def. write data size <= 16K */
 #define	NFS_RSIZE	16384		/* Def. read data size <= 16K */
 #define	NFS_DGRAM_WSIZE	8192		/* UDP Def. write data size <= 8K */
@@ -216,13 +215,17 @@ struct nfs_args3 {
  * grow when we're dealing with a 64-bit process.
  * WARNING - keep in sync with nfs_args
  */
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=natural
+#endif
+
 struct user_nfs_args {
 	int		version;	/* args structure version number */
-	user_addr_t	addr __attribute((aligned(8)));		/* file server address */
+	user_addr_t	addr;		/* file server address */
 	int		addrlen;	/* length of address */
 	int		sotype;		/* Socket type */
 	int		proto;		/* and Protocol */
-	user_addr_t	fh __attribute((aligned(8)));		/* File handle to be mounted */
+	user_addr_t	fh;		/* File handle to be mounted */
 	int		fhsize;		/* Size, in bytes, of fh */
 	int		flags;		/* flags */
 	int		wsize;		/* write size in bytes */
@@ -234,7 +237,7 @@ struct user_nfs_args {
 	int		readahead;	/* # of blocks to readahead */
 	int		leaseterm;	/* obsolete: Term (sec) of lease */
 	int		deadthresh;	/* obsolete: Retrans threshold */
-	user_addr_t	hostname __attribute((aligned(8)));	/* server's name */
+	user_addr_t	hostname;	/* server's name */
 	/* NFS_ARGSVERSION 3 ends here */
 	int		acregmin;	/* reg file min attr cache timeout */
 	int		acregmax;	/* reg file max attr cache timeout */
@@ -243,11 +246,11 @@ struct user_nfs_args {
 };
 struct user_nfs_args3 {
 	int		version;	/* args structure version number */
-	user_addr_t	addr __attribute((aligned(8)));		/* file server address */
+	user_addr_t	addr;		/* file server address */
 	int		addrlen;	/* length of address */
 	int		sotype;		/* Socket type */
 	int		proto;		/* and Protocol */
-	user_addr_t	fh __attribute((aligned(8)));		/* File handle to be mounted */
+	user_addr_t	fh;		/* File handle to be mounted */
 	int		fhsize;		/* Size, in bytes, of fh */
 	int		flags;		/* flags */
 	int		wsize;		/* write size in bytes */
@@ -259,8 +262,12 @@ struct user_nfs_args3 {
 	int		readahead;	/* # of blocks to readahead */
 	int		leaseterm;	/* obsolete: Term (sec) of lease */
 	int		deadthresh;	/* obsolete: Retrans threshold */
-	user_addr_t	hostname __attribute((aligned(8)));	/* server's name */
+	user_addr_t	hostname;	/* server's name */
 };
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=reset
+#endif
 
 #endif // KERNEL
 
@@ -333,11 +340,19 @@ struct nfsd_args {
  * grow when we're dealing with a 64-bit process.
  * WARNING - keep in sync with nfsd_args
  */
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=natural
+#endif
+
 struct user_nfsd_args {
 	int	        sock;		/* Socket to serve */
-	user_addr_t	name __attribute((aligned(8)));		/* Client addr for connection based sockets */
+	user_addr_t	name;		/* Client addr for connection based sockets */
 	int	        namelen;	/* Length of name */
 };
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=reset
+#endif
 
 #endif // KERNEL
 
@@ -418,6 +433,10 @@ struct nfs_export_args {
 #ifdef KERNEL
 /* LP64 version of export_args */
 
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=natural
+#endif
+
 struct user_nfs_export_args {
 	uint32_t		nxa_fsid;	/* export FS ID */
 	uint32_t		nxa_expid;	/* export ID */
@@ -427,6 +446,10 @@ struct user_nfs_export_args {
 	uint32_t		nxa_netcount;	/* #entries in ex_nets array */
 	user_addr_t		nxa_nets;	/* array of net args */
 };
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=reset
+#endif
 
 #endif /* KERNEL */
 
@@ -724,7 +747,6 @@ struct nfssvc_sock {
 	int		ns_reclen;
 	int		ns_numuids;
 	u_long		ns_sref;
-	time_t		ns_timestamp;		/* socket timestamp */
 	lck_mtx_t	ns_wgmutex;		/* mutex for write gather fields */
 	u_quad_t	ns_wgtime;		/* next Write deadline (usec) */
 	LIST_HEAD(, nfsrv_descript) ns_tq;	/* Write gather lists */
@@ -742,7 +764,7 @@ struct nfssvc_sock {
 #define	SLP_LASTFRAG	0x20 /* on last fragment of RPC record */
 #define SLP_ALLFLAGS	0xff
 
-extern TAILQ_HEAD(nfssvc_sockhead, nfssvc_sock) nfssvc_sockhead, nfssvc_deadsockhead;
+extern TAILQ_HEAD(nfssvc_sockhead, nfssvc_sock) nfssvc_sockhead;
 
 /* locks for nfssvc_sock's */
 extern lck_grp_attr_t *nfs_slp_group_attr;
@@ -871,7 +893,7 @@ void	nfs_sndunlock(struct nfsreq *);
 int	nfs_vinvalbuf(vnode_t, int, struct ucred *, proc_t, int);
 int	nfs_buf_page_inval(vnode_t vp, off_t offset);
 int	nfs_readrpc(vnode_t, struct uio *, struct ucred *, proc_t);
-int	nfs_writerpc(vnode_t, struct uio *, struct ucred *, proc_t, int *, uint64_t *);
+int	nfs_writerpc(vnode_t, struct uio *, struct ucred *, proc_t, int *, int *);
 int	nfs_readdirrpc(vnode_t, struct uio *, struct ucred *, proc_t);
 int	nfs_readdirplusrpc(vnode_t, struct uio *, struct ucred *, proc_t);
 int	nfs_asyncio(struct nfsbuf *, struct ucred *);
@@ -931,6 +953,7 @@ int	nfs_commit(vnode_t vp, u_quad_t offset, u_int32_t count,
 			struct ucred *cred, proc_t procp);
 int	nfs_flushcommits(vnode_t, proc_t, int);
 int	nfs_flush(vnode_t,int,struct ucred *,proc_t,int);
+void	nfs_clearcommit(mount_t);
 int	nfsrv_errmap(struct nfsrv_descript *, int);
 void	nfsrvw_sort(gid_t *, int);
 void	nfsrv_setcred(struct ucred *, struct ucred *);
@@ -998,7 +1021,6 @@ int	nfsrv_setattr(struct nfsrv_descript *nfsd,
 			   struct nfssvc_sock *slp,
 			   proc_t procp, mbuf_t *mrq);
 void	nfsrv_slpderef(struct nfssvc_sock *slp);
-void	nfsrv_slpfree(struct nfssvc_sock *slp);
 int	nfsrv_statfs(struct nfsrv_descript *nfsd, 
 			  struct nfssvc_sock *slp,
 			  proc_t procp, mbuf_t *mrq);

@@ -51,6 +51,13 @@
 #include <netat/at_pcb.h>
 #include <netat/debug.h>
 
+int (*sys_ATsocket)() = 0;
+int (*sys_ATgetmsg)() = 0;
+int (*sys_ATputmsg)() = 0;
+int (*sys_ATPsndreq)() = 0;
+int (*sys_ATPsndrsp)() = 0;
+int (*sys_ATPgetreq)() = 0;
+int (*sys_ATPgetrsp)() = 0;
 
 extern at_state_t at_state;	/* global state of AT network */
 extern at_ifaddr_t *ifID_home;	/* default interface */
@@ -64,12 +71,6 @@ extern lck_mtx_t * atalk_mutex;
 #define f_offset f_fglob->fg_offset
 #define f_data f_fglob->fg_data
 
-extern int _ATsocket(int, int *, void *);
-extern int _ATgetmsg(int, strbuf_t *, strbuf_t *, int *, int *, void *);
-extern int _ATputmsg();
-extern int _ATPsndreq(), _ATPsndrsp(), _ATPgetreq(), _ATPgetrsp();
-
-
 int ATsocket(proc, uap, retval)
 	struct proc *proc;
 	struct ATsocket_args *uap;
@@ -77,13 +78,13 @@ int ATsocket(proc, uap, retval)
 {
 	int err;
 	atalk_lock();
-	if (_ATsocket) {
+	if (sys_ATsocket) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
-			*retval = _ATsocket((int)uap->proto, (int *)&err, (void *)proc);
+			*retval = (*sys_ATsocket)(uap->proto, &err, proc);
 		}
 	} else {
 		*retval = -1;
@@ -101,14 +102,14 @@ int ATgetmsg(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (_ATgetmsg) {
+	if (sys_ATgetmsg) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  (*_ATgetmsg)(uap->fd, uap->ctlptr, uap->datptr, 
+			  (*sys_ATgetmsg)(uap->fd, uap->ctlptr, uap->datptr, 
 					  uap->flags, &err, proc);
 		}
 	} else {
@@ -127,14 +128,14 @@ int ATputmsg(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (_ATputmsg) {
+	if (sys_ATputmsg) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  _ATputmsg(uap->fd, uap->ctlptr, uap->datptr, 
+			  (*sys_ATputmsg)(uap->fd, uap->ctlptr, uap->datptr, 
 					  uap->flags, &err, proc);
 		}
 	} else {
@@ -153,14 +154,14 @@ int ATPsndreq(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (_ATPsndreq) {
+	if (sys_ATPsndreq) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  _ATPsndreq(uap->fd, uap->buf, uap->len, 
+			  (*sys_ATPsndreq)(uap->fd, uap->buf, uap->len, 
 					   uap->nowait, &err, proc);
 		}
 	} else {
@@ -179,14 +180,14 @@ int ATPsndrsp(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (_ATPsndrsp) {
+	if (sys_ATPsndrsp) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else { 
 			*retval = 
-			  _ATPsndrsp(uap->fd, uap->respbuff, 
+			  (*sys_ATPsndrsp)(uap->fd, uap->respbuff, 
 					   uap->resplen, uap->datalen, &err, proc);
 		}
 	} else {
@@ -205,14 +206,14 @@ int ATPgetreq(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (_ATPgetreq) {
+	if (sys_ATPgetreq) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  _ATPgetreq(uap->fd, uap->buf, uap->buflen, 
+			  (*sys_ATPgetreq)(uap->fd, uap->buf, uap->buflen, 
 					   &err, proc);
 		}
 	} else {
@@ -231,14 +232,14 @@ int ATPgetrsp(proc, uap, retval)
 	int err = 0;
 
 	atalk_lock();
-	if (_ATPgetrsp) {
+	if (sys_ATPgetrsp) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  _ATPgetrsp(uap->fd, uap->bdsp, &err, proc);
+			  (*sys_ATPgetrsp)(uap->fd, uap->bdsp, &err, proc);
 		}
 	} else {
 		*retval = -1;
@@ -286,7 +287,7 @@ int atalk_openref(gref, retfd, proc)
 	fp->f_ops = &fileops;
 	fp->f_data = (void *)gref;
 
-	procfdtbl_releasefd(proc, fd, NULL);
+	*fdflags(proc, fd) &= ~UF_RESERVED;
 	*retfd = fd;
 	fp_drop(proc, fd, fp, 1);
 	proc_fdunlock(proc);
@@ -336,7 +337,7 @@ int droponerr;
 		}
 	}
 	*grefp = (gref_t *)fp->f_data;
-	if (fp->f_type != (DTYPE_ATALK+1) || *grefp == 0 || *grefp == (gref_t *)(-1)) {
+	if (*grefp == 0 || *grefp == (gref_t *)(-1)) {
 		if (droponerr)
 			fp_drop(proc, fd, fp, 1);
 		printf("atalk_getref_locked EBADF f_data: %x\n", fp->f_data);

@@ -28,7 +28,6 @@
 // properties found in the registry root
 #define kIOConsoleUsersKey		"IOConsoleUsers"		/* value is OSArray */
 #define kIOMaximumMappedIOByteCountKey  "IOMaximumMappedIOByteCount"    /* value is OSNumber */
-#define kIOStartupMkextCRC		"IOStartupMkextCRC"		/* value is 32-bit OSNumber */
 
 // properties found in the console user dict
 
@@ -38,25 +37,10 @@
 #define kIOConsoleSessionUIDKey		"kCGSSessionUserIDKey"		/* value is OSNumber */
 #define kIOConsoleSessionConsoleSetKey	"kCGSSessionConsoleSetKey"	/* value is OSNumber */
 #define kIOConsoleSessionOnConsoleKey	"kCGSSessionOnConsoleKey"	/* value is OSBoolean */
-#define kIOConsoleSessionSecureInputPIDKey	"kCGSSessionSecureInputPID"	/* value is OSNumber */
 
 // IOResources property
 #define kIOConsoleUsersSeedKey		"IOConsoleUsersSeed"		/* value is OSNumber */
 
-// private keys for clientHasPrivilege
-#define kIOClientPrivilegeConsoleUser "console"
-#define kIOClientPrivilegeSecureConsoleProcess "secureprocess"
-
-// clientHasPrivilege security token for kIOClientPrivilegeSecureConsoleProcess
-typedef struct _IOUCProcessToken {
-    void *  token;
-    UInt32  pid;
-} IOUCProcessToken;
-
 #define kIOKernelHasSafeSleep		1
-
-enum { kIOPrepareToPhys32 = 0x04 };
-
-#define kIODirectionPrepareToPhys32 ((IODirection) kIOPrepareToPhys32)
 
 #endif /* ! _IOKIT_IOKITKEYSPRIVATE_H */

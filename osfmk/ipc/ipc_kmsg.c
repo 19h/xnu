@@ -200,6 +200,8 @@ ipc_kmsg_alloc(
 	ipc_kmsg_t kmsg;
 
 #if !defined(__LP64__)
+	mach_msg_size_t size = msg_and_trailer_size - MAX_TRAILER_SIZE;
+
 	/*
 	 * LP64support -
 	 * Pad the allocation in case we need to expand the
@@ -213,23 +215,20 @@ ipc_kmsg_alloc(
 	 * forward as we process them than it is to push all the
 	 * data backwards.
 	 */
-
-	mach_msg_size_t size = msg_and_trailer_size - MAX_TRAILER_SIZE;
-	if (size > sizeof(mach_msg_base_t)) {
-		mach_msg_size_t max_desc = ((size - sizeof(mach_msg_base_t)) /
-				           sizeof(mach_msg_ool_descriptor_t)) *
-				           DESC_SIZE_ADJUSTMENT;
-		if (msg_and_trailer_size >= MACH_MSG_SIZE_MAX - max_desc)
-			return IKM_NULL;
-		max_expanded_size = msg_and_trailer_size + max_desc;
-	} else
+	max_expanded_size = 
+		(size > sizeof(mach_msg_base_t)) ?
+		(msg_and_trailer_size + DESC_SIZE_ADJUSTMENT * 
+		 ((size - sizeof(mach_msg_base_t)) /
+		  (sizeof(mach_msg_ool_descriptor_t))))
+		:
+		(msg_and_trailer_size);
+#else
+	max_expanded_size = msg_and_trailer_size;
 #endif
-		max_expanded_size = msg_and_trailer_size;
 
-	if (max_expanded_size > ikm_less_overhead(MACH_MSG_SIZE_MAX))
-		return IKM_NULL;
-	else if (max_expanded_size < IKM_SAVED_MSG_SIZE)
-		max_expanded_size = IKM_SAVED_MSG_SIZE; 	/* round up for ikm_cache */
+	/* round up for ikm_cache */
+	if (max_expanded_size < IKM_SAVED_MSG_SIZE)
+		max_expanded_size = IKM_SAVED_MSG_SIZE;
 
 	if (max_expanded_size == IKM_SAVED_MSG_SIZE) {
 		struct ikm_cache	*cache;
@@ -712,9 +711,6 @@ ipc_kmsg_get(
 
 	if ((size < sizeof(mach_msg_header_t)) || (size & 3))
 		return MACH_SEND_MSG_TOO_SMALL;
-
-	if (size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
-		return MACH_SEND_TOO_LARGE;
 
 	msg_and_trailer_size = size + MAX_TRAILER_SIZE;
 

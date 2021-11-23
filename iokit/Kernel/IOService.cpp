@@ -99,8 +99,6 @@ const OSSymbol *		gIOCommandPoolSizeKey;
 const OSSymbol *		gIOConsoleUsersKey;
 const OSSymbol *		gIOConsoleSessionUIDKey;
 const OSSymbol *		gIOConsoleUsersSeedKey;
-const OSSymbol *        gIOConsoleSessionOnConsoleKey;
-const OSSymbol *        gIOConsoleSessionSecureInputPIDKey;
 
 static int			gIOResourceGenerationCount;
 
@@ -193,22 +191,6 @@ bool IOService::isInactive( void ) const
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#if __i386__
-
-// Only used by the intel implementation of
-//     IOService::requireMaxBusStall(UInt32 __unused ns)
-struct BusStallEntry
-{
-    const IOService *fService;
-    UInt32 fMaxDelay;
-};
-
-static OSData *sBusStall     = OSData::withCapacity(8 * sizeof(BusStallEntry));
-static IOLock *sBusStallLock = IOLockAlloc();
-#endif /* __i386__ */
-
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
 void IOService::initialize( void )
 {
     kern_return_t	err;
@@ -266,8 +248,6 @@ void IOService::initialize( void )
     gIOConsoleUsersKey		= OSSymbol::withCStringNoCopy( kIOConsoleUsersKey);
     gIOConsoleSessionUIDKey	= OSSymbol::withCStringNoCopy( kIOConsoleSessionUIDKey);
     gIOConsoleUsersSeedKey	= OSSymbol::withCStringNoCopy( kIOConsoleUsersSeedKey);
-    gIOConsoleSessionOnConsoleKey = OSSymbol::withCStringNoCopy( kIOConsoleSessionOnConsoleKey);
-    gIOConsoleSessionSecureInputPIDKey = OSSymbol::withCStringNoCopy( kIOConsoleSessionSecureInputPIDKey);
     gIOConsoleUsersSeedValue	= OSData::withBytesNoCopy(&gIOConsoleUsersSeed, sizeof(gIOConsoleUsersSeed));
 
     gNotificationLock	 	= IORecursiveLockAlloc();
@@ -280,7 +260,6 @@ void IOService::initialize( void )
         && gIOPublishNotification && gIOMatchedNotification
         && gIOTerminatedNotification && gIOServiceKey
 	&& gIOConsoleUsersKey && gIOConsoleSessionUIDKey
-    && gIOConsoleSessionOnConsoleKey && gIOConsoleSessionSecureInputPIDKey
 	&& gIOConsoleUsersSeedKey && gIOConsoleUsersSeedValue);
 
     gJobsLock	= IOLockAlloc();
@@ -351,7 +330,6 @@ void IOService::stop( IOService * provider )
 
 void IOService::free( void )
 {
-    requireMaxBusStall(0);
     if( getPropertyTable())
         unregisterAllInterest();
     PMfree();
@@ -506,8 +484,6 @@ void IOService::startMatching( IOOptionBits options )
 	|| ((provider = getProvider())
 		&& (provider->__state[1] & kIOServiceSynchronousState));
 
-	if ( options & kIOServiceAsynchronous )
-		sync = false;
 
     needConfig =  (0 == (__state[1] & (kIOServiceNeedConfigState | kIOServiceConfigState)))
 	       && (0 == (__state[0] & kIOServiceInactiveState));
@@ -1302,18 +1278,18 @@ IOReturn IOService::messageClient( UInt32 type, OSObject * client,
     return( ret );
 }
 
-static void
-applyToInterestNotifiers(const IORegistryEntry *target,
-			 const OSSymbol * typeOfInterest,
-			 OSObjectApplierFunction applier,
-			 void * context )
+void IOService::applyToInterested( const OSSymbol * typeOfInterest,
+                                   OSObjectApplierFunction applier,
+                                   void * context )
 {
     OSArray *		copyArray = 0;
+
+    applyToClients( (IOServiceApplierFunction) applier, context );
 
     LOCKREADNOTIFY();
 
     IOCommand *notifyList =
-	OSDynamicCast( IOCommand, target->getProperty( typeOfInterest ));
+	OSDynamicCast( IOCommand, getProperty( typeOfInterest ));
 
     if( notifyList) {
         copyArray = OSArray::withCapacity(1);
@@ -1336,14 +1312,6 @@ applyToInterestNotifiers(const IORegistryEntry *target,
 	    (*applier)(next, context);
 	copyArray->release();
     }
-}
-
-void IOService::applyToInterested( const OSSymbol * typeOfInterest,
-                                   OSObjectApplierFunction applier,
-                                   void * context )
-{
-    applyToClients( (IOServiceApplierFunction) applier, context );
-    applyToInterestNotifiers(this, typeOfInterest, applier, context);
 }
 
 struct MessageClientsContext {
@@ -2913,15 +2881,21 @@ UInt32 IOService::_adjustBusy( SInt32 delta )
             next->unlockForArbitration();
 
         if( (wasQuiet || nowQuiet) ) {
-	    MessageClientsContext context;
+            OSArray *		array;
+            unsigned int	index;
+            OSObject *		interested;
 
-	    context.service  = next;
-	    context.type     = kIOMessageServiceBusyStateChange;
-	    context.argument = (void *) wasQuiet;	// busy now
-	    context.argSize  = 0;
-
-	    applyToInterestNotifiers( next, gIOBusyInterest, 
-				     &messageClientsApplier, &context );
+            array = OSDynamicCast( OSArray, next->getProperty( gIOBusyInterest ));
+            if( array) {
+                LOCKREADNOTIFY();
+                for( index = 0;
+                     (interested = array->getObject( index ));
+                     index++) {
+                    next->messageClient(kIOMessageServiceBusyStateChange,
+                                     interested, (void *) wasQuiet /* busy now */);
+                }
+                UNLOCKNOTIFY();
+            }
 
             if( nowQuiet && (next == gIOServiceRoot))
                 OSMetaClass::considerUnloads();
@@ -4036,9 +4010,6 @@ IOReturn IOService::newUserClient( task_t owningTask, void * securityID,
     IOUserClient *client;
     OSObject *temp;
 
-    if (kIOReturnSuccess == newUserClient( owningTask, securityID, type, handler ))
-	return kIOReturnSuccess;
-
     // First try my own properties for a user client class name
     temp = getProperty(gIOUserClientClassKey);
     if (temp) {
@@ -4056,7 +4027,6 @@ IOReturn IOService::newUserClient( task_t owningTask, void * securityID,
     if (!userClientClass)
         return kIOReturnUnsupported;
 
-    // This reference is consumed by the IOServiceOpen call
     temp = OSMetaClass::allocClassWithName(userClientClass);
     if (!temp)
         return kIOReturnNoMemory;
@@ -4091,7 +4061,7 @@ IOReturn IOService::newUserClient( task_t owningTask, void * securityID,
 IOReturn IOService::newUserClient( task_t owningTask, void * securityID,
                                     UInt32 type, IOUserClient ** handler )
 {
-    return( kIOReturnUnsupported );
+    return( newUserClient( owningTask, securityID, type, 0, handler ));
 }
 
 IOReturn IOService::requestProbe( IOOptionBits options )
@@ -4327,92 +4297,6 @@ void IOService::setDeviceMemory( OSArray * array )
 }
 
 /*
- * For machines where the transfers on an I/O bus can stall because
- * the CPU is in an idle mode, These APIs allow a driver to specify
- * the maximum bus stall that they can handle.  0 indicates no limit.
- */
-void IOService::
-setCPUSnoopDelay(UInt32 __unused ns)
-{
-#if __i386__
-    ml_set_maxsnoop(ns); 
-#endif /* __i386__ */
-}
-
-UInt32 IOService::
-getCPUSnoopDelay()
-{
-#if __i386__
-    return ml_get_maxsnoop(); 
-#else
-    return 0;
-#endif /* __i386__ */
-}
-
-void IOService::
-requireMaxBusStall(UInt32 __unused ns)
-{
-#if __i386__
-    static const UInt kNoReplace = -1U;	// Must be an illegal index
-    UInt replace = kNoReplace;
-
-    IOLockLock(sBusStallLock);
-
-    UInt count = sBusStall->getLength() / sizeof(BusStallEntry);
-    BusStallEntry *entries = (BusStallEntry *) sBusStall->getBytesNoCopy();
-
-    if (ns) {
-	const BusStallEntry ne = {this, ns};
-
-	// Set Maximum bus delay.
-	for (UInt i = 0; i < count; i++) {
-	    const IOService *thisService = entries[i].fService;
-	    if (this == thisService)
-		replace = i;
-	    else if (!thisService) {
-		if (kNoReplace == replace)
-		    replace = i;
-	    }
-	    else {
-		const UInt32 thisMax = entries[i].fMaxDelay;
-		if (thisMax < ns)
-		    ns = thisMax;
-	    }
-	}
-
-	// Must be safe to call from locked context
-	ml_set_maxbusdelay(ns);
-
-	if (kNoReplace == replace)
-	    sBusStall->appendBytes(&ne, sizeof(ne));
-	else
-	    entries[replace] = ne;
-    }
-    else {
-	ns = -1U;	// Set to max unsigned, i.e. no restriction
-
-	for (UInt i = 0; i < count; i++) {
-	    // Clear a maximum bus delay.
-	    const IOService *thisService = entries[i].fService;
-	    UInt32 thisMax = entries[i].fMaxDelay;
-	    if (this == thisService)
-		replace = i;
-	    else if (thisService && thisMax < ns)
-		ns = thisMax;
-	}
-
-	// Check if entry found
-	if (kNoReplace != replace) {
-	    entries[replace].fService = 0;	// Null the entry
-	    ml_set_maxbusdelay(ns);
-	}
-    }
-
-    IOLockUnlock(sBusStallLock);
-#endif /* __i386__ */
-}
-
-/*
  * Device interrupts
  */
 
@@ -4617,8 +4501,6 @@ OSMetaClassDefineReservedUnused(IOService, 44);
 OSMetaClassDefineReservedUnused(IOService, 45);
 OSMetaClassDefineReservedUnused(IOService, 46);
 OSMetaClassDefineReservedUnused(IOService, 47);
-
-#ifdef __ppc__
 OSMetaClassDefineReservedUnused(IOService, 48);
 OSMetaClassDefineReservedUnused(IOService, 49);
 OSMetaClassDefineReservedUnused(IOService, 50);
@@ -4635,4 +4517,3 @@ OSMetaClassDefineReservedUnused(IOService, 60);
 OSMetaClassDefineReservedUnused(IOService, 61);
 OSMetaClassDefineReservedUnused(IOService, 62);
 OSMetaClassDefineReservedUnused(IOService, 63);
-#endif

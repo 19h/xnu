@@ -282,10 +282,8 @@ mach_msg_overwrite(
 		if ((send_size < sizeof(mach_msg_header_t)) || (send_size & 3))
 			return MACH_SEND_MSG_TOO_SMALL;
 
-		if (send_size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
-			return MACH_SEND_TOO_LARGE;
-
 		msg_and_trailer_size = send_size + MAX_TRAILER_SIZE;
+
 		kmsg = ipc_kmsg_alloc(msg_and_trailer_size);
 
 		if (kmsg == IKM_NULL)

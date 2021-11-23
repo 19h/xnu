@@ -44,10 +44,8 @@
 
 #include <netinet/icmp6.h>
 
-#if IP6_RTHDR0_ALLOWED
 static int ip6_rthdr0(struct mbuf *, struct ip6_hdr *,
     struct ip6_rthdr0 *);
-#endif /* IP6_RTHDR0_ALLOWED */
 
 int
 route6_input(mp, offp)
@@ -85,7 +83,6 @@ route6_input(mp, offp)
 #endif
 
 	switch (rh->ip6r_type) {
-#if IP6_RTHDR0_ALLOWED
 	case IPV6_RTHDR_TYPE_0:
 		rhlen = (rh->ip6r_len + 1) << 3;
 #ifndef PULLDOWN_TEST
@@ -113,7 +110,6 @@ route6_input(mp, offp)
 		if (ip6_rthdr0(m, ip6, (struct ip6_rthdr0 *)rh))
 			return(IPPROTO_DONE);
 		break;
-#endif /* IP6_RTHDR0_ALLOWED */
 	default:
 		/* unknown routing type */
 		if (rh->ip6r_segleft == 0) {
@@ -130,7 +126,6 @@ route6_input(mp, offp)
 	return(rh->ip6r_nxt);
 }
 
-#if IP6_RTHDR0_ALLOWED
 /*
  * Type0 routing header processing
  *
@@ -221,4 +216,3 @@ ip6_rthdr0(m, ip6, rh0)
 
 	return(-1);			/* m would be freed in ip6_forward() */
 }
-#endif /* IP6_RTHDR0_ALLOWED */

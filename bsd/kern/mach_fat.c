@@ -38,8 +38,13 @@
 #include <kern/cpu_number.h>
 #include <mach-o/fat.h>
 #include <kern/mach_loader.h>
-#include <libkern/OSByteOrder.h>
-#include <machine/exec.h>
+#include <architecture/byte_order.h>
+
+/* XXX should be in common header */
+extern int grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype);
+
+#define CPU_TYPE_NATIVE		(cpu_type())
+#define CPU_TYPE_CLASSIC	CPU_TYPE_POWERPC
 
 /**********************************************************************
  * Routine:	fatfile_getarch2()
@@ -79,7 +84,7 @@ fatfile_getarch2(
 	int			grade;
 	int			best_grade;
 	int			nfat_arch;
-	off_t		end_of_archs;
+	int			end_of_archs;
 	struct fat_header	*header;
 #if 0
 	off_t filesize;
@@ -95,10 +100,10 @@ fatfile_getarch2(
 	 *	Map portion that must be accessible directly into
 	 *	kernel's map.
 	 */
-	nfat_arch = OSSwapBigToHostInt32(header->nfat_arch);
+	nfat_arch = NXSwapBigLongToHost(header->nfat_arch);
 
-	end_of_archs = (off_t)nfat_arch * sizeof(struct fat_arch) + 
-		sizeof(struct fat_header);
+	end_of_archs = sizeof(struct fat_header)
+		+ nfat_arch * sizeof(struct fat_arch);
 #if 0
 	filesize = ubc_getsize(vp);
 	if (end_of_archs > (int)filesize) {
@@ -106,14 +111,10 @@ fatfile_getarch2(
 	}
 #endif
 
-	/*
-	 * This check is limited on the top end because we are reading
-	 * only PAGE_SIZE bytes
-	 */
-	if (end_of_archs > PAGE_SIZE ||
-		end_of_archs < (sizeof(struct fat_header)+sizeof(struct fat_arch)))
-		return(LOAD_BADMACHO);
+	/* This is beacuse we are reading only 512 bytes */
 
+	if (end_of_archs > 512)
+		return(LOAD_BADMACHO);
 	/*
 	 * 	Round size of fat_arch structures up to page boundry.
 	 */
@@ -133,15 +134,15 @@ fatfile_getarch2(
 		/*
 		 *	Check to see if right cpu type.
 		 */
-		if(((cpu_type_t)OSSwapBigToHostInt32(arch->cputype) & ~mask_bits) != req_cpu_type)
+		if(((cpu_type_t)NXSwapBigIntToHost(arch->cputype) & ~mask_bits) != req_cpu_type)
 			continue;
 
 		/*
 		 * 	Get the grade of the cpu subtype.
 		 */
 		grade = grade_binary(
-			    OSSwapBigToHostInt32(arch->cputype),
-			    OSSwapBigToHostInt32(arch->cpusubtype));
+			    NXSwapBigIntToHost(arch->cputype),
+			    NXSwapBigIntToHost(arch->cpusubtype));
 
 		/*
 		 *	Remember it if it's the best we've seen.
@@ -159,15 +160,15 @@ fatfile_getarch2(
 		lret = LOAD_BADARCH;
 	} else {
 		archret->cputype	=
-			    OSSwapBigToHostInt32(best_arch->cputype);
+			    NXSwapBigIntToHost(best_arch->cputype);
 		archret->cpusubtype	=
-			    OSSwapBigToHostInt32(best_arch->cpusubtype);
+			    NXSwapBigIntToHost(best_arch->cpusubtype);
 		archret->offset		=
-			    OSSwapBigToHostInt32(best_arch->offset);
+			    NXSwapBigLongToHost(best_arch->offset);
 		archret->size		=
-			    OSSwapBigToHostInt32(best_arch->size);
+			    NXSwapBigLongToHost(best_arch->size);
 		archret->align		=
-			    OSSwapBigToHostInt32(best_arch->align);
+			    NXSwapBigLongToHost(best_arch->align);
 
 		lret = LOAD_SUCCESS;
 	}
@@ -178,6 +179,8 @@ fatfile_getarch2(
 	return(lret);
 }
 
+extern char classichandler[];
+
 load_return_t
 fatfile_getarch_affinity(
 		struct vnode		*vp,
@@ -186,15 +189,15 @@ fatfile_getarch_affinity(
 		int 				affinity)
 {
 		load_return_t lret;
-		int handler = (exec_archhandler_ppc.path[0] != 0);
+		int handler = (classichandler[0] != 0);
 		cpu_type_t primary_type, fallback_type;
 
 		if (handler && affinity) {
-				primary_type = CPU_TYPE_POWERPC;
-				fallback_type = cpu_type();
+				primary_type = CPU_TYPE_CLASSIC;
+				fallback_type = CPU_TYPE_NATIVE;
 		} else {
-				primary_type = cpu_type();
-				fallback_type = CPU_TYPE_POWERPC;
+				primary_type = CPU_TYPE_NATIVE;
+				fallback_type = CPU_TYPE_CLASSIC;
 		}
 		/*
 		 * Ignore the architectural bits when determining if an image
@@ -228,7 +231,7 @@ fatfile_getarch(
 	vm_offset_t 	data_ptr,
 	struct fat_arch		*archret)
 {
-	return fatfile_getarch2(vp, data_ptr, cpu_type(), 0, archret);
+	return fatfile_getarch2(vp, data_ptr, CPU_TYPE_NATIVE, 0, archret);
 }
 
 /**********************************************************************
@@ -253,6 +256,6 @@ fatfile_getarch_with_bits(
 	vm_offset_t 	data_ptr,
 	struct fat_arch		*archret)
 {
-	return fatfile_getarch2(vp, data_ptr, archbits | cpu_type(), 0, archret);
+	return fatfile_getarch2(vp, data_ptr, archbits | CPU_TYPE_NATIVE, 0, archret);
 }
 

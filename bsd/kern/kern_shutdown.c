@@ -60,7 +60,6 @@
 #include <bsm/audit_kernel.h>
 
 int	waittime = -1;
-static void proc_shutdown();
 
 void
 boot(paniced, howto, command)
@@ -74,6 +73,7 @@ boot(paniced, howto, command)
 	int funnel_state;
 	struct proc  *launchd_proc;
 
+	static void proc_shutdown();
     extern void md_prepare_for_shutdown(int paniced, int howto, char * command);
 
 	funnel_state = thread_funnel_set(kernel_flock, TRUE);
@@ -141,10 +141,6 @@ boot(paniced, howto, command)
 	if (paniced == RB_PANIC)
 		hostboot_option = HOST_REBOOT_HALT;
 
-    if (howto & RB_UPSDELAY) {
-        hostboot_option = HOST_REBOOT_UPSDELAY;
-    }
-
 	/*
 	 * if we're going to power down due to a halt,
 	 * give the disks a chance to finish getting
@@ -211,10 +207,8 @@ sigterm_loop:
 			}
 		        if (p->p_sigcatch & sigmask(SIGTERM)) {
 					p->p_shutdownstate = 1;
-					if (proc_refinternal(p, 1) == p) {
-			        	psignal(p, SIGTERM);
-						proc_dropinternal(p, 1);
-					}
+			        psignal(p, SIGTERM);
+
 				goto sigterm_loop;
 		}
 	}
@@ -264,10 +258,7 @@ sigkill_loop:
 			if ((delayterm == 0) && ((p->p_lflag& P_LDELAYTERM) == P_LDELAYTERM)) {
 				continue;
 			}
-			if (proc_refinternal(p, 1) == p) {
-				psignal(p, SIGKILL);
-				proc_dropinternal(p, 1);
-			}
+			psignal(p, SIGKILL);
 			p->p_shutdownstate = 2;
 			goto sigkill_loop;
 		}
@@ -291,12 +282,11 @@ sigkill_loop:
 	 */
 	p = allproc.lh_first;
 	while (p) {
-	        if ((p->p_shutdownstate == 3) || (p->p_flag&P_SYSTEM) || (!delayterm && ((p->p_lflag& P_LDELAYTERM))) 
+	        if ((p->p_flag&P_SYSTEM) || (!delayterm && ((p->p_lflag& P_LDELAYTERM))) 
 				|| (p->p_pptr->p_pid == 0) || (p == self)) {
 		        p = p->p_list.le_next;
 		}
 		else {
-			p->p_shutdownstate = 3;
 		        /*
 			 * NOTE: following code ignores sig_lock and plays
 			 * with exit_thread correctly.  This is OK unless we
@@ -310,10 +300,7 @@ sigkill_loop:
 			} else {
 				p->exit_thread = current_thread();
 				printf(".");
-				if (proc_refinternal(p, 1) == p) {
-					exit1(p, 1, (int *)NULL);
-					proc_dropinternal(p, 1);
-				}
+				exit1(p, 1, (int *)NULL);
 			}
 			p = allproc.lh_first;
 		}

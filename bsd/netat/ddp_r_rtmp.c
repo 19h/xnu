@@ -92,6 +92,7 @@ extern int elap_online3();
 
 extern pktsIn, pktsOut, pktsDropped, pktsHome;
 extern short ErrorRTMPoverflow, ErrorZIPoverflow;
+extern atlock_t ddpinp_lock;
 extern lck_mtx_t * atalk_mutex;
 
 /*
@@ -280,7 +281,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 				ifID->ifRoutingState = PORT_ERR_SEED;
 				ke.error 	= KE_CONF_SEED_RNG;
 				ke.port1 	= ifID->ifPort;
-				strlcpy(ke.name1, ifID->ifName, sizeof(ke.name1));
+				strncpy(ke.name1, ifID->ifName, sizeof(ke.name1));
 				ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 				ke.node     = SenderNodeID;
 				ke.netr1b 	= TUPLENET(FirstTuple);
@@ -303,7 +304,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 			    (ifID->ifThisCableEnd != NET_VALUE(rtmp->at_rtmp_this_net))) {
 				ke.error 	= KE_CONF_SEED1;
 				ke.port1 	= ifID->ifPort;
-				strlcpy(ke.name1, ifID->ifName,sizeof(ke.name1));
+				strncpy(ke.name1, ifID->ifName,sizeof(ke.name1));
 				ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 				ke.node     = SenderNodeID;
 				ke.netr1e 	= ifID->ifThisCableEnd;
@@ -341,7 +342,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 				ifID->ifRoutingState = PORT_ERR_CABLER;
 				ke.error 	= KE_CONF_SEED_NODE;
 				ke.port1 	= ifID->ifPort;
-				strlcpy(ke.name1, ifID->ifName,sizeof(ke.name1));
+				strncpy(ke.name1, ifID->ifName,sizeof(ke.name1));
 				ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 				ke.node     = SenderNodeID;
 				ke.netr1b 	= TUPLENET(FirstTuple);
@@ -369,7 +370,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 			ifID->ifRoutingState = PORT_ERR_STARTUP;
 			ke.error 	= KE_SEED_STARTUP;
 			ke.port1 	= ifID->ifPort;
-			strlcpy(ke.name1, ifID->ifName,sizeof(ke.name1));
+			strncpy(ke.name1, ifID->ifName,sizeof(ke.name1));
 			ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 			ke.node     = SenderNodeID;
 			RouterError(ifID->ifPort, ERTR_CABLE_STARTUP);
@@ -676,11 +677,9 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 					("rtmp_update: Shorter route found %d-%d, update\n",
 					 NewRoute.NetStart, NewRoute.NetStop));
 
-#ifdef AURP_SUPPORT
 			if (ddp_AURPsendx && (aurp_ifID->ifFlags & AT_IFF_AURP))
 				ddp_AURPsendx(AURPCODE_RTUPDATE,
 					      (void *)&NewRoute, AURPEV_NetDistChange);
-#endif
 			}
 		}
 		else { /* no entry found */
@@ -701,11 +700,10 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 					      NewRoute.NextIRNode, NewRoute.NetDist, NewRoute.NetPort,
 					      NewRoute.EntryState) == (RT_entry *)NULL)
 					ErrorRTMPoverflow = 1;
-#ifdef AURP_SUPPORT
+
 				else if (ddp_AURPsendx && (aurp_ifID->ifFlags & AT_IFF_AURP))
 					ddp_AURPsendx(AURPCODE_RTUPDATE,
 						      (void *)&NewRoute, AURPEV_NetAdded);
-#endif
 			}		
 		}
 
@@ -740,6 +738,7 @@ void rtmp_timeout(ifID)
 register at_ifaddr_t        *ifID;
 {
 		register u_char state;
+		register unsigned int s;
 		short i;
 		RT_entry *en = &RT_table[0];
 
@@ -755,6 +754,7 @@ register at_ifaddr_t        *ifID;
 		if (ifID->ifRouterState > NO_ROUTER)
 			ifID->ifRouterState--;
 
+		ATDISABLE(s, ddpinp_lock);
 		for (i = 0 ; i < RT_maxentry; i++,en++) {
 
 			/* we want to age "learned" nets, not directly connected ones */
@@ -778,11 +778,10 @@ register at_ifaddr_t        *ifID;
 					dPrintf(D_M_RTMP, D_L_INFO,
 						("rtmp_timeout: Bad State for %d-%d (e#%d): remove\n",
 							en->NetStart, en->NetStop, i));
-#ifdef AURP_SUPPORT
+
 				if (ddp_AURPsendx && (aurp_ifID->ifFlags & AT_IFF_AURP))
 					ddp_AURPsendx(AURPCODE_RTUPDATE,
 						(void *)en, AURPEV_NetDeleted);
-#endif
 	
 					/* then clear the bit in the table concerning this entry.
 					If the zone Count reaches zero, remove the entry */
@@ -798,6 +797,7 @@ register at_ifaddr_t        *ifID;
 				}
 			}
 		}
+		ATENABLE(s, ddpinp_lock);
 		timeout(rtmp_timeout, (caddr_t) ifID, 20*SYS_HZ);
 		
 		atalk_unlock();
@@ -986,6 +986,7 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 	short size,status ;
 	register at_ddp_t	*ddp;
 	register short EntNb = 0, sent_tuple = 0;
+	register unsigned int s;
 
 	if (ifID->ifRoutingState < PORT_ONLINE) {
 		dPrintf(D_M_RTMP, D_L_INFO,
@@ -1010,6 +1011,7 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 	ddp = (at_ddp_t *)(gbuf_rptr(m));
 	Buff_ptr = (char *)((char *)ddp + DDP_X_HDR_SIZE + 10); 
 
+	ATDISABLE(s, ddpinp_lock);
 	while (EntNb < RT_maxentry) {
 
 		if (Entry->NetStop && ((Entry->EntryState & 0x0F) >= RTE_STATE_SUSPECT)) {
@@ -1042,6 +1044,7 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 		if (size > (DDP_DATA_SIZE-20)) {
 			DDPLEN_ASSIGN(ddp, size + DDP_X_HDR_SIZE + 10);
 			gbuf_winc(m,size);
+			ATENABLE(s, ddpinp_lock);
 			if (status = ddp_router_output(m, ifID, AT_ADDR,
 				NET_VALUE(DestNet),DestNode, 0)){
 			  dPrintf(D_M_RTMP, D_L_WARNING,
@@ -1063,11 +1066,13 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 				 sent_tuple, ifID->ifPort));
 			sent_tuple = 0;
 			size = 0;
+			ATDISABLE(s, ddpinp_lock);
 		}
 
 		Entry++;
 		EntNb++;
 	}
+	ATENABLE(s, ddpinp_lock);
 
 	/*
 	 * If we have some remaining entries to send, send them now.
@@ -1261,12 +1266,12 @@ int rtmp_router_start(keP)
 				if (ifID->ifThisCableEnd == 0)  {
 					keP->error 	= KE_NO_SEED;
 					keP->port1 	= ifID->ifPort;
-					strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+					strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 				}
 				else {
 					keP->error 	= KE_INVAL_RANGE;
 					keP->port1 	= ifID->ifPort;
-					strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+					strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 					keP->netr1b 	= ifID->ifThisCableStart;
 					keP->netr1e 	= ifID->ifThisCableEnd;
 				}
@@ -1310,12 +1315,12 @@ int rtmp_router_start(keP)
 			if (ifID->ifThisCableEnd == 0)  {
 				keP->error 	= KE_NO_SEED;
 				keP->port1 	= ifID->ifPort;
-				strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+				strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 			}
 			else {
 				keP->error 	= KE_INVAL_RANGE;
 				keP->port1 	= ifID->ifPort;
-				strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+				strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 				keP->netr1b 	= ifID->ifThisCableStart;
 				keP->netr1e 	= ifID->ifThisCableEnd;
 			}
@@ -1345,9 +1350,9 @@ int rtmp_router_start(keP)
 
 					keP->error 	= KE_CONF_RANGE;
 					keP->port1 	= ifID->ifPort;
-					strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+					strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 					keP->port2 	= ifID2->ifPort;
-					strlcpy(keP->name2, ifID2->ifName,sizeof(keP->name2));
+					strncpy(keP->name2, ifID2->ifName,sizeof(keP->name2));
 					keP->netr1b 	= ifID->ifThisCableStart;
 					keP->netr1e 	= ifID->ifThisCableEnd;
 					ifID->ifRoutingState = PORT_ERR_CABLER;
@@ -1455,7 +1460,7 @@ startZoneInfo:
 					("rtmp_router_start: no received response to ZipNeedQueries\n"));
 				keP->error 	= KE_NO_ZONES_FOUND;
 				keP->port1 	= ifID->ifPort;
-				strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+				strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 				keP->netr1b 	= ifID->ifThisCableStart;
 				keP->netr1e 	= ifID->ifThisCableEnd;
 				ifID->ifRoutingState = PORT_ERR_CABLER;
@@ -1625,9 +1630,10 @@ void rtmp_purge(ifID)
 	at_ifaddr_t *ifID;
 {
 	u_char state;
-	int i;
+	int i, s;
 	RT_entry *en = &RT_table[0];
 
+	ATDISABLE(s, ddpinp_lock);
 	for (i=0; i < RT_maxentry; i++) {
 		state = en->EntryState & 0x0F;
 		if ((state > RTE_STATE_UNUSED) && (state != RTE_STATE_PERMANENT)
@@ -1637,4 +1643,5 @@ void rtmp_purge(ifID)
 		}
 		en++;
 	}
+	ATENABLE(s, ddpinp_lock);
 }
