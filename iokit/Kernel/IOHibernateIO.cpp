@@ -227,7 +227,7 @@ static IOReturn IOHibernateDone(IOHibernateVars * vars);
 
 enum { kXPRamAudioVolume = 8 };
 enum { kDefaultIOSize = 128 * 1024 };
-enum { kVideoMapSize  = 32 * 1024 * 1024 };
+enum { kVideoMapSize  = 80 * 1024 * 1024 };
 
 #ifndef kIOMediaPreferredBlockSizeKey
 #define kIOMediaPreferredBlockSizeKey	"Preferred Block Size"
@@ -239,9 +239,6 @@ enum { kVideoMapSize  = 32 * 1024 * 1024 };
 #ifndef kIOSelectedBootDeviceKey	
 #define kIOSelectedBootDeviceKey	"boot-device"
 #endif
-
-
-enum { kIOHibernateMinPollersNeeded = 2 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -741,7 +738,8 @@ IOPolledFileOpen( const char * filename, uint64_t setFileSize,
 
 	IORegistryEntry * next;
 	IORegistryEntry * child;
-	OSData * data;
+	IOService       * service;
+	OSData          * data;
 
         vars->pollers = OSArray::withCapacity(4);
 	if (!vars->pollers)
@@ -765,6 +763,11 @@ IOPolledFileOpen( const char * filename, uint64_t setFileSize,
 	    }
             else if ((poller = OSDynamicCast(IOPolledInterface, obj)))
                 vars->pollers->setObject(poller);
+
+	    if ((service = OSDynamicCast(IOService, next)) 
+		&& service->getDeviceMemory()
+		&& !vars->pollers->getCount())	break;
+
 	    if ((num = OSDynamicCast(OSNumber, next->getProperty(kIOMediaPreferredBlockSizeKey))))
 		vars->blockSize = num->unsigned32BitValue();
             child = next;
@@ -775,9 +778,10 @@ IOPolledFileOpen( const char * filename, uint64_t setFileSize,
 	if (vars->blockSize < 4096) vars->blockSize = 4096;
 
 	HIBLOG("hibernate image major %d, minor %d, blocksize %ld, pollers %d\n",
-		    major(hibernate_image_dev), minor(hibernate_image_dev), (long)vars->blockSize, vars->pollers->getCount());
+		    major(hibernate_image_dev), minor(hibernate_image_dev), (long)vars->blockSize, 
+		    vars->pollers->getCount());
 
-	if (vars->pollers->getCount() < kIOHibernateMinPollersNeeded)
+	if (!vars->pollers->getCount())
 	{
             err = kIOReturnUnsupported;
 	    continue;
@@ -2923,9 +2927,13 @@ hibernate_machine_init(void)
     {
         vars->videoMapSize = round_page(gIOHibernateGraphicsInfo->height 
                                         * gIOHibernateGraphicsInfo->rowBytes);
-        IOMapPages(kernel_map, 
-                    vars->videoMapping, gIOHibernateGraphicsInfo->physicalAddress,
-                    vars->videoMapSize, kIOMapInhibitCache );
+	if (vars->videoMapSize > vars->videoAllocSize) vars->videoMapSize = 0;
+	else
+	{
+	    IOMapPages(kernel_map, 
+			vars->videoMapping, gIOHibernateGraphicsInfo->physicalAddress,
+			vars->videoMapSize, kIOMapInhibitCache );
+	}
     }
 
     if (vars->videoMapSize)
