@@ -37,7 +37,9 @@
 #include <libkern/WKdm.h>
 #include "IOHibernateInternal.h"
 
-#include <machine/pal_hibernate.h>
+#if defined(__i386__) || defined(__x86_64__)
+#include <i386/pal_hibernate.h>
+#endif
 
 /*
 This code is linked into the kernel but part of the "__HIB" section, which means
@@ -71,27 +73,6 @@ extern void acpi_wake_prot_entry(void);
 #endif
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
-#if defined(__i386__) || defined(__x86_64__)
-
-#define rdtsc(lo,hi) \
-    __asm__ volatile("lfence; rdtsc; lfence" : "=a" (lo), "=d" (hi))
-
-static inline uint64_t rdtsc64(void)
-{
-    uint64_t lo, hi;
-    rdtsc(lo, hi);
-    return ((hi) << 32) | (lo);
-}
-
-#else
-
-static inline uint64_t rdtsc64(void)
-{
-    return (0);
-}
-
-#endif /* defined(__i386__) || defined(__x86_64__) */
 
 #if defined(__i386__) || defined(__x86_64__)
 
@@ -460,9 +441,6 @@ hibernate_kernel_entrypoint(uint32_t p1,
     uint32_t handoffPages;
     uint32_t handoffPageCount;
 
-    uint64_t timeStart, time;
-    timeStart = rdtsc64();
-
     C_ASSERT(sizeof(IOHibernateImageHeader) == 512);
 
     headerPhys = ptoa_64(p1);
@@ -626,10 +604,8 @@ hibernate_kernel_entrypoint(uint32_t p1,
 	    if (!conflicts)
 	    {
 //              if (compressedSize)
-		time = rdtsc64();
 		pageSum = store_one_page(gIOHibernateCurrentHeader->processorFlags,
 					 src, compressedSize, 0, ppnum);
-                gIOHibernateCurrentHeader->restoreTime2 += (rdtsc64() - time);
 		if (stage != 2)
 		    sum += pageSum;
 		uncompressedPages++;
@@ -682,8 +658,6 @@ hibernate_kernel_entrypoint(uint32_t p1,
 
     // -- copy back conflicts
 
-    time = rdtsc64();
-
     pageListPage = copyPageListHeadPage;
     while (pageListPage)
     {
@@ -707,8 +681,6 @@ hibernate_kernel_entrypoint(uint32_t p1,
 
     pal_hib_patchup();
 
-    gIOHibernateCurrentHeader->restoreTime3 = (rdtsc64() - time);
-
     // -- image has been destroyed...
 
     gIOHibernateCurrentHeader->actualImage1Sum         = sum;
@@ -717,8 +689,6 @@ hibernate_kernel_entrypoint(uint32_t p1,
     gIOHibernateCurrentHeader->nextFree                = nextFree;
 
     gIOHibernateState = kIOHibernateStateWakingFromHibernate;
-
-    gIOHibernateCurrentHeader->restoreTime1 = (rdtsc64() - timeStart);
 
 #if CONFIG_SLEEP
 #if defined(__i386__) || defined(__x86_64__)

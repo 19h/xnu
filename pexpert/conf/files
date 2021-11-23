@@ -1,4 +1,5 @@
 #
+OPTIONS/panic_info				optional panic_info
 OPTIONS/config_dtrace           optional config_dtrace
 
 #

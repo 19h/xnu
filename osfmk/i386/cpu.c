@@ -91,6 +91,8 @@ cpu_sleep(void)
 {
 	cpu_data_t	*cdp = current_cpu_datap();
 
+	i386_deactivate_cpu();
+
 	PE_cpu_machine_quiesce(cdp->cpu_id);
 
 	cpu_thread_halt();

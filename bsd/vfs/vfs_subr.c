@@ -4486,11 +4486,6 @@ vnode_create(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp)
 	if (param == NULL)
 		return (EINVAL);
 
-	/* Do quick sanity check on the parameters */
-	if (param->vnfs_vtype == VBAD) {
-		return (EINVAL);
-	}
-
 #if CONFIG_TRIGGERS
 	if ((flavor == VNCREATE_TRIGGER) && (size == VNCREATE_TRIGGER_SIZE)) {
 		tinfo = (struct vnode_trigger_param *)data;
@@ -5460,23 +5455,7 @@ vn_authorize_open_existing(vnode_t vp, struct componentname *cnp, int fmode, vfs
 			action |= KAUTH_VNODE_WRITE_DATA;
 		}
 	}
-	error = vnode_authorize(vp, NULL, action, ctx);
-
-#if NAMEDSTREAMS
-	if (error == EACCES) {
-		/*
-		 * Shadow files may exist on-disk with a different UID/GID
-		 * than that of the current context.  Verify that this file
-		 * is really a shadow file.  If it was created successfully
-		 * then it should be authorized.
-		 */
-		if (vnode_isshadow(vp) && vnode_isnamedstream (vp)) {
-			error = vnode_verifynamedstream(vp, ctx);
-		}
-	}
-#endif
-	
-	return error;
+	return (vnode_authorize(vp, NULL, action, ctx));
 }
 
 int

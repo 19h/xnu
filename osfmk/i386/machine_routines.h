@@ -80,7 +80,7 @@ void ml_install_interrupt_handler(
 
 void ml_get_timebase(unsigned long long *timestamp);
 void ml_init_lock_timeout(void); 
-void ml_init_delay_spin_threshold(int);
+void ml_init_delay_spin_threshold(void);
 
 boolean_t ml_delay_should_spin(uint64_t interval);
 
@@ -312,7 +312,6 @@ boolean_t ml_fpu_avx_enabled(void);
 void interrupt_latency_tracker_setup(void);
 void interrupt_reset_latency_stats(void);
 void interrupt_populate_latency_stats(char *, unsigned);
-void ml_get_power_state(boolean_t *, boolean_t *);
 
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* _I386_MACHINE_ROUTINES_H_ */

@@ -465,8 +465,6 @@ bool IOService::attach( IOService * provider )
 	ok = attachToParent( getRegistryRoot(), gIOServicePlane);
     }
 
-    if (ok && !__provider) (void) getProvider();
-
     return( ok );
 }
 
@@ -769,9 +767,10 @@ IOService * IOService::getProvider( void ) const
     IOService *	parent;
     SInt32	generation;
 
+    parent = __provider;
     generation = getGenerationCount();
     if( __providerGeneration == generation)
-	return( __provider );
+	return( parent );
 
     parent = (IOService *) getParentEntry( gIOServicePlane);
     if( parent == IORegistryEntry::getRegistryRoot())
@@ -779,8 +778,7 @@ IOService * IOService::getProvider( void ) const
 	parent = 0;
 
     self->__provider = parent;
-    OSMemoryBarrier();
-    // save the count from before call to getParentEntry()
+    // save the count before getParentEntry()
     self->__providerGeneration = generation;
 
     return( parent );
@@ -3108,11 +3106,9 @@ void IOService::doServiceMatch( IOOptionBits options )
         if( matches) {
 
             lockForArbitration();
-            if( 0 == (__state[0] & kIOServiceFirstPublishState)) {
-		getMetaClass()->addInstance(this);
+            if( 0 == (__state[0] & kIOServiceFirstPublishState))
                 deliverNotification( gIOFirstPublishNotification,
                                      kIOServiceFirstPublishState, 0xffffffff );
-            }
 	    LOCKREADNOTIFY();
             __state[1] &= ~kIOServiceNeedConfigState;
             __state[1] |= kIOServiceConfigState;
@@ -3136,6 +3132,9 @@ void IOService::doServiceMatch( IOOptionBits options )
             }
 
 	    UNLOCKNOTIFY();
+	    if (didRegister) {
+		getMetaClass()->addInstance(this);
+	    }
             unlockForArbitration();
 
             if (keepGuessing && matches->getCount() && (kIOReturnSuccess == getResources()))

@@ -38,7 +38,5 @@
 #define kPMSetMaintenanceWakeCalendar   8
 #define kPMSetUserAssertionLevels       9
 #define kPMActivityTickle               10
-#define kPMGetSystemSleepType           11
-#define kPMSetClamshellSleepState       12
 
-#define kNumPMMethods                   13
+#define kNumPMMethods                   11

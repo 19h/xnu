@@ -150,7 +150,6 @@ __BEGIN_DECLS
 #define	MACH_REMOTE_AST		0x17	/* AST signal issued to remote processor */
 
 #define	MACH_SCHED_LPA_BROKEN	0x18	/* last_processor affinity broken in choose_processor */
-#define MACH_DEEP_IDLE          0x19	/* deep idle on master processor */
 
 /* Codes for pmap (DBG_MACH_PMAP) */     
 #define PMAP__CREATE		0x0
@@ -251,7 +250,6 @@ __BEGIN_DECLS
 #define DBG_DRVSD		19 	/* Secure Digital */
 #define DBG_DRVNAND		20	/* NAND drivers and layers */
 #define DBG_SSD			21	/* SSD */
-#define DBG_DRVSPI		22	/* SPI */
 
 /* Backwards compatibility */
 #define	DBG_DRVPOINTING		DBG_DRVHID		/* OBSOLETE: Use DBG_DRVHID instead */
@@ -315,9 +313,8 @@ __BEGIN_DECLS
 #define DKIO_PASSIVE	0x40
 #define DKIO_NOCACHE	0x80
 
-/* Kernel Debug Sub Classes for Applications (DBG_APPS) */
-#define DBG_APP_LOGINWINDOW     0x03
-#define DBG_APP_SAMBA           0x80
+/* Codes for Application Sub Classes */
+#define DBG_APP_SAMBA	128
 
 
 /**********************************************************************/
@@ -541,7 +538,7 @@ extern void kdbg_trace_data(struct proc *proc, long *arg_pid);
 extern void kdbg_trace_string(struct proc *proc, long *arg1, long *arg2, long *arg3, long *arg4);
 
 extern void kdbg_dump_trace_to_file(const char *);
-void start_kern_tracing(unsigned int, boolean_t);
+void start_kern_tracing(unsigned int);
 struct task;
 extern void kdbg_get_task_name(char*, int, struct task *task);
 void disable_wrap(uint32_t *old_slowcheck, uint32_t *old_flags);

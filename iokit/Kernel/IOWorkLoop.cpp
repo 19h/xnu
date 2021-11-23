@@ -34,7 +34,6 @@
 #include <IOKit/IOTimeStamp.h>
 #include <IOKit/IOKitDebug.h>
 #include <libkern/OSDebug.h>
-#include <kern/thread.h>
 
 #define super OSObject
 
@@ -178,7 +177,6 @@ bool IOWorkLoop::init()
             return false;
     }
 
-    (void) thread_set_tag(workThread, THREAD_TAG_IOWORKLOOP);
     return true;
 }
 

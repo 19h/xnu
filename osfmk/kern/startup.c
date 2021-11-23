@@ -118,7 +118,6 @@
 #include <pmc/pmc.h>
 #endif
 
-#include <i386/pmCPU.h>
 static void		kernel_bootstrap_thread(void);
 
 static void		load_context(
@@ -143,7 +142,6 @@ extern int serverperfmode;
 
 /* size of kernel trace buffer, disabled by default */
 unsigned int new_nkdbufs = 0;
-unsigned int wake_nkdbufs = 0;
 
 /* mach leak logging */
 int log_leaks = 0;
@@ -178,8 +176,6 @@ kernel_bootstrap(void)
 		turn_on_log_leaks = 1;
 
 	PE_parse_boot_argn("trace", &new_nkdbufs, sizeof (new_nkdbufs));
-
-	PE_parse_boot_argn("trace_wake", &wake_nkdbufs, sizeof (wake_nkdbufs));
 
 	/* i386_vm_init already checks for this ; do it aagin anyway */
         if (PE_parse_boot_argn("serverperfmode", &serverperfmode, sizeof (serverperfmode))) {
@@ -345,7 +341,7 @@ kernel_bootstrap_thread(void)
 #if (defined(__i386__) || defined(__x86_64__))
 	if (turn_on_log_leaks && !new_nkdbufs)
 		new_nkdbufs = 200000;
-	start_kern_tracing(new_nkdbufs, FALSE);
+	start_kern_tracing(new_nkdbufs);
 	if (turn_on_log_leaks)
 		log_leaks = 1;
 #endif
@@ -370,7 +366,7 @@ kernel_bootstrap_thread(void)
 #if (!defined(__i386__) && !defined(__x86_64__))
 	if (turn_on_log_leaks && !new_nkdbufs)
 		new_nkdbufs = 200000;
-	start_kern_tracing(new_nkdbufs, FALSE);
+	start_kern_tracing(new_nkdbufs);
 	if (turn_on_log_leaks)
 		log_leaks = 1;
 #endif

@@ -1735,7 +1735,6 @@ public:
     IOReturn changePowerStateWithOverrideTo( unsigned long ordinal );
     static const char * getIOMessageString( uint32_t msg );
     IOReturn setIgnoreIdleTimer( bool ignore );
-    static void setAdvisoryTickleEnable( bool enable );
 
 #ifdef __LP64__
     static IOWorkLoop * getPMworkloop( void );
@@ -1744,7 +1743,6 @@ public:
 protected:
     bool tellClientsWithResponse( int messageType );
     void tellClients( int messageType );
-    void PMDebug( uint32_t event, uintptr_t param1, uintptr_t param2 );
 
 private:
 #ifndef __LP64__
@@ -1785,18 +1783,16 @@ private:
     void ParentChangeNotifyInterestedDriversDidChange ( void );
     void ParentChangeTellCapabilityDidChange ( void );
     void ParentChangeAcknowledgePowerChange ( void );
-    void ParentChangeRootChangeDown( void );
-
+    
     void all_done ( void );
     void start_ack_timer ( void );
     void stop_ack_timer ( void );
     void startSettleTimer( void );
     bool checkForDone ( void );
     bool responseValid ( uint32_t x, int pid );
-    void computeDesiredState( unsigned long tempDesire, bool computeOnly );
+    void computeDesiredState ( unsigned long tempDesire = 0 );
     void trackSystemSleepPreventers( IOPMPowerStateIndex, IOPMPowerStateIndex, IOPMPowerChangeFlags );
     void tellSystemCapabilityChange( uint32_t nextMS );
-    void restartIdleTimer( void );
 
 	static void ack_timer_expired( thread_call_param_t, thread_call_param_t );
 	static IOReturn actionAckTimerExpired(OSObject *, void *, void *, void *, void * );

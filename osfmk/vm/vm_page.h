@@ -424,9 +424,7 @@ unsigned int	vm_page_throttled_count;/* How many inactives are throttled */
 extern
 unsigned int	vm_page_speculative_count;	/* How many speculative pages are unclaimed? */
 extern
-unsigned int	vm_page_wire_count;		/* How many pages are wired? */
-extern
-unsigned int	vm_page_wire_count_initial;	/* How many pages wired at startup */
+unsigned int	vm_page_wire_count;	/* How many pages are wired? */
 extern
 unsigned int	vm_page_free_target;	/* How many do we want free? */
 extern

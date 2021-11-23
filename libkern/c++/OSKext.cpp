@@ -7822,16 +7822,15 @@ OSKext::copyInfo(OSArray * infoKeys)
                 lcp = (struct load_command *) (temp_kext_mach_hdr + 1);
                 for (i = 0; i < temp_kext_mach_hdr->ncmds; i++) {
                     if (lcp->cmd == LC_SEGMENT_KERNEL) {
-                        kernel_segment_command_t *  segp;
-                        kernel_section_t *          secp;
+                        kernel_segment_command_t *  scp;
                         
-                        segp = (kernel_segment_command_t *) lcp;
+                        scp = (kernel_segment_command_t *) lcp;
                         // 10543468 - if we jettisoned __LINKEDIT clear size info
                         if (flags.jettisonLinkeditSeg) {
-                            if (strncmp(segp->segname, SEG_LINKEDIT, sizeof(segp->segname)) == 0) {
-                                segp->vmsize = 0;
-                                segp->fileoff = 0;
-                                segp->filesize = 0;
+                            if (strncmp(scp->segname, SEG_LINKEDIT, sizeof(scp->segname)) == 0) {
+                                scp->vmsize = 0;
+                                scp->fileoff = 0;
+                                scp->filesize = 0;
                             }
                         }
 #if 0
@@ -7839,15 +7838,11 @@ OSKext::copyInfo(OSArray * infoKeys)
                                   kOSKextLogErrorLevel |
                                   kOSKextLogGeneralFlag,
                                   "%s: LC_SEGMENT_KERNEL segname '%s' vmaddr 0x%llX 0x%lX vmsize %llu nsects %u",
-                                  __FUNCTION__, segp->segname, segp->vmaddr,
-                                  VM_KERNEL_UNSLIDE(segp->vmaddr),
-                                  segp->vmsize, segp->nsects);
+                                  __FUNCTION__, scp->segname, scp->vmaddr, 
+                                  VM_KERNEL_UNSLIDE(scp->vmaddr), 
+                                  scp->vmsize, scp->nsects);
 #endif
-                        segp->vmaddr = VM_KERNEL_UNSLIDE(segp->vmaddr);
-
-                        for (secp = firstsect(segp); secp != NULL; secp = nextsect(segp, secp)) {
-                            secp->addr = VM_KERNEL_UNSLIDE(secp->addr);
-                        }
+                        scp->vmaddr = VM_KERNEL_UNSLIDE(scp->vmaddr);
                     }
                     lcp = (struct load_command *)((caddr_t)lcp + lcp->cmdsize);
                 }

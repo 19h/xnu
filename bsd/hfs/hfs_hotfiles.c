@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -207,8 +207,8 @@ hfs_recording_start(struct hfsmount *hfsmp)
 		    (SWAP_BE32 (hotfileinfo.timeleft) > 0) &&
 		    (SWAP_BE32 (hotfileinfo.timebase) > 0)) {
 			hfsmp->hfc_maxfiles = SWAP_BE32 (hotfileinfo.maxfilecnt);
-			hfsmp->hfc_timebase = SWAP_BE32 (hotfileinfo.timebase);
 			hfsmp->hfc_timeout = SWAP_BE32 (hotfileinfo.timeleft) + tv.tv_sec ;
+			hfsmp->hfc_timebase = SWAP_BE32 (hotfileinfo.timebase);
 			/* Fix up any bogus timebase values. */
 			if (hfsmp->hfc_timebase < HFC_MIN_BASE_TIME) {
 				hfsmp->hfc_timebase = hfsmp->hfc_timeout - HFC_DEFAULT_DURATION;
@@ -792,8 +792,7 @@ hfs_addhotfile_internal(struct vnode *vp)
 	if (hfsmp->hfc_stage != HFC_RECORDING)
 		return (0);
 
-	/* Only regular files are allowed for hotfile inclusion ; symlinks disallowed */
-	if ((!vnode_isreg(vp)) || vnode_issystem(vp)) {
+	if ((!vnode_isreg(vp) && !vnode_islnk(vp)) || vnode_issystem(vp)) {
 		return (0);
 	}
 	/* Skip resource forks for now. */
@@ -863,8 +862,7 @@ hfs_removehotfile(struct vnode *vp)
 	if (hfsmp->hfc_stage != HFC_RECORDING)
 		return (0);
 
-	/* Only regular files can move out of hotfiles */
-	if ((!vnode_isreg(vp)) || vnode_issystem(vp)) {
+	if ((!vnode_isreg(vp) && !vnode_islnk(vp)) || vnode_issystem(vp)) {
 		return (0);
 	}
 
@@ -906,7 +904,7 @@ out:
 static int
 hotfiles_collect_callback(struct vnode *vp, __unused void *cargs)
 {
-        if ((vnode_isreg(vp)) && !vnode_issystem(vp))
+        if ((vnode_isreg(vp) || vnode_islnk(vp)) && !vnode_issystem(vp))
 	        (void) hfs_addhotfile_internal(vp);
 
 	return (VNODE_RETURNED);
@@ -1140,9 +1138,7 @@ hotfiles_adopt(struct hfsmount *hfsmp)
 			}
 			break;
 		}
-
-		/* only regular files are eligible */
-		if (!vnode_isreg(vp)) { 
+		if (!vnode_isreg(vp) && !vnode_islnk(vp)) {
 			printf("hfs: hotfiles_adopt: huh, not a file %d (%d)\n", listp->hfl_hotfile[i].hf_fileid, VTOC(vp)->c_cnid);
 			hfs_unlock(VTOC(vp));
 			vnode_put(vp);
@@ -1365,9 +1361,7 @@ hotfiles_evict(struct hfsmount *hfsmp, vfs_context_t ctx)
 			}
 			break;
 		}
-
-		/* only regular files are eligible */
-		if (!vnode_isreg(vp)) {
+		if (!vnode_isreg(vp) && !vnode_islnk(vp)) {
 			printf("hfs: hotfiles_evict: huh, not a file %d\n", key->fileID);
 			hfs_unlock(VTOC(vp));
 			vnode_put(vp);

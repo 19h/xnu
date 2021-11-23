@@ -174,8 +174,7 @@ enum
     kAutoWakePostWindow = 15
 };
 
-#define kLocalEvalClamshellCommand  (1 << 15)
-#define kIdleSleepRetryInterval     (3 * 60)
+#define kLocalEvalClamshellCommand        (1 << 15)
 
 enum {
     OFF_STATE           = 0,
@@ -268,9 +267,7 @@ enum {
     kDarkWakeFlagIgnoreDiskIOInDark  = 0x04, // ignore disk idle in DW
     kDarkWakeFlagIgnoreDiskIOAlways  = 0x08, // always ignore disk idle
     kDarkWakeFlagIgnoreDiskIOMask    = 0x0C,
-    kDarkWakeFlagAlarmIsDark         = 0x0100,
-    kDarkWakeFlagGraphicsPowerState1 = 0x0200,
-    kDarkWakeFlagAudioNotSuppressed  = 0x0400
+    kDarkWakeFlagAlarmIsDark         = 0x0100
 };
 
 static IOPMrootDomain * gRootDomain;
@@ -282,12 +279,6 @@ static UInt32           gSleepWakeUUIDIsSet = false;
 static uint32_t         gAggressivesState = 0;
 static uint32_t         gDarkWakeFlags = kDarkWakeFlagHIDTickleNone | kDarkWakeFlagIgnoreDiskIOAlways;
 static PMStatsStruct    gPMStats;
-
-#if HIBERNATION
-static IOPMSystemSleepPolicyHandler     gSleepPolicyHandler = 0;
-static IOPMSystemSleepPolicyVariables * gSleepPolicyVars = 0;
-static void *                           gSleepPolicyTarget;
-#endif
 
 struct timeval gIOLastSleepTime;
 struct timeval gIOLastWakeTime;
@@ -814,7 +805,6 @@ static SYSCTL_PROC(_kern, OID_AUTO, progressmeter,
 
 static SYSCTL_INT(_debug, OID_AUTO, darkwake, CTLFLAG_RW, &gDarkWakeFlags, 0, "");
 
-static const OSSymbol * gIOPMSettingAutoWakeCalendarKey;
 static const OSSymbol * gIOPMSettingAutoWakeSecondsKey;
 static const OSSymbol * gIOPMSettingDebugWakeRelativeKey;
 static const OSSymbol * gIOPMSettingMaintenanceWakeCalendarKey;
@@ -837,7 +827,6 @@ bool IOPMrootDomain::start( IOService * nub )
     super::start(nub);
 
     gRootDomain = this;
-    gIOPMSettingAutoWakeCalendarKey = OSSymbol::withCString(kIOPMSettingAutoWakeCalendarKey);
     gIOPMSettingAutoWakeSecondsKey = OSSymbol::withCString(kIOPMSettingAutoWakeSecondsKey);
     gIOPMSettingDebugWakeRelativeKey = OSSymbol::withCString(kIOPMSettingDebugWakeRelativeKey);
     gIOPMSettingMaintenanceWakeCalendarKey = OSSymbol::withCString(kIOPMSettingMaintenanceWakeCalendarKey);
@@ -856,7 +845,7 @@ bool IOPMrootDomain::start( IOService * nub )
             OSSymbol::withCString(kIOPMSettingSleepOnPowerButtonKey),
             gIOPMSettingAutoWakeSecondsKey,
             OSSymbol::withCString(kIOPMSettingAutoPowerSecondsKey),
-            gIOPMSettingAutoWakeCalendarKey,
+            OSSymbol::withCString(kIOPMSettingAutoWakeCalendarKey),
             OSSymbol::withCString(kIOPMSettingAutoPowerCalendarKey),
             gIOPMSettingDebugWakeRelativeKey,
             OSSymbol::withCString(kIOPMSettingDebugPowerRelativeKey),
@@ -908,7 +897,6 @@ bool IOPMrootDomain::start( IOService * nub )
     clamshellExists    = false;
     clamshellDisabled  = true;
     acAdaptorConnected = true;
-    clamshellSleepDisabled = false;
 
     // Set the default system capabilities at boot.
     _currentCapability = kIOPMSystemCapabilityCPU      |
@@ -1021,7 +1009,7 @@ bool IOPMrootDomain::start( IOService * nub )
         publishFeature("DisplayDims");
     }
     if(psIterator) {
-        psIterator->release();
+        psIterator->release();        
     }
     
     
@@ -1180,9 +1168,9 @@ IOReturn IOPMrootDomain::setProperties( OSObject * props_obj )
     OSBoolean       *b;
     OSNumber        *n;
     OSDictionary    *d;
-    const OSSymbol  *key;
+    OSSymbol        *type;
     OSObject        *obj;
-    OSCollectionIterator * iter = 0;
+    unsigned int    i;
 
     const OSSymbol *publish_simulated_battery_string    = OSSymbol::withCString("SoftwareSimulatedBatteries");
     const OSSymbol *boot_complete_string                = OSSymbol::withCString("System Boot Complete");
@@ -1197,8 +1185,6 @@ IOReturn IOPMrootDomain::setProperties( OSObject * props_obj )
 #if	HIBERNATION
     const OSSymbol *hibernatemode_string                = OSSymbol::withCString(kIOHibernateModeKey);
     const OSSymbol *hibernatefile_string                = OSSymbol::withCString(kIOHibernateFileKey);
-    const OSSymbol *hibernatefilemin_string            = OSSymbol::withCString(kIOHibernateFileMinSizeKey);
-    const OSSymbol *hibernatefilemax_string            = OSSymbol::withCString(kIOHibernateFileMaxSizeKey);
     const OSSymbol *hibernatefreeratio_string           = OSSymbol::withCString(kIOHibernateFreeRatioKey);
     const OSSymbol *hibernatefreetime_string            = OSSymbol::withCString(kIOHibernateFreeTimeKey);
 #endif
@@ -1206,189 +1192,163 @@ IOReturn IOPMrootDomain::setProperties( OSObject * props_obj )
     const OSSymbol *suspendPMClient_string              = OSSymbol::withCString(kPMSuspendedNotificationClients);
 #endif
     
-    if (!dict)
+    if (!dict) 
     {
         return_value = kIOReturnBadArgument;
         goto exit;
     }
-
-    iter = OSCollectionIterator::withCollection(dict);
-    if (!iter)
+    
+    if ((b = OSDynamicCast(OSBoolean, dict->getObject(publish_simulated_battery_string))))
     {
-        return_value = kIOReturnNoMemory;
-        goto exit;
+        publishResource(publish_simulated_battery_string, kOSBooleanTrue);
     }
 
-    while ((key = (const OSSymbol *) iter->getNextObject()) &&
-           (obj = dict->getObject(key)))
+    if ((n = OSDynamicCast(OSNumber, dict->getObject(idle_seconds_string))))
     {
-        if (key->isEqualTo(publish_simulated_battery_string))
+        setProperty(idle_seconds_string, n);
+        idleSeconds = n->unsigned32BitValue();
+    }
+
+    if (boot_complete_string && dict->getObject(boot_complete_string)) 
+    {
+        pmPowerStateQueue->submitPowerEvent( kPowerEventSystemBootCompleted );
+    }
+    
+    if( battery_warning_disabled_string && dict->getObject(battery_warning_disabled_string))
+    {
+        setProperty( battery_warning_disabled_string, dict->getObject(battery_warning_disabled_string));
+    }
+    
+    if (pmTimelineLogging_string && (d = OSDynamicCast(OSDictionary, dict->getObject(pmTimelineLogging_string))))
+    {
+        if (timeline && timeline->setProperties(d)) 
         {
-            if (OSDynamicCast(OSBoolean, obj))
-                publishResource(key, kOSBooleanTrue);
-        }
-        else if (key->isEqualTo(idle_seconds_string))
-        {
-            if ((n = OSDynamicCast(OSNumber, obj)))
-            {
-                setProperty(key, n);
-                idleSeconds = n->unsigned32BitValue();
+            OSDictionary *tlInfo = timeline->copyInfoDictionary();            
+            if (tlInfo) {
+                setProperty(kIOPMTimelineDictionaryKey, tlInfo);
+                tlInfo->release();
             }
         }
-        else if (key->isEqualTo(boot_complete_string))
-        {
-            pmPowerStateQueue->submitPowerEvent(kPowerEventSystemBootCompleted);
-        }
-        else if (key->isEqualTo(sys_shutdown_string))
-        {
-            if ((b = OSDynamicCast(OSBoolean, obj)))
-                pmPowerStateQueue->submitPowerEvent(kPowerEventSystemShutdown, (void *) b);
-        }
-        else if (key->isEqualTo(battery_warning_disabled_string))
-        {
-            setProperty(key, obj);
-        }
-        else if (key->isEqualTo(pmTimelineLogging_string))
-        {
-            if ((d = OSDynamicCast(OSDictionary, obj)) &&
-                timeline && timeline->setProperties(d))
-            {
-                OSDictionary *tlInfo = timeline->copyInfoDictionary();            
-                if (tlInfo) {
-                    setProperty(kIOPMTimelineDictionaryKey, tlInfo);
-                    tlInfo->release();
-                }
-            }
-        }
+    }
+
+    if( sys_shutdown_string && (b = OSDynamicCast(OSBoolean, dict->getObject(sys_shutdown_string)))) 
+    {
+        pmPowerStateQueue->submitPowerEvent(kPowerEventSystemShutdown, (void *) b);
+    }
+    
+    if( stall_halt_string && (b = OSDynamicCast(OSBoolean, dict->getObject(stall_halt_string))) ) 
+    {
+        setProperty(stall_halt_string, b);
+    }
+
 #if	HIBERNATION
-        else if (key->isEqualTo(hibernatemode_string) ||
-                 key->isEqualTo(hibernatefilemin_string) ||
-                 key->isEqualTo(hibernatefilemax_string) ||
-                 key->isEqualTo(hibernatefreeratio_string) ||
-                 key->isEqualTo(hibernatefreetime_string))
-        {
-            if ((n = OSDynamicCast(OSNumber, obj)))
-                setProperty(key, n);
-        }
-        else if (key->isEqualTo(hibernatefile_string))
-        {
-            OSString * str = OSDynamicCast(OSString, obj);
-            if (str) setProperty(key, str);
-        }
-#endif    
-        else if (key->isEqualTo(sleepdisabled_string))
-        {
-            if ((b = OSDynamicCast(OSBoolean, obj)))
-            {
-                setProperty(key, b);
-                pmPowerStateQueue->submitPowerEvent(kPowerEventUserDisabledSleep, (void *) b);
-            }
-        }
-        else if (key->isEqualTo(ondeck_sleepwake_uuid_string))
-        {
+    if ( hibernatemode_string
+        && (n = OSDynamicCast(OSNumber, dict->getObject(hibernatemode_string))))
+    {
+    	setProperty(hibernatemode_string, n);
+    }
+    if ( hibernatefreeratio_string
+        && (n = OSDynamicCast(OSNumber, dict->getObject(hibernatefreeratio_string))))
+    {
+        setProperty(hibernatefreeratio_string, n);
+    }
+    if ( hibernatefreetime_string
+        && (n = OSDynamicCast(OSNumber, dict->getObject(hibernatefreetime_string))))
+    {
+        setProperty(hibernatefreetime_string, n);
+    }    
+    OSString *str;
+    if ( hibernatefile_string
+        && (str = OSDynamicCast(OSString, dict->getObject(hibernatefile_string))))
+    {
+        setProperty(hibernatefile_string, str);
+    }
+#endif
+    
+    if( sleepdisabled_string
+        && (b = OSDynamicCast(OSBoolean, dict->getObject(sleepdisabled_string))) )
+    {
+        setProperty(sleepdisabled_string, b);
+        pmPowerStateQueue->submitPowerEvent(kPowerEventUserDisabledSleep, (void *) b);
+    }
+    if (ondeck_sleepwake_uuid_string
+        && (obj = dict->getObject(ondeck_sleepwake_uuid_string)))
+    {
+        if(pmPowerStateQueue) {
             obj->retain();
             pmPowerStateQueue->submitPowerEvent(kPowerEventQueueSleepWakeUUID, (void *)obj);
         }
-        else if (key->isEqualTo(loginwindow_tracepoint_string))
-        {
-            if (pmTracer && (n = OSDynamicCast(OSNumber, obj)))
-                pmTracer->traceLoginWindowPhase(n->unsigned8BitValue());
-        }
-        else if (key->isEqualTo(kIOPMDeepSleepEnabledKey)       ||
-                 key->isEqualTo(kIOPMDestroyFVKeyOnStandbyKey)  ||
-                 key->isEqualTo(kIOPMAutoPowerOffEnabledKey)    ||
-                 key->isEqualTo(stall_halt_string))
-        {
-            if ((b = OSDynamicCast(OSBoolean, obj)))
-                setProperty(key, b);
-        }
-        else if (key->isEqualTo(kIOPMDeepSleepDelayKey) ||
-                 key->isEqualTo(kIOPMAutoPowerOffDelayKey) ||
-                 key->isEqualTo(kIOPMAutoPowerOffTimerKey))
-        {
-            if ((n = OSDynamicCast(OSNumber, obj)))
-                setProperty(key, n);
-        }
-        else if (key->isEqualTo(kIOPMUserWakeAlarmScheduledKey))
-        {
-            if (kOSBooleanTrue == obj)
-                OSBitOrAtomic(kIOPMAlarmBitCalendarWake, &_userScheduledAlarm);
-            else
-                OSBitAndAtomic(~kIOPMAlarmBitCalendarWake, &_userScheduledAlarm);
-            DLOG("_userScheduledAlarm = 0x%x\n", (uint32_t) _userScheduledAlarm);
-        }
+
+    }
+    
+    if (loginwindow_tracepoint_string
+        && (n = OSDynamicCast(OSNumber, dict->getObject(loginwindow_tracepoint_string)))
+        && pmTracer)
+    {
+        pmTracer->traceLoginWindowPhase( n->unsigned8BitValue() );
+    }
+
+    if ((b = OSDynamicCast(OSBoolean, dict->getObject(kIOPMDeepSleepEnabledKey))))
+    {
+        setProperty(kIOPMDeepSleepEnabledKey, b);
+    }
+    if ((n = OSDynamicCast(OSNumber, dict->getObject(kIOPMDeepSleepDelayKey))))
+    {
+        setProperty(kIOPMDeepSleepDelayKey, n);
+    }
+
 #if SUSPEND_PM_NOTIFICATIONS_DEBUG
-        else if (key->isEqualTo(suspendPMClient_string))
+    if ((n = OSDynamicCast(OSNumber, dict->getObject(suspendPMClient_string))))
+    {
+        // Toggle the suspended status for pid n.
+        uint32_t pid_int = n->unsigned32BitValue();        
+        suspendPMNotificationsForPID(pid_int, !pmNotificationIsSuspended(pid_int));
+    }
+#endif
+    
+    if ((b = OSDynamicCast(OSBoolean, dict->getObject(kIOPMDestroyFVKeyOnStandbyKey))))
+    {
+        setProperty(kIOPMDestroyFVKeyOnStandbyKey, b);
+    }
+
+    // Relay our allowed PM settings onto our registered PM clients
+    for(i = 0; i < allowedPMSettings->getCount(); i++) {
+
+        type = (OSSymbol *)allowedPMSettings->getObject(i);
+        if(!type) continue;
+
+        obj = dict->getObject(type);
+        if(!obj) continue;
+
+        if ((gIOPMSettingAutoWakeSecondsKey == type) && ((n = OSDynamicCast(OSNumber, obj))))
+        {
+            UInt32 rsecs = n->unsigned32BitValue();
+            if (!rsecs)
+            autoWakeStart = autoWakeEnd = 0;
+            else
+            {
+            AbsoluteTime deadline;
+            clock_interval_to_deadline(rsecs + kAutoWakePostWindow, kSecondScale, &deadline);
+            autoWakeEnd = AbsoluteTime_to_scalar(&deadline);
+            if (rsecs > kAutoWakePreWindow)
+                rsecs -= kAutoWakePreWindow;
+            else
+                rsecs = 0;
+            clock_interval_to_deadline(rsecs, kSecondScale, &deadline);
+            autoWakeStart = AbsoluteTime_to_scalar(&deadline);
+            }
+        }
+        if (gIOPMSettingDebugWakeRelativeKey == type)
         {
             if ((n = OSDynamicCast(OSNumber, obj)))
-            {
-                // Toggle the suspended status for pid n.
-                uint32_t pid_int = n->unsigned32BitValue();        
-                suspendPMNotificationsForPID(pid_int, !pmNotificationIsSuspended(pid_int));
-            }
+                _debugWakeSeconds = n->unsigned32BitValue();
+            else
+                _debugWakeSeconds = 0;
         }
-#endif
-        // Relay our allowed PM settings onto our registered PM clients
-        else if ((allowedPMSettings->getNextIndexOfObject(key, 0) != (unsigned int) -1))
-        {
-            if ((gIOPMSettingAutoWakeSecondsKey == key) && ((n = OSDynamicCast(OSNumber, obj))))
-            {
-                UInt32 rsecs = n->unsigned32BitValue();
-                if (!rsecs)
-                autoWakeStart = autoWakeEnd = 0;
-                else
-                {
-                AbsoluteTime deadline;
-                clock_interval_to_deadline(rsecs + kAutoWakePostWindow, kSecondScale, &deadline);
-                autoWakeEnd = AbsoluteTime_to_scalar(&deadline);
-                if (rsecs > kAutoWakePreWindow)
-                    rsecs -= kAutoWakePreWindow;
-                else
-                    rsecs = 0;
-                clock_interval_to_deadline(rsecs, kSecondScale, &deadline);
-                autoWakeStart = AbsoluteTime_to_scalar(&deadline);
-                }
-            }
-
-            return_value = setPMSetting(key, obj);            
-            if (kIOReturnSuccess != return_value)
-                break;
-
-            if (gIOPMSettingDebugWakeRelativeKey == key)
-            {
-                if ((n = OSDynamicCast(OSNumber, obj)) &&
-                    (_debugWakeSeconds = n->unsigned32BitValue()))
-                {
-                    OSBitOrAtomic(kIOPMAlarmBitDebugWake, &_scheduledAlarms);
-                }
-                else
-                {
-                    _debugWakeSeconds = 0;
-                    OSBitAndAtomic(~kIOPMAlarmBitDebugWake, &_scheduledAlarms);
-                }
-                DLOG("_scheduledAlarms = 0x%x\n", (uint32_t) _scheduledAlarms);
-            }
-            else if (gIOPMSettingAutoWakeCalendarKey == key)
-            {
-                OSData * data;
-                if ((data = OSDynamicCast(OSData, obj)) &&
-                    (data->getLength() == sizeof(IOPMCalendarStruct)))
-                {
-                    const IOPMCalendarStruct * cs = 
-                        (const IOPMCalendarStruct *) data->getBytesNoCopy();
-
-                    if (cs->year)
-                        OSBitOrAtomic(kIOPMAlarmBitCalendarWake, &_scheduledAlarms);
-                    else
-                        OSBitAndAtomic(~kIOPMAlarmBitCalendarWake, &_scheduledAlarms);
-                    DLOG("_scheduledAlarms = 0x%x\n", (uint32_t) _scheduledAlarms);
-                }
-            }
-        }
-        else
-        {
-            DLOG("setProperties(%s) not handled\n", key->getCStringNoCopy());
-        }
+        
+        return_value = setPMSetting(type, obj);
+        
+        if(kIOReturnSuccess != return_value) goto exit;
     }
 
 exit:
@@ -1411,7 +1371,6 @@ exit:
 #if SUSPEND_PM_NOTIFICATIONS_DEBUG
     if(suspendPMClient_string) suspendPMClient_string->release();
 #endif
-    if (iter) iter->release();
     return return_value;
 }
 
@@ -2212,7 +2171,6 @@ void IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
             // Code will resume execution here upon wake.
 
             clock_get_uptime(&systemWakeTime);
-            _highestCapability = 0;
 
 #if	HIBERNATION
             IOHibernateSystemWake();
@@ -2229,13 +2187,12 @@ void IOPMrootDomain::powerChangeDone( unsigned long previousPowerState )
 #endif
 
             // log system wake
-            PMDebug(kPMLogSystemWake, 0, 0);
+            getPlatform()->PMLog(kIOPMrootDomainClass, kPMLogSystemWake, 0, 0);
             lowBatteryCondition = false;
             lastSleepReason = 0;
             
             _lastDebugWakeSeconds = _debugWakeSeconds;
             _debugWakeSeconds = 0;
-            _scheduledAlarms = 0;
 
             // And start logging the wake event here
             // TODO: Publish the wakeReason string as an integer
@@ -2535,6 +2492,12 @@ bool IOPMrootDomain::tellChangeDown( unsigned long stateNum )
 
         IOService::updateConsoleUsers(NULL, kIOMessageSystemWillSleep);
 
+        // Notify platform that sleep has begun
+        getPlatform()->callPlatformFunction(
+                        sleepMessagePEFunction, false,
+                        (void *)(uintptr_t) kIOMessageSystemWillSleep,
+                        NULL, NULL, NULL);
+
         // Two change downs are sent by IOServicePM. Ignore the 2nd.
         // But tellClientsWithResponse() must be called for both.
         ignoreTellChangeDown = true;
@@ -2614,24 +2577,11 @@ void IOPMrootDomain::tellNoChangeDown( unsigned long stateNum )
 	// Sleep canceled, clear the sleep trace point.
     tracePoint(kIOPMTracePointSystemUp);
 
-    if (!wrangler)
+    if (idleSeconds && !wrangler)
     {
-        if (idleSeconds)
-        {
-            // stay awake for at least idleSeconds
-            startIdleSleepTimer(idleSeconds);
-        }
+        // stay awake for at least idleSeconds
+        startIdleSleepTimer(idleSeconds);
     }
-    else if (sleepSlider && wranglerAsleep)
-    {
-        // Display wrangler is already asleep, it won't trigger the next
-        // idle sleep attempt. Schedule a future idle sleep attempt, and
-        // also push out the next idle sleep attempt.
-
-        startIdleSleepTimer( kIdleSleepRetryInterval );
-    }
-    
-    IOService::setAdvisoryTickleEnable( true );
     return tellClients( kIOMessageSystemWillNotSleep );
 }
 
@@ -2672,7 +2622,6 @@ void IOPMrootDomain::tellChangeUp( unsigned long stateNum )
                 // stay awake for at least idleSeconds
                 startIdleSleepTimer(idleSeconds);
             }
-            IOService::setAdvisoryTickleEnable( true );
             tellClients( kIOMessageSystemWillPowerOn );
         }
 
@@ -2739,13 +2688,6 @@ IOReturn IOPMrootDomain::sysPowerDownHandler(
             }
             DLOG("sysPowerDownHandler timeout %d s\n", (int) (params->maxWaitForReply / 1000 / 1000));
 #endif
-
-            // Notify platform that sleep has begun, after the early
-            // sleep policy evaluation.
-            getPlatform()->callPlatformFunction(
-                            sleepMessagePEFunction, false,
-                            (void *)(uintptr_t) kIOMessageSystemWillSleep,
-                            NULL, NULL, NULL);
 
             if ( !OSCompareAndSwap( 0, 1, &gSleepOrShutdownPending ) )
             {
@@ -2967,10 +2909,10 @@ bool IOPMrootDomain::shouldSleepOnClamshellClosed( void )
     if (!clamshellExists)
         return false;
 
-    DLOG("clamshell closed %d, disabled %d, desktopMode %d, ac %d sleepDisabled %d\n",
-        clamshellClosed, clamshellDisabled, desktopMode, acAdaptorConnected, clamshellSleepDisabled);
+    DLOG("clamshell closed %d, disabled %d, desktopMode %d, ac %d\n",
+        clamshellClosed, clamshellDisabled, desktopMode, acAdaptorConnected);
 
-    return ( !clamshellDisabled && !(desktopMode && acAdaptorConnected) && !clamshellSleepDisabled );
+    return ( !clamshellDisabled && !(desktopMode && acAdaptorConnected) );
 }
 
 void IOPMrootDomain::sendClientClamshellNotification( void )
@@ -3014,35 +2956,6 @@ void IOPMrootDomain::setSleepSupported( IOOptionBits flags )
 {
     DLOG("setSleepSupported(%x)\n", (uint32_t) flags);
     OSBitOrAtomic(flags, &platformSleepSupport);
-}
-
-//******************************************************************************
-// setDisableClamShellSleep
-//
-//******************************************************************************
-
-void IOPMrootDomain::setDisableClamShellSleep( bool val )
-{
-    if (gIOPMWorkLoop->inGate() == false) {
-
-       gIOPMWorkLoop->runAction(
-               OSMemberFunctionCast(IOWorkLoop::Action, this, &IOPMrootDomain::setDisableClamShellSleep),
-               (OSObject *)this,
-               (void *)val);
-
-       return;
-    }
-    else {
-       DLOG("setDisableClamShellSleep(%x)\n", (uint32_t) val);
-       if ( clamshellSleepDisabled != val )
-       {
-           clamshellSleepDisabled = val;
-           // If clamshellSleepDisabled is reset to 0, reevaluate if
-           // system need to go to sleep due to clamshell state
-           if ( !clamshellSleepDisabled && clamshellClosed)
-              handlePowerNotification(kLocalEvalClamshellCommand);
-       }
-    }
 }
 
 //******************************************************************************
@@ -3660,125 +3573,85 @@ void IOPMrootDomain::informCPUStateChange(
 // evaluateSystemSleepPolicy
 //******************************************************************************
 
-#define kIOPlatformSystemSleepPolicyKey     "IOPlatformSystemSleepPolicy"
-
-// Sleep flags
-enum {
-    kIOPMSleepFlagHibernate         = 0x00000001,
-    kIOPMSleepFlagSleepTimerEnable  = 0x00000002
-};
-
 struct IOPMSystemSleepPolicyEntry
 {
     uint32_t    factorMask;
     uint32_t    factorBits;
     uint32_t    sleepFlags;
     uint32_t    wakeEvents;
-} __attribute__((packed));
+};
 
 struct IOPMSystemSleepPolicyTable
 {
-    uint32_t    signature;
+    uint8_t     signature[4];
     uint16_t    version;
     uint16_t    entryCount;
     IOPMSystemSleepPolicyEntry  entries[];
-} __attribute__((packed));
-
-enum {
-    kIOPMSleepAttributeHibernateSetup   = 0x00000001,
-    kIOPMSleepAttributeHibernateSleep   = 0x00000002
 };
 
-static uint32_t
-getSleepTypeAttributes( uint32_t sleepType )
-{
-    static const uint32_t sleepTypeAttributes[ kIOPMSleepTypeLast ] =
-    {
-    /* invalid   */ 0,
-    /* abort     */ 0,
-    /* normal    */ 0,
-    /* safesleep */ kIOPMSleepAttributeHibernateSetup,
-    /* hibernate */ kIOPMSleepAttributeHibernateSetup | kIOPMSleepAttributeHibernateSleep,
-    /* standby   */ kIOPMSleepAttributeHibernateSetup | kIOPMSleepAttributeHibernateSleep,
-    /* poweroff  */ kIOPMSleepAttributeHibernateSetup | kIOPMSleepAttributeHibernateSleep,
-    /* deepidle  */ 0
-    };
+enum {
+    kIOPMSleepFactorSleepTimerWake          = 0x00000001,
+    kIOPMSleepFactorLidOpen                 = 0x00000002,
+    kIOPMSleepFactorACPower                 = 0x00000004,
+    kIOPMSleepFactorLowBattery              = 0x00000008,
+    kIOPMSleepFactorDeepSleepNoDelay        = 0x00000010,
+    kIOPMSleepFactorDeepSleepDemand         = 0x00000020,
+    kIOPMSleepFactorDeepSleepDisable        = 0x00000040,
+    kIOPMSleepFactorUSBExternalDevice       = 0x00000080,
+    kIOPMSleepFactorBluetoothHIDDevice      = 0x00000100,
+    kIOPMSleepFactorExternalMediaMounted    = 0x00000200,
+    kIOPMSleepFactorDriverAssertBit5        = 0x00000400,   /* Reserved for ThunderBolt */
+    kIOPMSleepFactorDriverAssertBit6        = 0x00000800,
+    kIOPMSleepFactorDriverAssertBit7        = 0x00001000    /* Reserved for legacy I/O */
+};
 
-    if (sleepType >= kIOPMSleepTypeLast)
-        return 0;
+enum {
+    kSleepPhaseEarly, kSleepPhaseFinal
+};
 
-    return sleepTypeAttributes[sleepType];
-}
-
-bool IOPMrootDomain::evaluateSystemSleepPolicy(
-    IOPMSystemSleepParameters * params, int sleepPhase, uint32_t * hibMode )
+bool IOPMrootDomain::evaluateSystemSleepPolicy( IOPMSystemSleepParameters * p, int sleepPhase )
 {
     const IOPMSystemSleepPolicyTable * pt;
     OSObject *  prop = 0;
     OSData *    policyData;
-    uint64_t    currentFactors = 0;
-    uint32_t    standbyDelay   = 0;
-    uint32_t    powerOffDelay  = 0;
-    uint32_t    powerOffTimer  = 0;
-    uint32_t    mismatch;
-    bool        standbyEnabled;
-    bool        powerOffEnabled;
-    bool        found = false;
+    uint32_t    currentFactors;
+    uint32_t    deepSleepDelay = 0;
+    bool        success = false;
 
-    // Get platform's sleep policy table
-    if (!gSleepPolicyHandler)
+    if (getProperty(kIOPMDeepSleepEnabledKey) != kOSBooleanTrue)
+        return false;
+
+    getSleepOption(kIOPMDeepSleepDelayKey, &deepSleepDelay);
+
+    prop = getServiceRoot()->copyProperty(kIOPlatformSystemSleepPolicyKey);
+    if (!prop)
+        return false;
+
+    policyData = OSDynamicCast(OSData, prop);
+    if (!policyData ||
+        (policyData->getLength() < sizeof(IOPMSystemSleepPolicyTable)))
     {
-        prop = getServiceRoot()->copyProperty(kIOPlatformSystemSleepPolicyKey);
-        if (!prop) goto done;
+        goto done;
     }
 
-    // Fetch additional settings
-    standbyEnabled = (getSleepOption(kIOPMDeepSleepDelayKey, &standbyDelay)
-        && (getProperty(kIOPMDeepSleepEnabledKey) == kOSBooleanTrue));
-    powerOffEnabled = (getSleepOption(kIOPMAutoPowerOffDelayKey, &powerOffDelay)
-        && (getProperty(kIOPMAutoPowerOffEnabledKey) == kOSBooleanTrue));
-    if (!getSleepOption(kIOPMAutoPowerOffTimerKey, &powerOffTimer))
-        powerOffTimer = powerOffDelay;
-
-    DLOG("phase %d, standby %d delay %u, poweroff %d delay %u timer %u, hibernate 0x%x\n",
-        sleepPhase, standbyEnabled, standbyDelay,
-        powerOffEnabled, powerOffDelay, powerOffTimer, *hibMode);
-
-    // pmset level overrides
-    if ((*hibMode & kIOHibernateModeOn) == 0)
+    pt = (const IOPMSystemSleepPolicyTable *) policyData->getBytesNoCopy();
+    if ((pt->signature[0] != 'S') ||
+        (pt->signature[1] != 'L') ||
+        (pt->signature[2] != 'P') ||
+        (pt->signature[3] != 'T') ||
+        (pt->version      != 1)   ||
+        (pt->entryCount   == 0))
     {
-        if (!gSleepPolicyHandler)
-        {
-            standbyEnabled  = false;
-            powerOffEnabled = false;
-        }
-    }
-    else if (!(*hibMode & kIOHibernateModeSleep))
-    {
-        // Force hibernate (i.e. mode 25)
-        // If standby is enabled, force standy.
-        // If poweroff is enabled, force poweroff.
-        if (standbyEnabled)
-            currentFactors |= kIOPMSleepFactorStandbyForced;
-        else if (powerOffEnabled)
-            currentFactors |= kIOPMSleepFactorAutoPowerOffForced;
-        else
-            currentFactors |= kIOPMSleepFactorHibernateForced;
+        goto done;
     }
 
-    // Current factors based on environment and assertions
-    if (sleepTimerMaintenance)
-        currentFactors |= kIOPMSleepFactorSleepTimerWake;
-    if (!clamshellClosed)
-        currentFactors |= kIOPMSleepFactorLidOpen;
-    if (acAdaptorConnected)
-        currentFactors |= kIOPMSleepFactorACPower;
-    if (lowBatteryCondition)
-        currentFactors |= kIOPMSleepFactorBatteryLow;
-    if (!standbyDelay)
-        currentFactors |= kIOPMSleepFactorStandbyNoDelay;
-    if (!standbyEnabled)
-        currentFactors |= kIOPMSleepFactorStandbyDisabled;
+    if ((policyData->getLength() - sizeof(IOPMSystemSleepPolicyTable)) !=
+        (sizeof(IOPMSystemSleepPolicyEntry) * pt->entryCount))
+    {
+        goto done;
+    }
+
+    currentFactors = 0;
     if (getPMAssertionLevel(kIOPMDriverAssertionUSBExternalDeviceBit) !=
         kIOPMDriverAssertionLevelOff)
         currentFactors |= kIOPMSleepFactorUSBExternalDevice;
@@ -3788,163 +3661,88 @@ bool IOPMrootDomain::evaluateSystemSleepPolicy(
     if (getPMAssertionLevel(kIOPMDriverAssertionExternalMediaMountedBit) !=
         kIOPMDriverAssertionLevelOff)
         currentFactors |= kIOPMSleepFactorExternalMediaMounted;
-    if (getPMAssertionLevel(kIOPMDriverAssertionReservedBit5) !=
+    if (getPMAssertionLevel(kIOPMDriverAssertionReservedBit5) !=    /* AssertionBit5 = Thunderbolt */
         kIOPMDriverAssertionLevelOff)
-        currentFactors |= kIOPMSleepFactorThunderboltDevice;
-    if (_scheduledAlarms != 0)
-        currentFactors |= kIOPMSleepFactorRTCAlarmScheduled;
-    if (getPMAssertionLevel(kIOPMDriverAssertionMagicPacketWakeEnabledBit) !=
+        currentFactors |= kIOPMSleepFactorDriverAssertBit5;
+    if (getPMAssertionLevel(kIOPMDriverAssertionReservedBit7) !=
         kIOPMDriverAssertionLevelOff)
-        currentFactors |= kIOPMSleepFactorMagicPacketWakeEnabled;
-    if (!powerOffEnabled)
-        currentFactors |= kIOPMSleepFactorAutoPowerOffDisabled;
-    if (desktopMode)
-        currentFactors |= kIOPMSleepFactorExternalDisplay;
+        currentFactors |= kIOPMSleepFactorDriverAssertBit7;
+    if (0 == deepSleepDelay)
+        currentFactors |= kIOPMSleepFactorDeepSleepNoDelay;
+    if (!clamshellClosed)
+        currentFactors |= kIOPMSleepFactorLidOpen;
+    if (acAdaptorConnected)
+        currentFactors |= kIOPMSleepFactorACPower;
+    if (lowBatteryCondition)
+        currentFactors |= kIOPMSleepFactorLowBattery;
+    if (sleepTimerMaintenance)
+        currentFactors |= kIOPMSleepFactorSleepTimerWake;
 
-    DLOG("sleep factors 0x%llx\n", currentFactors);
-
-    if (gSleepPolicyHandler)
-    {
-        uint32_t    savedHibernateMode;
-        IOReturn    result;
-
-        if (!gSleepPolicyVars)
-        {
-            gSleepPolicyVars = IONew(IOPMSystemSleepPolicyVariables, 1);
-            if (!gSleepPolicyVars)
-                goto done;
-            bzero(gSleepPolicyVars, sizeof(*gSleepPolicyVars));
-        }
-        gSleepPolicyVars->signature = kIOPMSystemSleepPolicySignature;
-        gSleepPolicyVars->version   = kIOPMSystemSleepPolicyVersion;
-        gSleepPolicyVars->currentCapability = _currentCapability;
-        gSleepPolicyVars->highestCapability = _highestCapability;
-        gSleepPolicyVars->sleepFactors      = currentFactors;
-        gSleepPolicyVars->sleepReason       = lastSleepReason;
-        gSleepPolicyVars->sleepPhase        = sleepPhase;
-        gSleepPolicyVars->standbyDelay      = standbyDelay;
-        gSleepPolicyVars->poweroffDelay     = powerOffDelay;
-        gSleepPolicyVars->scheduledAlarms   = _scheduledAlarms | _userScheduledAlarm;
-        gSleepPolicyVars->poweroffTimer     = powerOffTimer;
-
-        if (kIOPMSleepPhase0 == sleepPhase)
-        {
-            // preserve hibernateMode
-            savedHibernateMode = gSleepPolicyVars->hibernateMode;
-            gSleepPolicyVars->hibernateMode = *hibMode;
-        }
-        else if (kIOPMSleepPhase1 == sleepPhase)
-        {
-            // use original hibernateMode for phase2
-            gSleepPolicyVars->hibernateMode = *hibMode;
-        }
-
-        result = gSleepPolicyHandler(gSleepPolicyTarget, gSleepPolicyVars, params);
-        
-        if (kIOPMSleepPhase0 == sleepPhase)
-        {
-            // restore hibernateMode
-            gSleepPolicyVars->hibernateMode = savedHibernateMode;
-        }
-        
-        if ((result != kIOReturnSuccess) ||
-             (kIOPMSleepTypeInvalid == params->sleepType) ||
-             (params->sleepType >= kIOPMSleepTypeLast) ||
-             (kIOPMSystemSleepParametersVersion != params->version))
-        {
-            MSG("sleep policy handler error\n");
-            goto done;
-        }
-
-        if ((getSleepTypeAttributes(params->sleepType) &
-             kIOPMSleepAttributeHibernateSetup) &&
-            ((*hibMode & kIOHibernateModeOn) == 0))
-        {
-            *hibMode |= (kIOHibernateModeOn | kIOHibernateModeSleep);
-        }
-
-        DLOG("sleep params v%u, type %u, flags 0x%x, wake 0x%x, timer %u, poweroff %u\n",
-            params->version, params->sleepType, params->sleepFlags,
-            params->ecWakeEvents, params->ecWakeTimer, params->ecPoweroffTimer);
-        found = true;
-        goto done;
-    }
-
-    // Policy table is meaningless without standby enabled
-    if (!standbyEnabled)
-        goto done;
-
-    // Validate the sleep policy table
-    policyData = OSDynamicCast(OSData, prop);
-    if (!policyData || (policyData->getLength() <= sizeof(IOPMSystemSleepPolicyTable)))
-        goto done;
-
-    pt = (const IOPMSystemSleepPolicyTable *) policyData->getBytesNoCopy();
-    if ((pt->signature != kIOPMSystemSleepPolicySignature) ||
-        (pt->version != 1) || (0 == pt->entryCount))
-        goto done;
-
-    if (((policyData->getLength() - sizeof(IOPMSystemSleepPolicyTable)) !=
-         (sizeof(IOPMSystemSleepPolicyEntry) * pt->entryCount)))
-        goto done;
+    // pmset overrides
+    if ((hibernateMode & kIOHibernateModeOn) == 0)
+        currentFactors |= kIOPMSleepFactorDeepSleepDisable;
+    else if ((hibernateMode & kIOHibernateModeSleep) == 0)
+        currentFactors |= kIOPMSleepFactorDeepSleepDemand;
+    
+    DLOG("Sleep policy %u entries, current factors 0x%x\n",
+        pt->entryCount, currentFactors);
 
     for (uint32_t i = 0; i < pt->entryCount; i++)
     {
-        const IOPMSystemSleepPolicyEntry * entry = &pt->entries[i];
-        mismatch = (((uint32_t)currentFactors ^ entry->factorBits) & entry->factorMask);
+        const IOPMSystemSleepPolicyEntry * policyEntry = &pt->entries[i];
 
-        DLOG("mask 0x%08x, bits 0x%08x, flags 0x%08x, wake 0x%08x, mismatch 0x%08x\n",
-            entry->factorMask, entry->factorBits,
-            entry->sleepFlags, entry->wakeEvents, mismatch);
-        if (mismatch)
-            continue;
+        DLOG("factor mask 0x%08x, bits 0x%08x, flags 0x%08x, wake 0x%08x\n",
+            policyEntry->factorMask, policyEntry->factorBits,
+            policyEntry->sleepFlags, policyEntry->wakeEvents);
 
-        DLOG("^ found match\n");
-        found = true;
+        if ((currentFactors ^ policyEntry->factorBits) & policyEntry->factorMask)
+            continue;   // mismatch, try next
 
-        params->version = kIOPMSystemSleepParametersVersion;
-        params->reserved1 = 1;
-        if (entry->sleepFlags & kIOPMSleepFlagHibernate)
-            params->sleepType = kIOPMSleepTypeStandby;
-        else
-            params->sleepType = kIOPMSleepTypeNormalSleep;
-
-        params->ecWakeEvents = entry->wakeEvents;
-        if (entry->sleepFlags & kIOPMSleepFlagSleepTimerEnable)
+        if (p)
         {
-            if (kIOPMSleepPhase2 == sleepPhase)
+            p->version    = 1;
+            p->sleepFlags = policyEntry->sleepFlags;
+            p->sleepTimer = 0;
+            p->wakeEvents = policyEntry->wakeEvents;
+            if (p->sleepFlags & kIOPMSleepFlagSleepTimerEnable)
             {
-                clock_sec_t now_secs = gIOLastSleepTime.tv_sec;
-
-                if (!_standbyTimerResetSeconds ||
-                    (now_secs <= _standbyTimerResetSeconds))
+                if (kSleepPhaseFinal == sleepPhase)
                 {
-                    // Reset standby timer adjustment
-                    _standbyTimerResetSeconds = now_secs;
-                    DLOG("standby delay %u, reset %u\n",
-                        standbyDelay, (uint32_t) _standbyTimerResetSeconds);
-                }
-                else if (standbyDelay)
-                {
-                    // Shorten the standby delay timer
-                    clock_sec_t elapsed = now_secs - _standbyTimerResetSeconds;
-                    if (standbyDelay > elapsed)
-                        standbyDelay -= elapsed;
-                    else
-                        standbyDelay = 1; // must be > 0
+                    clock_sec_t now_secs = gIOLastSleepTime.tv_sec;
 
-                    DLOG("standby delay %u, elapsed %u\n",
-                        standbyDelay, (uint32_t) elapsed);
+                    if (!_standbyTimerResetSeconds ||
+                        (now_secs <= _standbyTimerResetSeconds))
+                    {
+                        // Reset standby timer adjustment
+                        _standbyTimerResetSeconds = now_secs;
+                        DLOG("standby delay %u, reset %u\n",
+                            deepSleepDelay, (uint32_t) _standbyTimerResetSeconds);
+                    }
+                    else if (deepSleepDelay)
+                    {
+                        // Shorten the standby delay timer
+                        clock_sec_t elapsed = now_secs - _standbyTimerResetSeconds;
+                        if (deepSleepDelay > elapsed)
+                            deepSleepDelay -= elapsed;
+                        else
+                            deepSleepDelay = 1; // must be > 0
+
+                        DLOG("standby delay %u, elapsed %u\n",
+                            deepSleepDelay, (uint32_t) elapsed);
+                    }
                 }
+                p->sleepTimer = deepSleepDelay;
             }
-            params->ecWakeTimer = standbyDelay;
+            else if (kSleepPhaseFinal == sleepPhase)
+            {
+                // A sleep that does not enable the sleep timer will reset
+                // the standby delay adjustment.
+                _standbyTimerResetSeconds = 0;
+            }            
         }
-        else if (kIOPMSleepPhase2 == sleepPhase)
-        {
-            // A sleep that does not enable the sleep timer will reset
-            // the standby delay adjustment.
-            _standbyTimerResetSeconds = 0;
-        }
+
+        DLOG("matched policy entry %u\n", i);
+        success = true;
         break;
     }
 
@@ -3952,14 +3750,14 @@ done:
     if (prop)
         prop->release();
 
-    return found;
+    return success;
 }
-
-static IOPMSystemSleepParameters gEarlySystemSleepParams;
 
 void IOPMrootDomain::evaluateSystemSleepPolicyEarly( void )
 {
-    // Evaluate early (priority interest phase), before drivers sleep.
+    IOPMSystemSleepParameters   params;
+
+    // Evaluate sleep policy before driver sleep phase.
 
     DLOG("%s\n", __FUNCTION__);
     removeProperty(kIOPMSystemSleepParametersKey);
@@ -3972,39 +3770,12 @@ void IOPMrootDomain::evaluateSystemSleepPolicyEarly( void )
     hibernateMode = 0;
     getSleepOption(kIOHibernateModeKey, &hibernateMode);
 
-    // Save for late evaluation if sleep is aborted
-    bzero(&gEarlySystemSleepParams, sizeof(gEarlySystemSleepParams));
-
-    if (evaluateSystemSleepPolicy(&gEarlySystemSleepParams, kIOPMSleepPhase1,
-                                  &hibernateMode))
+    if (!hibernateNoDefeat &&
+        evaluateSystemSleepPolicy(&params, kSleepPhaseEarly) &&
+        ((params.sleepFlags & kIOPMSleepFlagHibernate) == 0))
     {
-        if (!hibernateNoDefeat &&
-            ((getSleepTypeAttributes(gEarlySystemSleepParams.sleepType) &
-              kIOPMSleepAttributeHibernateSetup) == 0))
-        {
-            // skip hibernate setup
-            hibernateDisabled = true;
-        }
+        hibernateDisabled = true;
     }
-
-    // Publish IOPMSystemSleepType
-    uint32_t sleepType = gEarlySystemSleepParams.sleepType;
-    if (sleepType == kIOPMSleepTypeInvalid)
-    {
-        // no sleep policy
-        sleepType = kIOPMSleepTypeNormalSleep;
-        if (hibernateMode & kIOHibernateModeOn)
-            sleepType = (hibernateMode & kIOHibernateModeSleep) ?
-                        kIOPMSleepTypeSafeSleep : kIOPMSleepTypeHibernate;
-    }
-    else if ((sleepType == kIOPMSleepTypeStandby) &&
-             (gEarlySystemSleepParams.ecPoweroffTimer))
-    {
-        // report the lowest possible sleep state
-        sleepType = kIOPMSleepTypePowerOff;
-    }
-
-    setProperty(kIOPMSystemSleepTypeKey, sleepType, 32);
 }
 
 void IOPMrootDomain::evaluateSystemSleepPolicyFinal( void )
@@ -4012,32 +3783,27 @@ void IOPMrootDomain::evaluateSystemSleepPolicyFinal( void )
     IOPMSystemSleepParameters   params;
     OSData *                    paramsData;
 
-    // Evaluate sleep policy after sleeping drivers but before platform sleep.
+    // Evaluate sleep policy after drivers but before platform sleep.
 
     DLOG("%s\n", __FUNCTION__);
 
-    bzero(&params, sizeof(params));
-    if (evaluateSystemSleepPolicy(&params, kIOPMSleepPhase2, &hibernateMode))
+    if (evaluateSystemSleepPolicy(&params, kSleepPhaseFinal))
     {
         if ((hibernateDisabled || hibernateAborted) &&
-            (getSleepTypeAttributes(params.sleepType) &
-             kIOPMSleepAttributeHibernateSetup))
+            (params.sleepFlags & kIOPMSleepFlagHibernate))
         {
-            // Final evaluation picked a state requiring hibernation,
-            // but hibernate setup was skipped. Retry using the early
-            // sleep parameters.
+            // Should hibernate but unable to or aborted.
+            // Arm timer for a short sleep and retry or wake fully.
 
-            bcopy(&gEarlySystemSleepParams, &params, sizeof(params));
-            params.sleepType = kIOPMSleepTypeAbortedSleep;
-            params.ecWakeTimer = 1;
+            params.sleepFlags &= ~kIOPMSleepFlagHibernate;
+            params.sleepFlags |= kIOPMSleepFlagSleepTimerEnable;
+            params.sleepTimer = 1;
             hibernateNoDefeat = true;
             DLOG("wake in %u secs for hibernateDisabled %d, hibernateAborted %d\n",
-                params.ecWakeTimer, hibernateDisabled, hibernateAborted);
+                        params.sleepTimer, hibernateDisabled, hibernateAborted);
         }
         else
-        {
             hibernateNoDefeat = false;
-        }
 
         paramsData = OSData::withBytes(&params, sizeof(params));
         if (paramsData)
@@ -4046,31 +3812,25 @@ void IOPMrootDomain::evaluateSystemSleepPolicyFinal( void )
             paramsData->release();
         }
 
-        if (getSleepTypeAttributes(params.sleepType) &
-            kIOPMSleepAttributeHibernateSleep)
+        if (params.sleepFlags & kIOPMSleepFlagHibernate)
         {
-            // Disable sleep to force hibernation
+            // Force hibernate
             gIOHibernateMode &= ~kIOHibernateModeSleep;
         }
     }
 }
 
 bool IOPMrootDomain::getHibernateSettings(
-    uint32_t *  hibernateModePtr,
+    uint32_t *  hibernateMode,
     uint32_t *  hibernateFreeRatio,
     uint32_t *  hibernateFreeTime )
 {
-    // Called by IOHibernateSystemSleep() after evaluateSystemSleepPolicyEarly()
-    // has updated the hibernateDisabled flag.
-
-    bool ok = getSleepOption(kIOHibernateModeKey, hibernateModePtr);
+    bool ok = getSleepOption(kIOHibernateModeKey, hibernateMode);
     getSleepOption(kIOHibernateFreeRatioKey, hibernateFreeRatio);
     getSleepOption(kIOHibernateFreeTimeKey, hibernateFreeTime);
     if (hibernateDisabled)
-        *hibernateModePtr = 0;
-    else if (gSleepPolicyHandler)
-        *hibernateModePtr = hibernateMode;
-    DLOG("hibernateMode 0x%x\n", *hibernateModePtr);
+        *hibernateMode = 0;
+    DLOG("hibernateMode 0x%x\n", *hibernateMode);
     return ok;
 }
 
@@ -4108,37 +3868,6 @@ bool IOPMrootDomain::getSleepOption( const char * key, uint32_t * option )
     return true;
 }
 #endif /* HIBERNATION */
-
-IOReturn IOPMrootDomain::getSystemSleepType( uint32_t * sleepType )
-{
-#if HIBERNATION
-    IOPMSystemSleepParameters   params;
-    uint32_t                    hibMode = 0;
-    bool                        ok;
-
-    if (gIOPMWorkLoop->inGate() == false)
-    {
-        IOReturn ret = gIOPMWorkLoop->runAction(
-                        OSMemberFunctionCast(IOWorkLoop::Action, this,
-                            &IOPMrootDomain::getSystemSleepType),
-                        (OSObject *) this,
-                        (void *) sleepType);
-        return ret;
-    }
-
-    getSleepOption(kIOHibernateModeKey, &hibMode);
-    bzero(&params, sizeof(params));
-
-    ok = evaluateSystemSleepPolicy(&params, kIOPMSleepPhase0, &hibMode);
-    if (ok)
-    {
-        *sleepType = params.sleepType;
-        return kIOReturnSuccess;
-    }
-#endif
-
-    return kIOReturnUnsupported;
-}
 
 // MARK: -
 // MARK: Shutdown and Restart
@@ -4224,9 +3953,6 @@ void IOPMrootDomain::handlePlatformHaltRestart( UInt32 pe_type )
 			ctx.PowerState  = ON_STATE;
 			ctx.MessageType = kIOMessageSystemPagingOff;
 			IOService::updateConsoleUsers(NULL, kIOMessageSystemPagingOff);
-#if	HIBERNATION
-			IOHibernateSystemRestart();
-#endif
 			break;
 
 		default:
@@ -4441,7 +4167,8 @@ void IOPMrootDomain::overrideOurPowerChange(
     uint32_t    changeFlags = *inOutChangeFlags;
     uint32_t    currentPowerState = (uint32_t) getPowerState();
 
-    if (changeFlags & kIOPMParentInitiated)
+    if ((currentPowerState == powerState) ||
+        (changeFlags & kIOPMParentInitiated))
     {
         // FIXME: cancel any parent change (unexpected)
         // Root parent is permanently pegged at max power,
@@ -4482,20 +4209,6 @@ void IOPMrootDomain::overrideOurPowerChange(
 
             // Revert device desire from SLEEP->ON.
             changePowerStateToPriv(ON_STATE);
-        }
-        else
-        {
-            // Broadcast power down
-            *inOutChangeFlags |= kIOPMRootChangeDown;
-        }
-    }
-    else if (powerState > currentPowerState)
-    {
-        if ((_currentCapability & kIOPMSystemCapabilityCPU) == 0)
-        {
-            // Broadcast power up when waking from sleep, but not for the
-            // initial power change at boot by checking for cpu capability.
-            *inOutChangeFlags |= kIOPMRootChangeUp;
         }
     }
 }
@@ -4597,7 +4310,6 @@ void IOPMrootDomain::handleOurPowerChangeStart(
             if ((_highestCapability & kIOPMSystemCapabilityGraphics) == 0)
                 _systemMessageClientMask |= kSystemMessageClientKernel;
 
-            IOService::setAdvisoryTickleEnable( true );
             tellClients(kIOMessageSystemWillPowerOn);
         }
 
@@ -4607,7 +4319,6 @@ void IOPMrootDomain::handleOurPowerChangeStart(
             tracePoint( kIOPMTracePointDarkWakeEntry );
             *inOutChangeFlags |= kIOPMSyncTellPowerDown;
             _systemMessageClientMask = kSystemMessageClientUser;
-            IOService::setAdvisoryTickleEnable( false );
         }
     }
 
@@ -4645,7 +4356,6 @@ void IOPMrootDomain::handleOurPowerChangeStart(
         if (_pendingCapability & kIOPMSystemCapabilityGraphics)
         {
             _systemMessageClientMask = kSystemMessageClientAll;
-            IOService::setAdvisoryTickleEnable( true );
         }
         else
         {
@@ -4795,7 +4505,10 @@ void IOPMrootDomain::handleOurPowerChangeDone(
 
         // Update highest system capability.
 
-        _highestCapability |= _currentCapability;
+        if (!CAP_CURRENT(kIOPMSystemCapabilityCPU))
+            _highestCapability = 0;     // reset at sleep state
+        else
+            _highestCapability |= _currentCapability;
 
         if (darkWakePostTickle &&
             (kSystemTransitionWake == _systemTransitionType) &&
@@ -4868,7 +4581,6 @@ void IOPMrootDomain::overridePowerChangeForUIService(
             actions->parameter |= kPMActionsFlagLimitPower;
         }
         else if ((actions->parameter & kPMActionsFlagIsAudioDevice) &&
-                 ((gDarkWakeFlags & kDarkWakeFlagAudioNotSuppressed) == 0) &&
                  ((_pendingCapability & kIOPMSystemCapabilityAudio) == 0) &&
                  (changeFlags & kIOPMSynchronize))
         {
@@ -4929,10 +4641,6 @@ void IOPMrootDomain::overridePowerChangeForUIService(
                     maxPowerState = 3;
                 else
                     maxPowerState = 1;
-            }
-            else if (actions->parameter & kPMActionsFlagIsGraphicsDevice)
-            {
-                maxPowerState = 1;
             }
         }
         else
@@ -5256,17 +4964,13 @@ IOReturn IOPMrootDomain::setMaintenanceWakeCalendar(
 
     if (kPMCalendarTypeMaintenance == calendar->selector) {
         ret = setPMSetting(gIOPMSettingMaintenanceWakeCalendarKey, data);
-        if (kIOReturnSuccess == ret)
-            OSBitOrAtomic(kIOPMAlarmBitMaintenanceWake, &_scheduledAlarms);
     } else 
     if (kPMCalendarTypeSleepService == calendar->selector)
     {
         ret = setPMSetting(gIOPMSettingSleepServiceWakeCalendarKey, data);
-        if (kIOReturnSuccess == ret)
-            OSBitOrAtomic(kIOPMAlarmBitSleepServiceWake, &_scheduledAlarms);
     }
-    DLOG("_scheduledAlarms = 0x%x\n", (uint32_t) _scheduledAlarms);
     
+
     data->release();
     return ret;
 }
@@ -5343,7 +5047,7 @@ IOReturn IOPMrootDomain::displayWranglerNotification(
 //******************************************************************************
 
 bool IOPMrootDomain::displayWranglerMatchPublished( 
-    void * target,
+    void * target, 
     void * refCon,
     IOService * newService,
     IONotifier * notifier __unused)
@@ -5556,8 +5260,7 @@ bool IOPMrootDomain::checkSystemCanSustainFullWake( void )
         return false;
     }
 
-    if (clamshellExists && clamshellClosed && !acAdaptorConnected &&
-        !clamshellSleepDisabled)
+    if (clamshellExists && clamshellClosed && !acAdaptorConnected)
     {
         // Lid closed on battery power
         return false;
@@ -5619,16 +5322,6 @@ void IOPMrootDomain::dispatchPowerEvent(
             if (systemBooting)
             {
                 systemBooting = false;
-
-                if (lowBatteryCondition)
-                {
-                    privateSleepSystem (kIOPMSleepReasonLowPower);
-
-                    // The rest is unnecessary since the system is expected
-                    // to sleep immediately. The following wake will update
-                    // everything.
-                    break;
-                }
 
                 // If lid is closed, re-send lid closed notification
                 // now that booting is complete.
@@ -6123,7 +5816,7 @@ void IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
 
             if ( minutesToIdleSleep > minutesToDisplayDim )
                 minutesDelta = minutesToIdleSleep - minutesToDisplayDim;
-            else if( minutesToIdleSleep <= minutesToDisplayDim )
+            else if( minutesToIdleSleep == minutesToDisplayDim )
                 minutesDelta = 1;
 
             if ((sleepSlider == 0) && (minutesToIdleSleep != 0))
@@ -6204,7 +5897,6 @@ void IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
 
                     // Notify clients about full wake.
                     _systemMessageClientMask = kSystemMessageClientAll;
-                    IOService::setAdvisoryTickleEnable( true );
                     tellClients(kIOMessageSystemWillPowerOn);
                 }
 
@@ -6474,8 +6166,8 @@ void IOPMrootDomain::evaluateAssertions(IOPMDriverAssertionType newAssertions, I
     if (changedBits & kIOPMDriverAssertionPreventDisplaySleepBit) {
 
         if (wrangler) {
-
             bool value = (newAssertions & kIOPMDriverAssertionPreventDisplaySleepBit) ? true : false;
+
             DLOG("wrangler->setIgnoreIdleTimer\(%d)\n", value);
             wrangler->setIgnoreIdleTimer( value );
         }
@@ -6675,20 +6367,6 @@ IOReturn IOPMrootDomain::callPlatformFunction(
 
         return kIOReturnSuccess;
     }
-#if HIBERNATION
-    else if (functionName &&
-             functionName->isEqualTo(kIOPMInstallSystemSleepPolicyHandlerKey))
-    {
-        if (gSleepPolicyHandler)
-            return kIOReturnExclusiveAccess;
-        if (!param1)
-            return kIOReturnBadArgument;
-        gSleepPolicyHandler = (IOPMSystemSleepPolicyHandler) param1;
-        gSleepPolicyTarget  = (void *) param2;
-        setProperty("IOPMSystemSleepPolicyHandler", kOSBooleanTrue);
-        return kIOReturnSuccess;
-    }
-#endif
 
     return super::callPlatformFunction(
         functionName, waitForFunction, param1, param2, param3, param4);
@@ -6698,7 +6376,6 @@ void IOPMrootDomain::tracePoint( uint8_t point )
 {
     if (systemBooting) return;
 
-    PMDebug(kPMLogSleepWakeTracePoint, point, 0);
     pmTracer->tracePoint(point);
 
 #if	HIBERNATION
@@ -6708,10 +6385,8 @@ void IOPMrootDomain::tracePoint( uint8_t point )
 
 void IOPMrootDomain::tracePoint( uint8_t point, uint8_t data )
 {
-    if (systemBooting) return;
-
-    PMDebug(kPMLogSleepWakeTracePoint, point, data);
-    pmTracer->tracePoint(point, data);
+    if (!systemBooting)
+        pmTracer->tracePoint(point, data);
 }
 
 void IOPMrootDomain::traceDetail( uint32_t detail )
@@ -7899,8 +7574,7 @@ void IOPMTimeline::setEventsTrackedCount(uint32_t newTracked)
     }
 
     pmTraceMemoryDescriptor = IOBufferMemoryDescriptor::withOptions(
-                    kIOMemoryKernelUserShared | kIODirectionIn | kIOMemoryMapperNone,
-                    make_buf_size);
+                    kIOMemoryKernelUserShared | kIODirectionIn, make_buf_size);
 
     if (!pmTraceMemoryDescriptor)
     {

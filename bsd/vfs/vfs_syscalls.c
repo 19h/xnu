@@ -7347,15 +7347,6 @@ exchangedata (__unused proc_t p, struct exchangedata_args *uap, __unused int32_t
 		goto out;
 	}
 
-	/*
-	 * if the two vnodes are not files, return an error.
-	 */
-	if ( (vnode_isreg(svp) == 0) || (vnode_isreg(fvp) == 0) ) {
-		error = EINVAL;
-		goto out;
-	}
-
-
 #if CONFIG_MACF
 	error = mac_vnode_check_exchangedata(ctx,
 	    fvp, svp);
@@ -8120,12 +8111,9 @@ vn_open_with_vp(vnode_t vp, int fmode, vfs_context_t ctx)
 		return error;
 	}
 
-	/* Call out to allow 3rd party notification of open. 
+	/* call out to allow 3rd party notification of open. 
 	 * Ignore result of kauth_authorize_fileop call.
 	 */
-#if CONFIG_MACF
-	mac_vnode_notify_open(ctx, vp, fmode);
-#endif
 	kauth_authorize_fileop(vfs_context_ucred(ctx), KAUTH_FILEOP_OPEN, 
 			       (uintptr_t)vp, 0);
 

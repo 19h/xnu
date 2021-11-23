@@ -69,6 +69,7 @@ extern void		panic_io_port_read(void);
 
 extern void		remote_kdb(void);
 extern void		clear_kdb_intr(void);
+extern void             draw_panic_dialog(void);
 extern void		cpu_init(void);
 #ifdef __i386__
 extern void		cpu_shutdown(void);
@@ -173,5 +174,4 @@ extern void act_machine_switch_pcb(thread_t old, thread_t new);
 #define FAST_SLAVE_INIT	((void *)(uintptr_t)1)
 
 uint64_t ml_early_random(void);
-void cpu_pmc_control(void *);
 #endif /* _I386_MISC_PROTOS_H_ */

@@ -1604,7 +1604,7 @@ igmp_input(struct mbuf *m, int off)
 		OIGMPSTAT_INC(igps_rcv_tooshort);
 		return;
 	}
-	/* N.B.: we assume the packet was correctly aligned in ip_input. */
+	VERIFY(IS_P2ALIGNED(igmp, sizeof (u_int32_t)));
 
 	/*
 	 * Validate checksum.
@@ -1701,10 +1701,8 @@ igmp_input(struct mbuf *m, int off)
 					OIGMPSTAT_INC(igps_rcv_tooshort);
 					return;
 				}
-				/* 
-				 * N.B.: we assume the packet was correctly
-				 * aligned in ip_input.
-				 */
+				VERIFY(IS_P2ALIGNED(igmpv3,
+				    sizeof (u_int32_t)));
 				if (igmp_input_v3_query(ifp, ip, igmpv3) != 0) {
 					m_freem(m);
 					return;

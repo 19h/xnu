@@ -38,7 +38,6 @@
 
 class IOMemoryMap;
 class IOMapper;
-class IOService;
 
 /*
  * Direction of transfer, with respect to the described memory.
@@ -84,8 +83,7 @@ enum {
 
     kIOMemoryAsReference	= 0x00000100,
     kIOMemoryBufferPageable	= 0x00000400,
-    kIOMemoryMapperNone		= 0x00000800,	// Shared with Buffer MD
-    kIOMemoryHostOnly           = 0x00001000,   // Never DMA accessible
+    kIOMemoryMapperNone		= 0x00000800,
 #ifdef XNU_KERNEL_PRIVATE
     kIOMemoryRedirected		= 0x00004000,
     kIOMemoryPreparedReadOnly	= 0x00008000,
@@ -117,26 +115,6 @@ enum
 };
 
 #define	IOMEMORYDESCRIPTOR_SUPPORTS_DMACOMMAND	1
-
-struct IODMAMapSpecification
-{
-	uint64_t    alignment;
-	IOService * device;
-	uint32_t    options;
-	uint8_t     numAddressBits;
-	uint8_t     resvA[3];
-	uint32_t    resvB[4];
-};
-
-enum
-{
-    kIODMAMapWriteAccess          = 0x00000002,
-    kIODMAMapPhysicallyContiguous = 0x00000010,
-    kIODMAMapDeviceMemory         = 0x00000020,
-    kIODMAMapPagingPath           = 0x00000040,
-    kIODMAMapIdentityMap          = 0x00000080,
-};
-
 
 enum 
 {
@@ -255,13 +233,6 @@ typedef IOOptionBits DMACommandOps;
 
 #ifdef XNU_KERNEL_PRIVATE
     IOMemoryDescriptorReserved * getKernelReserved( void );
-    IOReturn dmaMap(
-	IOMapper                    * mapper,
-	const IODMAMapSpecification * mapSpec,
-	uint64_t                      offset,
-	uint64_t                      length,
-	uint64_t                    * address,
-	ppnum_t                     * mapPages);
 #endif
 	
 private:
@@ -792,11 +763,6 @@ public:
     IOReturn userClientUnmap();
 #endif /* XNU_KERNEL_PRIVATE */
 
-    IOReturn wireRange(
-    	uint32_t		options,
-        mach_vm_size_t		offset,
-        mach_vm_size_t		length);
-
     OSMetaClassDeclareReservedUnused(IOMemoryMap, 0);
     OSMetaClassDeclareReservedUnused(IOMemoryMap, 1);
     OSMetaClassDeclareReservedUnused(IOMemoryMap, 2);
@@ -864,19 +830,6 @@ public:
 
     virtual uint64_t getPreparationID( void );
 
-#ifdef XNU_KERNEL_PRIVATE
-    // Internal APIs may be made virtual at some time in the future.
-    IOReturn wireVirtual(IODirection forDirection);
-    IOReturn dmaMap(
-	IOMapper                    * mapper,
-	const IODMAMapSpecification * mapSpec,
-	uint64_t                      offset,
-	uint64_t                      length,
-	uint64_t                    * address,
-	ppnum_t                     * mapPages);
-    bool initMemoryEntries(size_t size, IOMapper * mapper);
-#endif
-
 private:
 
 #ifndef __LP64__
@@ -885,6 +838,8 @@ private:
     virtual void unmapFromKernel();
 #endif /* !__LP64__ */
 
+    // Internal APIs may be made virtual at some time in the future.
+    IOReturn wireVirtual(IODirection forDirection);
     void *createNamedEntry();
 
     // Internal

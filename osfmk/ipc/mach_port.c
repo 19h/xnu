@@ -1190,10 +1190,11 @@ mach_port_get_set_status(
 
 		for (index = 0; index < tsize; index++) {
 			ipc_entry_t ientry = &table[index];
-			ipc_port_t port = (ipc_port_t) ientry->ie_object;
 
-			if (ientry->ie_bits & MACH_PORT_TYPE_RECEIVE &&
-			    port->ip_pset_count > 0) {
+			if (ientry->ie_bits & MACH_PORT_TYPE_RECEIVE) {
+				ipc_port_t port =
+					(ipc_port_t) ientry->ie_object;
+
 				mach_port_gst_helper(pset, port,
 						     maxnames, names, &actual);
 			}

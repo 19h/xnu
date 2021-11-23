@@ -173,7 +173,6 @@ to restrict I/O ops.
 #include <machine/pal_hibernate.h>
 
 extern "C" addr64_t		kvtophys(vm_offset_t va);
-extern "C" ppnum_t		pmap_find_phys(pmap_t pmap, addr64_t va);
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -182,9 +181,8 @@ extern uint32_t 		gIOHibernateState;
 uint32_t			gIOHibernateMode;
 static char			gIOHibernateBootSignature[256+1];
 static char			gIOHibernateFilename[MAXPATHLEN+1];
-static uint32_t			gIOHibernateFreeRatio = 0;	 // free page target (percent)
-uint32_t			gIOHibernateFreeTime  = 0*1000;  // max time to spend freeing pages (ms)
-static uint64_t			gIOHibernateCompression = 0x80;  // default compression 50%
+static uint32_t			gIOHibernateFreeRatio = 0;		// free page target (percent)
+uint32_t			gIOHibernateFreeTime  = 0*1000;	// max time to spend freeing pages (ms)
 
 static IODTNVRAM *		gIOOptionsEntry;
 static IORegistryEntry *	gIOChosenEntry;
@@ -604,10 +602,9 @@ IOCopyMediaForDev(dev_t device)
 }
 
 IOReturn
-IOPolledFileOpen( const char * filename, uint64_t setFileSize,
-		  IOBufferMemoryDescriptor * ioBuffer, 
-		  IOPolledFileIOVars ** fileVars, OSData ** fileExtents,
-		  OSData ** imagePath, uint8_t * volumeCryptKey)
+IOPolledFileOpen( const char * filename, IOBufferMemoryDescriptor * ioBuffer,
+			    IOPolledFileIOVars ** fileVars, OSData ** fileExtents,
+			    OSData ** imagePath, uint8_t * volumeCryptKey)
 {
     IOReturn			err = kIOReturnSuccess;
     IOPolledFileIOVars *	vars;
@@ -645,16 +642,13 @@ IOPolledFileOpen( const char * filename, uint64_t setFileSize,
 	clock_get_uptime(&startTime);
 	vars->fileRef = kern_open_file_for_direct_io(filename, 
 						    &file_extent_callback, &ctx, 
-						    setFileSize,
-						    // write file:
-                                                    0, (caddr_t) gIOHibernateCurrentHeader, 
-                                                    sizeof(IOHibernateImageHeader),
-                                                    // results
 						    &block_dev,
 						    &hibernate_image_dev,
                                                     &vars->block0,
                                                     &maxiobytes,
-                                                    &vars->flags);
+                                                    &vars->flags, 
+                                                    0, (caddr_t) gIOHibernateCurrentHeader, 
+                                                    sizeof(IOHibernateImageHeader));
 #if 0
 	uint32_t msDelay = (131071 & random());
 	HIBLOG("sleep %d\n", msDelay);
@@ -684,7 +678,6 @@ IOPolledFileOpen( const char * filename, uint64_t setFileSize,
 	    break;
 	}
 
-	vars->fileSize = ctx.size;
         if (maxiobytes < vars->bufferSize)
             vars->bufferSize = maxiobytes;
     
@@ -773,14 +766,6 @@ IOPolledFileOpen( const char * filename, uint64_t setFileSize,
 	err = IOHibernatePollerOpen(vars, kIOPolledPreflightState, ioBuffer);
 	if (kIOReturnSuccess != err)
 	    break;
-
-	vars->media = part;
-        next = part;
-	while (next)
-	{
-	    next->setProperty(kIOPolledInterfaceActiveKey, kOSBooleanTrue);
-	    next = next->getParentEntry(gIOServicePlane);
-	}
 
 	*fileVars    = vars;
 	*fileExtents = extentsData;
@@ -1124,7 +1109,7 @@ if (vars->position & (vars->blockSize - 1)) HIBLOG("misaligned file pos %qx\n", 
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
+		
 IOReturn
 IOHibernateSystemSleep(void)
 {
@@ -1132,7 +1117,6 @@ IOHibernateSystemSleep(void)
     OSData *   data;
     OSObject * obj;
     OSString * str;
-    OSNumber * num;
     bool       dsSSD;
     IOHibernateVars * vars;
 
@@ -1198,70 +1182,9 @@ IOHibernateSystemSleep(void)
             break;
         }
 
-	if ((obj = IOService::getPMRootDomain()->copyProperty(kIOHibernateFileMinSizeKey)))
-	{
-	    if ((num = OSDynamicCast(OSNumber, obj))) vars->fileMinSize = num->unsigned64BitValue();
-	    obj->release();
-	}
-	if ((obj = IOService::getPMRootDomain()->copyProperty(kIOHibernateFileMaxSizeKey)))
-	{
-	    if ((num = OSDynamicCast(OSNumber, obj))) vars->fileMaxSize = num->unsigned64BitValue();
-	    obj->release();
-	}
-
-        boolean_t encryptedswap = true;
-        uint32_t pageCount;
-        AbsoluteTime startTime, endTime;
-        uint64_t nsec;
-
-	bzero(gIOHibernateCurrentHeader, sizeof(IOHibernateImageHeader));
-	gIOHibernateCurrentHeader->debugFlags = gIOHibernateDebugFlags;
-	gIOHibernateCurrentHeader->signature = kIOHibernateHeaderInvalidSignature;
-
-	dsSSD = (kOSBooleanTrue == IOService::getPMRootDomain()->getProperty(kIOPMDeepSleepEnabledKey));
-        clock_get_uptime(&startTime);
-        err = hibernate_setup(gIOHibernateCurrentHeader, 
-                                gIOHibernateFreeRatio, gIOHibernateFreeTime,
-                                dsSSD,
-                                &vars->page_list, &vars->page_list_wired, &vars->page_list_pal);
-        clock_get_uptime(&endTime);
-        SUB_ABSOLUTETIME(&endTime, &startTime);
-        absolutetime_to_nanoseconds(endTime, &nsec);
-        HIBLOG("hibernate_setup(%d) took %qd ms\n", err, nsec / 1000000ULL);
-
-	uint64_t setFileSize = 0;
-
-	if (vars->fileMinSize || (kIOHibernateModeFileResize & gIOHibernateMode))
-	{
-	    hibernate_page_list_setall(vars->page_list,
-				       vars->page_list_wired,
-				       vars->page_list_pal,
-				       true /* preflight */,
-				       &pageCount);
-	    PE_Video consoleInfo;
-	    bzero(&consoleInfo, sizeof(consoleInfo));
-	    IOService::getPlatform()->getConsoleInfo(&consoleInfo);
-
-	    // estimate: 5% increase in pages compressed
-	    // screen preview 2 images compressed 50%
-	    setFileSize = ((ptoa_64((105 * pageCount) / 100) * gIOHibernateCompression) >> 8)
-				+ vars->page_list->list_size
-	 			+ (consoleInfo.v_width * consoleInfo.v_height * 4);
-
-	    HIBLOG("hibernate_page_list_setall preflight pageCount %d est comp %qd setfile %qd min %qd\n", 
-		    pageCount, (100ULL * gIOHibernateCompression) >> 8,
-		    setFileSize, vars->fileMinSize);
-
-	    if (!(kIOHibernateModeFileResize & gIOHibernateMode)
-	     && (setFileSize < vars->fileMinSize))
-	    { 
-		setFileSize = vars->fileMinSize;
-	    }
-	}
-    
 	// open & invalidate the image file
-
-        err = IOPolledFileOpen(gIOHibernateFilename, setFileSize, vars->ioBuffer,
+	gIOHibernateCurrentHeader->signature = kIOHibernateHeaderInvalidSignature;
+        err = IOPolledFileOpen(gIOHibernateFilename, vars->ioBuffer,
                                 &vars->fileVars, &vars->fileExtents, &data, 
                                 &vars->volumeCryptKey[0]);
         if (KERN_SUCCESS != err)
@@ -1270,6 +1193,8 @@ IOHibernateSystemSleep(void)
             break;
         }
 
+	bzero(gIOHibernateCurrentHeader, sizeof(IOHibernateImageHeader));
+	gIOHibernateCurrentHeader->debugFlags = gIOHibernateDebugFlags;
         dsSSD = ((0 != (kIOHibernateOptionSSD & vars->fileVars->flags))
                 && (kOSBooleanTrue == IOService::getPMRootDomain()->getProperty(kIOPMDeepSleepEnabledKey)));
         if (dsSSD)
@@ -1296,6 +1221,19 @@ IOHibernateSystemSleep(void)
             gIOHibernateCurrentHeader->options |= kIOHibernateOptionProgress;
         }
 
+        boolean_t encryptedswap;
+        AbsoluteTime startTime, endTime;
+        uint64_t nsec;
+
+        clock_get_uptime(&startTime);
+        err = hibernate_setup(gIOHibernateCurrentHeader, 
+                                gIOHibernateFreeRatio, gIOHibernateFreeTime,
+                                dsSSD,
+                                &vars->page_list, &vars->page_list_wired, &vars->page_list_pal, &encryptedswap);
+        clock_get_uptime(&endTime);
+        SUB_ABSOLUTETIME(&endTime, &startTime);
+        absolutetime_to_nanoseconds(endTime, &nsec);
+        HIBLOG("hibernate_setup(%d) took %qd ms\n", err, nsec / 1000000ULL);
 
         if (KERN_SUCCESS != err)
             break;
@@ -1789,9 +1727,7 @@ IOHibernateSystemWake(void)
 static IOReturn
 IOHibernateDone(IOHibernateVars * vars)
 {
-    IORegistryEntry * next;
-
-    hibernate_teardown(vars->page_list, vars->page_list_wired, vars->page_list_pal);
+    hibernate_teardown(vars->page_list, vars->page_list_wired);
 
     if (vars->videoMapping)
     {
@@ -1831,14 +1767,9 @@ IOHibernateDone(IOHibernateVars * vars)
         IOService::getPMRootDomain()->removeProperty(kIOHibernateGfxStatusKey);
     }
 
+
     if (vars->fileVars)
     {
-	if ((next = vars->fileVars->media)) do
-	{
-	    next->removeProperty(kIOPolledInterfaceActiveKey);
-	    next = next->getParentEntry(gIOServicePlane);
-	}
-	while (next);
 	IOPolledFileClose(vars->fileVars);
     }
 
@@ -1880,46 +1811,43 @@ IOHibernateDone(IOHibernateVars * vars)
     if (vars->ioBuffer)
 	vars->ioBuffer->release();
     bzero(&gIOHibernateHandoffPages[0], gIOHibernateHandoffPageCount * sizeof(gIOHibernateHandoffPages[0]));
-    if (vars->handoffBuffer)
+    if (vars->handoffBuffer && (kIOHibernateStateWakingFromHibernate == gIOHibernateState))
     {
-	if (kIOHibernateStateWakingFromHibernate == gIOHibernateState)
+	IOHibernateHandoff * handoff;
+	bool done = false;
+	for (handoff = (IOHibernateHandoff *) vars->handoffBuffer->getBytesNoCopy();
+	     !done;
+	     handoff = (IOHibernateHandoff *) &handoff->data[handoff->bytecount])
 	{
-	    IOHibernateHandoff * handoff;
-	    bool done = false;
-	    for (handoff = (IOHibernateHandoff *) vars->handoffBuffer->getBytesNoCopy();
-		 !done;
-		 handoff = (IOHibernateHandoff *) &handoff->data[handoff->bytecount])
+	    HIBPRINT("handoff %p, %x, %x\n", handoff, handoff->type, handoff->bytecount);
+	    uint8_t * data = &handoff->data[0];
+	    switch (handoff->type)
 	    {
-		HIBPRINT("handoff %p, %x, %x\n", handoff, handoff->type, handoff->bytecount);
-		uint8_t * data = &handoff->data[0];
-		switch (handoff->type)
-		{
-		    case kIOHibernateHandoffTypeEnd:
-			done = true;
-			break;
+		case kIOHibernateHandoffTypeEnd:
+		    done = true;
+		    break;
 
-		    case kIOHibernateHandoffTypeDeviceTree:
-			MergeDeviceTree((DeviceTreeNode *) data, IOService::getServiceRoot());
-			break;
-	
-		    case kIOHibernateHandoffTypeKeyStore:
+	    case kIOHibernateHandoffTypeDeviceTree:
+		    MergeDeviceTree((DeviceTreeNode *) data, IOService::getServiceRoot());
+		    break;
+    
+		case kIOHibernateHandoffTypeKeyStore:
 #if defined(__i386__) || defined(__x86_64__)
+		    {
+			IOBufferMemoryDescriptor *
+			md = IOBufferMemoryDescriptor::withBytes(data, handoff->bytecount, kIODirectionOutIn);
+			if (md)
 			{
-			    IOBufferMemoryDescriptor *
-			    md = IOBufferMemoryDescriptor::withBytes(data, handoff->bytecount, kIODirectionOutIn);
-			    if (md)
-			    {
-				IOSetKeyStoreData(md);
-			    }
+			    IOSetKeyStoreData(md);
 			}
+		    }
 #endif
-			break;
-	
-		    default:
-			done = (kIOHibernateHandoffType != (handoff->type & 0xFFFF0000));
-			break;
-		}    
-	    }
+		    break;
+    
+		default:
+		    done = (kIOHibernateHandoffType != (handoff->type & 0xFFFF0000));
+		    break;
+	    }    
 	}
 	vars->handoffBuffer->release();
     }
@@ -2160,8 +2088,7 @@ hibernate_write_image(void)
 
     hibernate_page_list_setall(vars->page_list,
                                vars->page_list_wired,
-                               vars->page_list_pal,
-			       false /* !preflight */,
+							   vars->page_list_pal,
                                &pageCount);
 
     HIBLOG("hibernate_page_list_setall found pageCount %d\n", pageCount);
@@ -2393,9 +2320,7 @@ hibernate_write_image(void)
         pagesDone  = 0;
         lastBlob   = 0;
     
-        HIBLOG("bitmap_size 0x%x, previewSize 0x%x, writing %d pages @ 0x%llx\n", 
-        	bitmap_size, header->previewSize,
-        	pageCount, vars->fileVars->position);
+        HIBLOG("writing %d pages\n", pageCount);
 
         enum
         // pageType
@@ -2495,7 +2420,7 @@ hibernate_write_image(void)
 //                      HIBLOG("------------lose: %d\n", pageCompressedSize);
                         pageCompressedSize = page_size;
                     }
-
+    
                     if (pageCompressedSize != page_size)
                         data = (src + page_size);
                     else
@@ -2585,9 +2510,6 @@ hibernate_write_image(void)
         header->image1Sum    = sum1;
         header->image2Sum    = sum2;
         header->sleepTime    = gIOLastSleepTime.tv_sec;
-
-	header->compression     = (compressedSize << 8) / uncompressedSize;
-	gIOHibernateCompression = header->compression;
     
         count = vars->fileExtents->getLength();
         if (count > sizeof(header->fileExtentMap))
@@ -2638,8 +2560,8 @@ hibernate_write_image(void)
 		nsec / 1000000ULL, 
 		nsec ? (((vars->fileVars->cryptBytes * 1000000000ULL) / 1024 / 1024) / nsec) : 0);
 
-    HIBLOG("\nimage %qd (%lld%%), uncompressed %qd (%d), compressed %qd (%d%%), sum1 %x, sum2 %x\n", 
-               header->imageSize, (header->imageSize * 100) / vars->fileVars->fileSize,
+    HIBLOG("\nimage %qd, uncompressed %qd (%d), compressed %qd (%d%%), sum1 %x, sum2 %x\n", 
+               header->imageSize,
                uncompressedSize, atop_32(uncompressedSize), compressedSize,
                uncompressedSize ? ((int) ((compressedSize * 100ULL) / uncompressedSize)) : 0,
                sum1, sum2);
@@ -2731,12 +2653,6 @@ hibernate_machine_init(void)
 	    gIOHibernateCurrentHeader->diag[0], gIOHibernateCurrentHeader->diag[1], 
 	    gIOHibernateCurrentHeader->diag[2], gIOHibernateCurrentHeader->diag[3]);
 
-    HIBLOG("restore times %qd, %qd, %qd ms, tsc 0x%qx scale 0x%x\n", 
-    	(((gIOHibernateCurrentHeader->restoreTime1 * pal_rtc_nanotime_info.scale) >> 32) / 1000000),
-    	(((gIOHibernateCurrentHeader->restoreTime2 * pal_rtc_nanotime_info.scale) >> 32) / 1000000),
-    	(((gIOHibernateCurrentHeader->restoreTime3 * pal_rtc_nanotime_info.scale) >> 32) / 1000000),
-	gIOHibernateCurrentHeader->restoreTime1, pal_rtc_nanotime_info.scale);
-
     if ((kIOHibernateModeDiscardCleanActive | kIOHibernateModeDiscardCleanInactive) & gIOHibernateMode)
         hibernate_page_list_discard(vars->page_list);
 
@@ -2777,19 +2693,8 @@ hibernate_machine_init(void)
 		break;
 
 	    case kIOHibernateHandoffTypeMemoryMap:
-
-		clock_get_uptime(&allTime);
-
 		hibernate_newruntime_map(data, handoff->bytecount, 
 					 gIOHibernateCurrentHeader->systemTableOffset);
-
-		clock_get_uptime(&endTime);
-	    
-		SUB_ABSOLUTETIME(&endTime, &allTime);
-		absolutetime_to_nanoseconds(endTime, &nsec);
-	    
-		HIBLOG("hibernate_newruntime_map time: %qd ms, ", nsec / 1000000ULL);
-
 	    	break;
 
 	    case kIOHibernateHandoffTypeDeviceTree:
@@ -2949,7 +2854,6 @@ hibernate_machine_init(void)
 	panic("Hibernate restore error %x", err);
 
     gIOHibernateCurrentHeader->actualImage2Sum = sum;
-    gIOHibernateCompression = gIOHibernateCurrentHeader->compression;
 
     if (vars->fileVars->io)
         (void) IOHibernatePollerIODone(vars->fileVars, false);
@@ -2985,51 +2889,3 @@ hibernate_machine_init(void)
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
-void IOHibernateSystemRestart(void)
-{
-    static uint8_t    noteStore[32] __attribute__((aligned(32)));
-    IORegistryEntry * regEntry;
-    const OSSymbol *  sym;
-    OSData *          noteProp;
-    OSData *          data;
-    uintptr_t *       smcVars;
-    uint8_t *         smcBytes;
-    size_t            len;
-    addr64_t          element;
-
-    data = OSDynamicCast(OSData, IOService::getPMRootDomain()->getProperty(kIOHibernateSMCVariablesKey));
-    if (!data) return;
-
-    smcVars = (typeof(smcVars)) data->getBytesNoCopy();
-    smcBytes = (typeof(smcBytes)) smcVars[1];
-    len = smcVars[0];
-    if (len > sizeof(noteStore)) len = sizeof(noteStore);
-    noteProp = OSData::withCapacity(3 * sizeof(element));
-    if (!noteProp) return;
-    element = len;
-    noteProp->appendBytes(&element, sizeof(element));
-    element = crc32(0, smcBytes, len);
-    noteProp->appendBytes(&element, sizeof(element));
-
-    bcopy(smcBytes, noteStore, len);
-    element = (addr64_t) &noteStore[0];
-    element = (element & page_mask) | ptoa_64(pmap_find_phys(kernel_pmap, element));
-    noteProp->appendBytes(&element, sizeof(element));
-
-    if (!gIOOptionsEntry)
-    {
-	regEntry = IORegistryEntry::fromPath("/options", gIODTPlane);
-	gIOOptionsEntry = OSDynamicCast(IODTNVRAM, regEntry);
-	if (regEntry && !gIOOptionsEntry)
-	    regEntry->release();
-    }
-
-    sym = OSSymbol::withCStringNoCopy(kIOHibernateBootNoteKey);
-    if (gIOOptionsEntry && sym) gIOOptionsEntry->setProperty(sym, noteProp);
-    if (noteProp)               noteProp->release();
-    if (sym)                    sym->release();
-}
-
-
-

@@ -201,6 +201,7 @@ int serial_init( void )
 void serial_putc( char c )
 {
     uart_putc(c);
+    if (c == '\n') uart_putc('\r');
 }
 
 int serial_getc( void )

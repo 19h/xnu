@@ -121,8 +121,7 @@ int	vm_object_pagein_throttle = 16;
  * delay of HARD_THROTTLE_DELAY microseconds before being allowed to try the page fault again.
  */
 
-extern boolean_t thread_is_io_throttled(void);
-extern void throttle_lowpri_io(int);
+boolean_t thread_is_io_throttled(void);
 
 uint64_t vm_hard_throttle_threshold;
 
@@ -1016,7 +1015,6 @@ vm_fault_page(
 					*top_page = first_m;
 					if (type_of_fault)
 						*type_of_fault = DBG_GUARD_FAULT;
-					thread_interrupt_level(interruptible_state);
 					return VM_FAULT_SUCCESS;
 				} else {
 					/*
@@ -4043,8 +4041,6 @@ handle_copy_delay:
 	kr = KERN_SUCCESS;
 done:
 	thread_interrupt_level(interruptible_state);
-
-	throttle_lowpri_io(TRUE);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
 			      (MACHDBG_CODE(DBG_MACH_VM, 2)) | DBG_FUNC_END,

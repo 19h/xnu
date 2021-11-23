@@ -217,6 +217,10 @@ machine_startup(void)
 
 	machine_conf();
 
+#if NOTYET
+	ml_thrm_init();		/* Start thermal monitoring on this processor */
+#endif
+
 	/*
 	 * Start the system.
 	 */
@@ -885,6 +889,12 @@ Debugger(
 			}
                     }
                 }
+
+		/* If the user won't be able to read the dialog,
+		 * don't bother trying to show it
+		 */
+		if (!PE_reboot_on_panic())
+			draw_panic_dialog();
 
 		if (!panicDebugging) {
 			unsigned cnum;

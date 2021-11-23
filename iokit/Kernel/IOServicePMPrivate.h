@@ -229,22 +229,18 @@ private:
     // PM state lock.
     IOLock *                PMLock;
 
-    unsigned int            InitialPowerChange          :1;
-    unsigned int            InitialSetPowerState        :1;
-    unsigned int            DeviceOverrideEnabled       :1;
-    unsigned int            DoNotPowerDown              :1;
-    unsigned int            ParentsKnowState            :1;
-    unsigned int            StrictTreeOrder             :1;
-    unsigned int            IdleTimerStopped            :1;
-    unsigned int            AdjustPowerScheduled        :1;
-    
-    unsigned int            IsPreChange                 :1;
-    unsigned int            DriverCallBusy              :1;
-    unsigned int            PCDFunctionOverride         :1;
-    unsigned int            IdleTimerIgnored            :1;
-    unsigned int            HasAdvisoryDesire           :1;
-    unsigned int            AdvisoryTickleUsed          :1;
-    unsigned int            ResetPowerStateOnWake       :1;
+    unsigned int            InitialPowerChange:1;
+    unsigned int            InitialSetPowerState:1;
+    unsigned int            DeviceOverrideEnabled:1;
+    unsigned int            DoNotPowerDown:1;
+    unsigned int            ParentsKnowState:1;
+    unsigned int            StrictTreeOrder:1;
+    unsigned int            IdleTimerStopped:1;
+    unsigned int            AdjustPowerScheduled:1;
+    unsigned int            IsPreChange:1;
+    unsigned int            DriverCallBusy:1;
+    unsigned int            PCDFunctionOverride:1;
+    unsigned int            IdleTimerIgnored:1;
 
     // Time of last device activity.
     AbsoluteTime            DeviceActiveTimestamp;
@@ -303,6 +299,7 @@ private:
 
     AbsoluteTime            DriverCallStartTime;
     IOPMPowerFlags          CurrentCapabilityFlags;
+    long                    ActivityTicklePowerState;
     unsigned long           CurrentPowerConsumption;
     IOPMPowerStateIndex     TempClampPowerState;
     OSArray *               NotifyChildArray;
@@ -315,14 +312,10 @@ private:
     uint32_t                OutOfBandMessage;
     uint32_t                TempClampCount;
     uint32_t                OverrideMaxPowerState;
-    uint32_t                DeviceUsablePowerState;
 
     // Protected by ActivityLock - BEGIN
-    int                     ActivityTicklePowerState;
-    int                     AdvisoryTicklePowerState;
     uint32_t                ActivityTickleCount;
-    uint32_t                DeviceWasActive     : 1;
-    uint32_t                AdvisoryTickled     : 1;
+    uint32_t                DeviceWasActive;
     // Protected by ActivityLock - END
 
     uint32_t                WaitReason;
@@ -349,10 +342,6 @@ private:
     // Serialize IOServicePM state for debug output.
     IOReturn gatedSerialize( OSSerialize * s );
     virtual bool serialize( OSSerialize * s ) const;
-    
-    // PM log and trace
-    void pmPrint( uint32_t event, uintptr_t param1, uintptr_t param2 ) const;
-    void pmTrace( uint32_t event, uintptr_t param1, uintptr_t param2 ) const;
 };
 
 #define fOwner                      pwrMgt->Owner
@@ -375,6 +364,7 @@ private:
 #define fInitialPowerChange         pwrMgt->InitialPowerChange
 #define fInitialSetPowerState       pwrMgt->InitialSetPowerState
 #define fDeviceOverrideEnabled      pwrMgt->DeviceOverrideEnabled
+#define fDeviceWasActive            pwrMgt->DeviceWasActive
 #define fDoNotPowerDown             pwrMgt->DoNotPowerDown
 #define fParentsKnowState           pwrMgt->ParentsKnowState
 #define fStrictTreeOrder            pwrMgt->StrictTreeOrder
@@ -384,9 +374,6 @@ private:
 #define fDriverCallBusy             pwrMgt->DriverCallBusy
 #define fPCDFunctionOverride        pwrMgt->PCDFunctionOverride
 #define fIdleTimerIgnored           pwrMgt->IdleTimerIgnored
-#define fHasAdvisoryDesire          pwrMgt->HasAdvisoryDesire
-#define fAdvisoryTickleUsed         pwrMgt->AdvisoryTickleUsed
-#define fResetPowerStateOnWake      pwrMgt->ResetPowerStateOnWake
 #define fDeviceActiveTimestamp      pwrMgt->DeviceActiveTimestamp
 #define fActivityLock               pwrMgt->ActivityLock
 #define fIdleTimerPeriod            pwrMgt->IdleTimerPeriod
@@ -409,6 +396,7 @@ private:
 #define fOutOfBandParameter         pwrMgt->OutOfBandParameter
 #define fDriverCallStartTime        pwrMgt->DriverCallStartTime
 #define fCurrentCapabilityFlags     pwrMgt->CurrentCapabilityFlags
+#define fActivityTicklePowerState   pwrMgt->ActivityTicklePowerState
 #define fCurrentPowerConsumption    pwrMgt->CurrentPowerConsumption
 #define fTempClampPowerState        pwrMgt->TempClampPowerState
 #define fNotifyChildArray           pwrMgt->NotifyChildArray
@@ -421,12 +409,7 @@ private:
 #define fOutOfBandMessage           pwrMgt->OutOfBandMessage
 #define fTempClampCount             pwrMgt->TempClampCount
 #define fOverrideMaxPowerState      pwrMgt->OverrideMaxPowerState
-#define fDeviceUsablePowerState     pwrMgt->DeviceUsablePowerState
-#define fActivityTicklePowerState   pwrMgt->ActivityTicklePowerState
-#define fAdvisoryTicklePowerState   pwrMgt->AdvisoryTicklePowerState
 #define fActivityTickleCount        pwrMgt->ActivityTickleCount
-#define fDeviceWasActive            pwrMgt->DeviceWasActive
-#define fAdvisoryTickled            pwrMgt->AdvisoryTickled
 #define fWaitReason                 pwrMgt->WaitReason
 #define fSavedMachineState          pwrMgt->SavedMachineState
 #define fRootDomainState            pwrMgt->RootDomainState
@@ -467,17 +450,6 @@ the ack timer is ticking every tenth of a second.
 #define kIOPMSyncTellPowerDown      0x0400  // send the ask/will power off messages
 #define kIOPMSyncCancelPowerDown    0x0800  // sleep cancel for maintenance wake
 #define kIOPMInitialPowerChange     0x1000  // set for initial power change
-#define kIOPMRootChangeUp           0x2000  // Root power domain change up
-#define kIOPMRootChangeDown         0x4000  // Root power domain change down
-
-#define kIOPMRootBroadcastFlags     (kIOPMSynchronize  | \
-                                     kIOPMRootChangeUp | kIOPMRootChangeDown)
-
-// Activity tickle request flags
-#define kTickleTypePowerDrop        0x01
-#define kTickleTypePowerRise        0x02
-#define kTickleTypeActivity         0x04
-#define kTickleTypeAdvisory         0x08
 
 enum {
     kDriverCallInformPreChange,

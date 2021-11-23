@@ -2289,10 +2289,8 @@ ifnet_poll_thread_fn(void *v, wait_result_t w)
 			 * else hold an IO refcnt to prevent the interface
 			 * from being detached (will be released below.)
 			 */
-			if (!ifnet_is_attached(ifp, 1)) {
-				lck_mtx_lock_spin(&ifp->if_poll_lock);
+			if (!ifnet_is_attached(ifp, 1))
 				break;
-			}
 
 			m_lim = (if_rxpoll_max != 0) ? if_rxpoll_max :
 			    MAX((qlimit(&inp->rcvq_pkts)),
@@ -5797,7 +5795,7 @@ ifnet_fc_thread_cont(int err)
 {
 #pragma unused(err)
 	struct sfb_bin_fcentry *fce;
-	struct inpcb *inp;
+	struct inp_fc_entry *infc;
 
 	for (;;) {
 		lck_mtx_assert(&ifnet_fclist_lock, LCK_MTX_ASSERT_OWNED);
@@ -5813,14 +5811,17 @@ ifnet_fc_thread_cont(int err)
 		SLIST_NEXT(fce, fce_link) = NULL;
 		lck_mtx_unlock(&ifnet_fclist_lock);
 
-		inp = inp_fc_getinp(fce->fce_flowhash, 0);
-		if (inp == NULL) {
+		infc = inp_fc_getinp(fce->fce_flowhash);
+		if (infc == NULL) {
 			ifnet_fce_free(fce);
 			lck_mtx_lock_spin(&ifnet_fclist_lock);
 			continue;
 		}
-		inp_fc_feedback(inp);
+		VERIFY(infc->infc_inp != NULL);
 
+		inp_fc_feedback(infc->infc_inp);
+
+		inp_fc_entry_free(infc);
 		ifnet_fce_free(fce);
 		lck_mtx_lock_spin(&ifnet_fclist_lock);
 	}

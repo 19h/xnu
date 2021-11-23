@@ -248,15 +248,6 @@ boolean_t ml_at_interrupt_context(void)
 	return get_interrupt_level() != 0;
 }
 
-void ml_get_power_state(boolean_t *icp, boolean_t *pidlep) {
-	*icp = (get_interrupt_level() != 0);
-	/* These will be technically inaccurate for interrupts that occur
-	 * successively within a single "idle exit" event, but shouldn't
-	 * matter statistically.
-	 */
-	*pidlep = (current_cpu_datap()->lcpu.package->num_idle == topoParms.nLThreadsPerPackage);
-}
-
 /* Generate a fake interrupt */
 void ml_cause_interrupt(void)
 {
@@ -567,9 +558,9 @@ ml_init_lock_timeout(void)
  * instead of spinning for clock_delay_until().
  */
 void
-ml_init_delay_spin_threshold(int threshold_us)
+ml_init_delay_spin_threshold(void)
 {
-	nanoseconds_to_absolutetime(threshold_us * NSEC_PER_USEC, &delay_spin_threshold);
+	nanoseconds_to_absolutetime(10ULL * NSEC_PER_USEC, &delay_spin_threshold);
 }
 
 boolean_t
@@ -579,7 +570,7 @@ ml_delay_should_spin(uint64_t interval)
 }
 
 /*
- * This is called from the machine-independent layer
+ * This is called from the machine-independent routine cpu_up()
  * to perform machine-dependent info updates. Defer to cpu_thread_init().
  */
 void
@@ -589,14 +580,12 @@ ml_cpu_up(void)
 }
 
 /*
- * This is called from the machine-independent layer
+ * This is called from the machine-independent routine cpu_down()
  * to perform machine-dependent info updates.
  */
 void
 ml_cpu_down(void)
 {
-	i386_deactivate_cpu();
-
 	return;
 }
 

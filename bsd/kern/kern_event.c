@@ -471,6 +471,7 @@ static int
 filt_procattach(struct knote *kn)
 {
 	struct proc *p;
+	pid_t selfpid = (pid_t)0;
 
 	assert(PID_MAX < NOTE_PDATAMASK);
 	
@@ -482,22 +483,15 @@ filt_procattach(struct knote *kn)
 		return (ESRCH);
 	}
 
-	const int NoteExitStatusBits = NOTE_EXIT | NOTE_EXITSTATUS;
-
-	if ((kn->kn_sfflags & NoteExitStatusBits) == NoteExitStatusBits)
-		do {
-			pid_t selfpid = proc_selfpid();
-
-			if (p->p_ppid == selfpid)
-				break;	/* parent => ok */
-
-			if ((p->p_lflag & P_LTRACED) != 0 &&
-			    (p->p_oppid == selfpid))
-				break;	/* parent-in-waiting => ok */
-
+	if ((kn->kn_sfflags & NOTE_EXIT) != 0) {
+		selfpid = proc_selfpid();
+		/* check for validity of NOTE_EXISTATUS */
+		if (((kn->kn_sfflags & NOTE_EXITSTATUS) != 0) && 
+			((p->p_ppid != selfpid) && (((p->p_lflag & P_LTRACED) == 0) || (p->p_oppid != selfpid)))) {
 			proc_rele(p);
-			return (EACCES);
-		} while (0);
+			return(EACCES);
+		}
+	}
 
 	proc_klist_lock();
 
@@ -547,24 +541,6 @@ filt_proc(struct knote *kn, long hint)
 		 * mask off extra data
 		 */
 		event = (u_int)hint & NOTE_PCTRLMASK;
-
-		/*
-		 * termination lifecycle events can happen while a debugger
-		 * has reparented a process, in which case notifications
-		 * should be quashed except to the tracing parent. When
-		 * the debugger reaps the child (either via wait4(2) or
-		 * process exit), the child will be reparented to the original
-		 * parent and these knotes re-fired.
-		 */
-		if (event & NOTE_EXIT) {
-			if ((kn->kn_ptr.p_proc->p_oppid != 0)
-				&& (kn->kn_kq->kq_p->p_pid != kn->kn_ptr.p_proc->p_ppid)) {
-				/*
-				 * This knote is not for the current ptrace(2) parent, ignore.
-				 */
-				return 0;
-			}
-		}					
 
 		/*
 		 * if the user is interested in this event, record it.

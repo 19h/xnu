@@ -49,21 +49,19 @@
 #include <kern/sched_prim.h>
 #include <i386/lapic.h>
 #include <i386/pal_routines.h>
+
 #include <sys/kdebug.h>
 
 extern int disableConsoleOutput;
 
 #define DELAY_UNSET		0xFFFFFFFFFFFFFFFFULL
 
-uint64_t cpu_itime_bins[CPU_ITIME_BINS] = {16* NSEC_PER_USEC, 32* NSEC_PER_USEC, 64* NSEC_PER_USEC, 128* NSEC_PER_USEC, 256* NSEC_PER_USEC, 512* NSEC_PER_USEC, 1024* NSEC_PER_USEC, 2048* NSEC_PER_USEC, 4096* NSEC_PER_USEC, 8192* NSEC_PER_USEC, 16384* NSEC_PER_USEC, 32768* NSEC_PER_USEC};
-uint64_t *cpu_rtime_bins = &cpu_itime_bins[0];
-
 /*
  * The following is set when the KEXT loads and initializes.
  */
 pmDispatch_t	*pmDispatch	= NULL;
 
-uint32_t		pmInitDone		= 0;
+static uint32_t		pmInitDone		= 0;
 static boolean_t	earlyTopology		= FALSE;
 static uint64_t		earlyMaxBusDelay	= DELAY_UNSET;
 static uint64_t		earlyMaxIntDelay	= DELAY_UNSET;
@@ -78,16 +76,6 @@ power_management_init(void)
 	(*pmDispatch->cstateInit)();
 }
 
-static inline void machine_classify_interval(uint64_t interval, uint64_t *bins, uint64_t *binvals, uint32_t nbins) {
-	uint32_t i;
- 	for (i = 0; i < nbins; i++) {
- 		if (interval < binvals[i]) {
- 			bins[i]++;
- 			break;
- 		}
- 	}
-}
-
 /*
  * Called when the CPU is idle.  It calls into the power management kext
  * to determine the best way to idle the CPU.
@@ -95,77 +83,59 @@ static inline void machine_classify_interval(uint64_t interval, uint64_t *bins, 
 void
 machine_idle(void)
 {
-	cpu_data_t		*my_cpu		= current_cpu_datap();
-	uint64_t		ctime, rtime, itime;
+    cpu_data_t		*my_cpu		= current_cpu_datap();
 
-	if (my_cpu == NULL)
-		goto out;
+    if (my_cpu == NULL)
+	goto out;
 
-	ctime = mach_absolute_time();
+    my_cpu->lcpu.state = LCPU_IDLE;
+    DBGLOG(cpu_handle, cpu_number(), MP_IDLE);
+    MARK_CPU_IDLE(cpu_number());
 
-	my_cpu->lcpu.state = LCPU_IDLE;
-	DBGLOG(cpu_handle, cpu_number(), MP_IDLE);
-	MARK_CPU_IDLE(cpu_number());
-
-	rtime = ctime - my_cpu->cpu_ixtime;
-
-	my_cpu->cpu_rtime_total += rtime;
-	machine_classify_interval(rtime, &my_cpu->cpu_rtimes[0], &cpu_rtime_bins[0], CPU_RTIME_BINS);
-
-	if (pmInitDone) {
-		/*
-		 * Handle case where ml_set_maxbusdelay() or ml_set_maxintdelay()
-		 * were called prior to the CPU PM kext being registered.  We do
-		 * this here since we know at this point the values will be first
-		 * used since idle is where the decisions using these values is made.
-		 */
-		if (earlyMaxBusDelay != DELAY_UNSET)
-			ml_set_maxbusdelay((uint32_t)(earlyMaxBusDelay & 0xFFFFFFFF));
-
-		if (earlyMaxIntDelay != DELAY_UNSET)
-			ml_set_maxintdelay(earlyMaxIntDelay);
-	}
-
-	if (pmInitDone
-	    && pmDispatch != NULL
-	    && pmDispatch->MachineIdle != NULL)
-		(*pmDispatch->MachineIdle)(0x7FFFFFFFFFFFFFFFULL);
-	else {
-		/*
-		 * If no power management, re-enable interrupts and halt.
-		 * This will keep the CPU from spinning through the scheduler
-		 * and will allow at least some minimal power savings (but it
-		 * cause problems in some MP configurations w.r.t. the APIC
-		 * stopping during a GV3 transition).
-		 */
-		pal_hlt();
-
-		/* Once woken, re-disable interrupts. */
-		pal_cli();
-	}
-
+    if (pmInitDone) {
 	/*
-	 * Mark the CPU as running again.
+	 * Handle case where ml_set_maxbusdelay() or ml_set_maxintdelay()
+	 * were called prior to the CPU PM kext being registered.  We do
+	 * this here since we know at this point the values will be first
+	 * used since idle is where the decisions using these values is made.
 	 */
-	MARK_CPU_ACTIVE(cpu_number());
-	DBGLOG(cpu_handle, cpu_number(), MP_UNIDLE);
+	if (earlyMaxBusDelay != DELAY_UNSET)
+	    ml_set_maxbusdelay((uint32_t)(earlyMaxBusDelay & 0xFFFFFFFF));
 
-	uint64_t ixtime = my_cpu->cpu_ixtime = mach_absolute_time();
-	my_cpu->cpu_idle_exits++;
+	if (earlyMaxIntDelay != DELAY_UNSET)
+	    ml_set_maxintdelay(earlyMaxIntDelay);
+    }
 
-	itime = ixtime - ctime;
-
-	my_cpu->lcpu.state = LCPU_RUN;
-
-	machine_classify_interval(itime, &my_cpu->cpu_itimes[0], &cpu_itime_bins[0], CPU_ITIME_BINS);
-	my_cpu->cpu_itime_total += itime;
-
-
+    if (pmInitDone
+	&& pmDispatch != NULL
+	&& pmDispatch->MachineIdle != NULL)
+	(*pmDispatch->MachineIdle)(0x7FFFFFFFFFFFFFFFULL);
+    else {
 	/*
-	 * Re-enable interrupts.
+	 * If no power management, re-enable interrupts and halt.
+	 * This will keep the CPU from spinning through the scheduler
+	 * and will allow at least some minimal power savings (but it
+	 * cause problems in some MP configurations w.r.t. the APIC
+	 * stopping during a GV3 transition).
 	 */
-out:
-	pal_sti();
+	pal_hlt();
+
+	/* Once woken, re-disable interrupts. */
+	pal_cli();
+    }
+
+    /*
+     * Mark the CPU as running again.
+     */
+    MARK_CPU_ACTIVE(cpu_number());
+    DBGLOG(cpu_handle, cpu_number(), MP_UNIDLE);
+    my_cpu->lcpu.state = LCPU_RUN;
+
+    /*
+     * Re-enable interrupts.
+     */
+  out:
+    pal_sti();
 }
 
 /*
@@ -189,7 +159,6 @@ pmCPUHalt(uint32_t reason)
 	break;
 
     case PM_HALT_NORMAL:
-    case PM_HALT_SLEEP:
     default:
         pal_cli();
 
@@ -202,14 +171,11 @@ pmCPUHalt(uint32_t reason)
 	    (*pmDispatch->pmCPUHalt)();
 
 	    /*
-	     * We've exited halt, so get the CPU schedulable again.
-	     * - by calling the fast init routine for a slave, or
-	     * - by returning if we're the master processor.
+	     * We've exited halt, so get the the CPU schedulable again.
 	     */
-	    if (cpup->cpu_number != master_cpu) {
-		i386_init_slave_fast();
-		panic("init_slave_fast returned");
-	    }
+	    i386_init_slave_fast();
+
+	    panic("init_slave_fast returned");
 	} else
 	{
 	    /*
@@ -250,13 +216,13 @@ pmInitComplete(void)
     pmInitDone = 1;
 }
 
-x86_lcpu_t *
+static x86_lcpu_t *
 pmGetLogicalCPU(int cpu)
 {
     return(cpu_to_lcpu(cpu));
 }
 
-x86_lcpu_t *
+static x86_lcpu_t *
 pmGetMyLogicalCPU(void)
 {
     cpu_data_t	*cpup	= current_cpu_datap();
@@ -396,7 +362,7 @@ pmCPUExitHalt(int cpu)
 kern_return_t
 pmCPUExitHaltToOff(int cpu)
 {
-    kern_return_t	rc	= KERN_SUCCESS;
+    kern_return_t	rc	= KERN_INVALID_ARGUMENT;
 
     if (pmInitDone
 	&& pmDispatch != NULL
@@ -751,7 +717,7 @@ pmGetSavedRunCount(void)
 /*
  * Returns the root of the package tree.
  */
-x86_pkg_t *
+static x86_pkg_t *
 pmGetPkgRoot(void)
 {
     return(x86_pkgs);
@@ -763,7 +729,7 @@ pmCPUGetHibernate(int cpu)
     return(cpu_datap(cpu)->cpu_hibernate);
 }
 
-processor_t
+static processor_t
 pmLCPUtoProcessor(int lcpu)
 {
     return(cpu_datap(lcpu)->cpu_processor);
@@ -807,7 +773,7 @@ pmGetNanotimeInfo(pm_rtc_nanotime_t *rtc_nanotime)
 		&& rtc_nanotime->generation != pal_rtc_nanotime_info.generation);
 }
 
-uint32_t
+static uint32_t
 pmTimerQueueMigrate(int target_cpu)
 {
     /* Call the etimer code to do this. */
@@ -860,10 +826,6 @@ pmKextRegister(uint32_t version, pmDispatch_t *cpuFuncs,
     }
 
     if (cpuFuncs != NULL) {
-        if (pmDispatch) {
-            panic("Attempt to re-register power management interface--AICPM present in xcpm mode? %p->%p", pmDispatch, cpuFuncs);
-        }
-
 	pmDispatch = cpuFuncs;
 
 	if (earlyTopology
@@ -927,18 +889,4 @@ pmsBuild(__unused pmsDef *pd, __unused uint32_t pdsize,
 	 __unused uint32_t platformData, __unused pmsQueryFunc_t queryFunc)
 {
     return(KERN_SUCCESS);
-}
-
-void machine_track_platform_idle(boolean_t entry) {
-	cpu_data_t		*my_cpu		= current_cpu_datap();
-
-	if (entry) {
-		(void)__sync_fetch_and_add(&my_cpu->lcpu.package->num_idle, 1);
-	}
- 	else {
- 		uint32_t nidle = __sync_fetch_and_sub(&my_cpu->lcpu.package->num_idle, 1);
- 		if (nidle == topoParms.nLThreadsPerPackage) {
- 			my_cpu->lcpu.package->package_idle_exits++;
- 		}
- 	}
 }

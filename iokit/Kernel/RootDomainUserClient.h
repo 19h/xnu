@@ -67,8 +67,6 @@ private:
                                                 
     IOReturn            secureSetUserAssertionLevels(uint32_t    assertionBitfield);
 
-    IOReturn            secureGetSystemSleepType( uint32_t *sleepType );
-
 public:
 
     virtual IOReturn clientClose( void );

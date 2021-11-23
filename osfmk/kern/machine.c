@@ -237,7 +237,7 @@ processor_shutdown(
 }
 
 /*
- * Called with interrupts disabled.
+ * Called at splsched.
  */
 void
 processor_doshutdown(
@@ -245,7 +245,6 @@ processor_doshutdown(
 {
 	thread_t			old_thread, self = current_thread();
 	processor_t			prev;
-	processor_set_t			pset;
 
 	/*
 	 *	Get onto the processor to shutdown
@@ -253,28 +252,17 @@ processor_doshutdown(
 	prev = thread_bind(processor);
 	thread_block(THREAD_CONTINUE_NULL);
 
-	assert(processor->state == PROCESSOR_SHUTDOWN);
-
-	ml_cpu_down();
-
 #if HIBERNATION
-	if (processor_avail_count < 2) {
+	if (processor_avail_count < 2)
 		hibernate_vm_lock();
-		hibernate_vm_unlock();
-	}
 #endif
 
-	pset = processor->processor_set;
-	pset_lock(pset);
-	processor->state = PROCESSOR_OFF_LINE;
-	if (--pset->online_processor_count == 0) {
-		pset_pri_init_hint(pset, PROCESSOR_NULL);
-		pset_count_init_hint(pset, PROCESSOR_NULL);
-	}
-	(void)hw_atomic_sub(&processor_avail_count, 1);
-	commpage_update_active_cpus();
-	SCHED(processor_queue_shutdown)(processor);
-	/* pset lock dropped */
+	assert(processor->state == PROCESSOR_SHUTDOWN);
+
+#if HIBERNATION
+	if (processor_avail_count < 2)
+		hibernate_vm_unlock();
+#endif
 
 	/*
 	 *	Continue processor shutdown in shutdown context.
@@ -286,7 +274,7 @@ processor_doshutdown(
 }
 
 /*
- *Complete the shutdown and place the processor offline.
+ *	Complete the shutdown and place the processor offline.
  *
  *	Called at splsched in the shutdown context.
  */
@@ -295,6 +283,7 @@ processor_offline(
 	processor_t			processor)
 {
 	thread_t			new_thread, old_thread = processor->active_thread;
+	processor_set_t		pset;
 
 	new_thread = processor->idle_thread;
 	processor->active_thread = new_thread;
@@ -311,6 +300,20 @@ processor_offline(
 	thread_dispatch(old_thread, new_thread);
 
 	PMAP_DEACTIVATE_KERNEL(processor->cpu_id);
+
+	pset = processor->processor_set;
+	pset_lock(pset);
+	processor->state = PROCESSOR_OFF_LINE;
+	if (--pset->online_processor_count == 0) {
+		pset_pri_init_hint(pset, PROCESSOR_NULL);
+		pset_count_init_hint(pset, PROCESSOR_NULL);
+	}
+	(void)hw_atomic_sub(&processor_avail_count, 1);
+	commpage_update_active_cpus();
+	SCHED(processor_queue_shutdown)(processor);
+	/* pset lock dropped */
+
+	ml_cpu_down();
 
 	cpu_sleep();
 	panic("zombie processor");

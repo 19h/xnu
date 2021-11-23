@@ -46,7 +46,6 @@
 typedef void (*acpi_sleep_callback)(void * refcon);
 extern vm_offset_t acpi_install_wake_handler(void);
 extern void	   acpi_sleep_kernel(acpi_sleep_callback func, void * refcon);
-extern void	   acpi_idle_kernel(acpi_sleep_callback func, void * refcon);
 void install_real_mode_bootstrap(void *prot_entry);
 #endif	/* ASSEMBLER */
 
