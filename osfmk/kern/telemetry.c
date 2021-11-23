@@ -73,7 +73,6 @@ void telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags);
 #define TELEMETRY_MAX_BUFFER_SIZE (64*1024)
 
 #define	TELEMETRY_DEFAULT_NOTIFY_LEEWAY (4*1024) // Userland gets 4k of leeway to collect data after notification
-#define	TELEMETRY_MAX_UUID_COUNT (128) // Max of 128 non-shared-cache UUIDs to log for symbolication
 
 uint32_t 			telemetry_sample_rate = 0;
 volatile boolean_t 	telemetry_needs_record = FALSE;
@@ -422,14 +421,6 @@ void telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags)
 		uuid_info_count = 0;
 	}
 
-	/*
-	 * Don't copy in an unbounded amount of memory. The main binary and interesting
-	 * non-shared-cache libraries should be in the first few images.
-	 */
-	if (uuid_info_count > TELEMETRY_MAX_UUID_COUNT) {
-		uuid_info_count = TELEMETRY_MAX_UUID_COUNT;
-	}
-
 	uint32_t uuid_info_size = (uint32_t)(task_has_64BitAddr(thread->task) ? sizeof(struct user64_dyld_uuid_info) : sizeof(struct user32_dyld_uuid_info));
 	uint32_t uuid_info_array_size = uuid_info_count * uuid_info_size;
 	char	 *uuid_info_array = NULL;
@@ -492,10 +483,6 @@ copytobuffer:
 		 */
 		telemetry_buffer_end_point = current_record_start;
 		telemetry_buffer_current_position = 0;
-		if (current_record_start == 0) {
-			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
-			goto cancel_sample;
-		}
 		goto copytobuffer;
 	}
 
@@ -512,10 +499,6 @@ copytobuffer:
 	if ((telemetry_buffer_size - telemetry_buffer_current_position) < sizeof(struct task_snapshot)) {
 		telemetry_buffer_end_point = current_record_start;
 		telemetry_buffer_current_position = 0;
-		if (current_record_start == 0) {
-			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
-			goto cancel_sample;
-		}
 		goto copytobuffer;
 	}
 
@@ -584,10 +567,6 @@ copytobuffer:
 	if ((telemetry_buffer_size - telemetry_buffer_current_position) < uuid_info_array_size) {
 		telemetry_buffer_end_point = current_record_start;
 		telemetry_buffer_current_position = 0;
-		if (current_record_start == 0) {
-			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
-			goto cancel_sample;
-		}
 		goto copytobuffer;
 	}
 
@@ -609,10 +588,6 @@ copytobuffer:
 		/* wrap and overwrite */
 		telemetry_buffer_end_point = current_record_start;		
 		telemetry_buffer_current_position = 0;
-		if (current_record_start == 0) {
-			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
-			goto cancel_sample;
-		}
 		goto copytobuffer;
 	}
 
@@ -652,10 +627,6 @@ copytobuffer:
 			/* wrap and overwrite */
 			telemetry_buffer_end_point = current_record_start;		
 			telemetry_buffer_current_position = 0;
-			if (current_record_start == 0) {
-				/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
-				goto cancel_sample;
-			}
 			goto copytobuffer;
 		}
 
@@ -680,10 +651,6 @@ copytobuffer:
 	if ((telemetry_buffer_size - telemetry_buffer_current_position)/framesize < btcount) {
 		telemetry_buffer_end_point = current_record_start;
 		telemetry_buffer_current_position = 0;
-		if (current_record_start == 0) {
-			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
-			goto cancel_sample;
-		}
 		goto copytobuffer;
 	}
 
@@ -711,8 +678,6 @@ copytobuffer:
 	if (telemetry_bytes_since_last_mark > telemetry_buffer_notify_at) {
 		notify = TRUE;
 	}
-
-cancel_sample:
 
 	TELEMETRY_UNLOCK();
 

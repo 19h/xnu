@@ -160,7 +160,7 @@ hibernate_teardown(hibernate_page_list_t * page_list,
 		    need_to_unlock_decompressor = FALSE;
 		    vm_decompressor_unlock();
 	    }
-	    vm_compressor_delay_trim();
+	    vm_compressor_do_warmup();
     }
     return (KERN_SUCCESS);
 }

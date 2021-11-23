@@ -156,8 +156,8 @@ enum {
     kStimulusDarkWakeReentry,           // 7
     kStimulusDarkWakeEvaluate,          // 8
     kStimulusNoIdleSleepPreventers,     // 9
-    kStimulusEnterUserActiveState,      // 10
-    kStimulusLeaveUserActiveState       // 11
+    kStimulusUserIsActive,              // 10
+    kStimulusUserIsInactive             // 11
 };
 
 extern "C" {
@@ -955,8 +955,7 @@ bool IOPMrootDomain::start( IOService * nub )
     acAdaptorConnected = true;
     clamshellSleepDisabled = false;
 
-    // Initialize to user active.
-    // Will never transition to user inactive w/o wrangler.
+    // User active state at boot
     fullWakeReason = kFullWakeReasonLocalUser;
     userIsActive = userWasActive = true;
     setProperty(gIOPMUserIsActiveKey, kOSBooleanTrue);
@@ -2656,36 +2655,6 @@ void IOPMrootDomain::askChangeDownDone(
 }
 
 //******************************************************************************
-// systemDidNotSleep
-//
-// Work common to both canceled or aborted sleep.
-//******************************************************************************
-
-void IOPMrootDomain::systemDidNotSleep( void )
-{
-    if (!wrangler)
-    {
-        if (idleSeconds)
-        {
-            // stay awake for at least idleSeconds
-            startIdleSleepTimer(idleSeconds);
-        }
-    }
-    else
-    {
-        if (sleepSlider && !userIsActive)
-        {
-            // Manually start the idle sleep timer besides waiting for
-            // the user to become inactive.
-            startIdleSleepTimer( kIdleSleepRetryInterval );
-        }
-    }
-
-    preventTransitionToUserActive(false);
-    IOService::setAdvisoryTickleEnable( true );
-}
-
-//******************************************************************************
 // tellNoChangeDown
 //
 // Notify registered applications and kernel clients that we are not dropping
@@ -2705,7 +2674,24 @@ void IOPMrootDomain::tellNoChangeDown( unsigned long stateNum )
 	// Sleep canceled, clear the sleep trace point.
     tracePoint(kIOPMTracePointSystemUp);
 
-    systemDidNotSleep();
+    if (!wrangler)
+    {
+        if (idleSeconds)
+        {
+            // stay awake for at least idleSeconds
+            startIdleSleepTimer(idleSeconds);
+        }
+    }
+    else if (sleepSlider && !userIsActive)
+    {
+        // Display wrangler is already asleep, it won't trigger the next
+        // idle sleep attempt. Schedule a future idle sleep attempt, and
+        // also push out the next idle sleep attempt.
+
+        startIdleSleepTimer( kIdleSleepRetryInterval );
+    }
+    
+    IOService::setAdvisoryTickleEnable( true );
     return tellClients( kIOMessageSystemWillNotSleep );
 }
 
@@ -2741,9 +2727,18 @@ void IOPMrootDomain::tellChangeUp( unsigned long stateNum )
         if (getPowerState() == ON_STATE)
         {
             // this is a quick wake from aborted sleep
-            systemDidNotSleep();
+            ignoreIdleSleepTimer = false;
+            if (idleSeconds && !wrangler)
+            {
+                // stay awake for at least idleSeconds
+                startIdleSleepTimer(idleSeconds);
+            }
+            IOService::setAdvisoryTickleEnable( true );
             tellClients( kIOMessageSystemWillPowerOn );
         }
+
+        tracePoint( kIOPMTracePointWakeApplications );
+
 
 #if defined(__i386__) || defined(__x86_64__)
         if (spindumpDesc)
@@ -2754,7 +2749,6 @@ void IOPMrootDomain::tellChangeUp( unsigned long stateNum )
         }
 #endif
 
-        tracePoint( kIOPMTracePointWakeApplications );
         tellClients( kIOMessageSystemHasPoweredOn );
     }
 }
@@ -4728,14 +4722,8 @@ void IOPMrootDomain::handleOurPowerChangeStart(
             *inOutChangeFlags |= kIOPMSyncTellPowerDown;
             _systemMessageClientMask = kSystemMessageClientPowerd |
                                        kSystemMessageClientLegacyApp;
-
-            // rdar://15971327
-            // Prevent user active transitions before notifying clients
-            // that system will sleep.
-            preventTransitionToUserActive(true);
-
             IOService::setAdvisoryTickleEnable( false );
-
+        
             // Publish the sleep reason for full to dark wake
             publishSleepReason = true;
             lastSleepReason = fullToDarkReason = sleepReason;
@@ -4769,12 +4757,21 @@ void IOPMrootDomain::handleOurPowerChangeStart(
             timeline->setSleepCycleInProgressFlag(true);
 
         recordPMEvent(kIOPMEventTypeSleep, NULL, sleepReason, kIOReturnSuccess);
+
+        // Optimization to ignore wrangler power down thus skipping
+        // the disk spindown and arming the idle timer for demand sleep.
+
+        if (changeFlags & kIOPMIgnoreChildren)
+        {
+            ignoreIdleSleepTimer = true;
+        }
     }
 
     // 3. System wake.
 
     else if (kSystemTransitionWake == _systemTransitionType)
     {
+        ignoreIdleSleepTimer = false;
         tracePoint( kIOPMTracePointWakeWillPowerOnClients );
         if (pmStatsAppResponses)
         {
@@ -5165,7 +5162,6 @@ void IOPMrootDomain::handleActivityTickleForDisplayWrangler(
     IOService *     service,
     IOPMActions *   actions )
 {
-#if !NO_KERNEL_HID
     // Warning: Not running in PM work loop context - don't modify state !!!
     // Trap tickle directed to IODisplayWrangler while running with graphics
     // capability suppressed.
@@ -5195,7 +5191,6 @@ void IOPMrootDomain::handleActivityTickleForDisplayWrangler(
                 (void *) kStimulusDarkWakeActivityTickle );
         }
     }
-#endif
 }
 
 void IOPMrootDomain::handleUpdatePowerClientForDisplayWrangler(
@@ -5205,24 +5200,21 @@ void IOPMrootDomain::handleUpdatePowerClientForDisplayWrangler(
     IOPMPowerStateIndex     oldPowerState,
     IOPMPowerStateIndex     newPowerState )
 {
-#if !NO_KERNEL_HID
     assert(service == wrangler);
     
-    // This function implements half of the user active detection
-    // by monitoring changes to the display wrangler's device desire.
+    // This function implements half of the user activity detection.
+    // User is active if:
+    // 1. DeviceDesire increases to max,
+    //    and wrangler already in max power state
+    //    (no power state change, caught by this routine)
     //
-    // User becomes active when either:
-    // 1. Wrangler's DeviceDesire increases to max, but wrangler is already
-    //    in max power state. This desire change in absence of a power state
-    //    change is detected within. This handles the case when user becomes
-    //    active while the display is already lit by setDisplayPowerOn().
+    // 2. Power change to max, and DeviceDesire is at max.
+    //    (wrangler must reset DeviceDesire before system sleep)
     //
-    // 2. Power state change to max, and DeviceDesire is also at max.
-    //    Handled by displayWranglerNotification().
-    //
-    // User becomes inactive when DeviceDesire drops to sleep state or below.
+    // User is inactive if:
+    // 1. DeviceDesire drops to sleep state or below
 
-    DLOG("wrangler %s (ps %u, %u->%u)\n",
+    DLOG("wrangler %s (%u, %u->%u)\n",
         powerClient->getCStringNoCopy(),
         (uint32_t) service->getPowerState(),
         (uint32_t) oldPowerState, (uint32_t) newPowerState);
@@ -5233,41 +5225,15 @@ void IOPMrootDomain::handleUpdatePowerClientForDisplayWrangler(
             (newPowerState == kWranglerPowerStateMax) &&
             (service->getPowerState() == kWranglerPowerStateMax))
         {
-            evaluatePolicy( kStimulusEnterUserActiveState );
+            evaluatePolicy( kStimulusUserIsActive );
         }
         else
         if ((newPowerState < oldPowerState) &&
             (newPowerState <= kWranglerPowerStateSleep))
         {
-            evaluatePolicy( kStimulusLeaveUserActiveState );
+            evaluatePolicy( kStimulusUserIsInactive );
         }
     }
-#endif
-}
-
-//******************************************************************************
-// User active state management
-//******************************************************************************
-
-void IOPMrootDomain::preventTransitionToUserActive( bool prevent )
-{
-#if !NO_KERNEL_HID
-    _preventUserActive = prevent;
-    if (wrangler && !_preventUserActive)
-    {
-        // Allowing transition to user active, but the wrangler may have
-        // already powered ON in case of sleep cancel/revert. Poll the
-        // same conditions checked for in displayWranglerNotification()
-        // to bring the user active state up to date.
-
-        if ((wrangler->getPowerState() == kWranglerPowerStateMax) &&
-            (wrangler->getPowerStateForClient(gIOPMPowerClientDevice) ==
-             kWranglerPowerStateMax))
-        {
-            evaluatePolicy( kStimulusEnterUserActiveState );
-        }
-    }
-#endif
 }
 
 //******************************************************************************
@@ -5565,8 +5531,8 @@ IOReturn IOPMrootDomain::displayWranglerNotification(
         return kIOReturnUnsupported;
 
     displayPowerState = params->stateNumber;
-    DLOG("wrangler %s ps %d\n",
-         getIOMessageString(messageType), displayPowerState);
+    DLOG("DisplayWrangler message 0x%x, power state %d\n",
+         (uint32_t) messageType, displayPowerState);
 
     switch (messageType) {
        case kIOMessageDeviceWillPowerOff:
@@ -5595,7 +5561,7 @@ IOReturn IOPMrootDomain::displayWranglerNotification(
                 if (service->getPowerStateForClient(gIOPMPowerClientDevice) ==
                     kWranglerPowerStateMax)
                 {
-                    gRootDomain->evaluatePolicy( kStimulusEnterUserActiveState );
+                    gRootDomain->evaluatePolicy( kStimulusUserIsActive );
                 }
             }
             break;
@@ -6465,17 +6431,12 @@ void IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
             wranglerAsleep = false;
             break;
 
-        case kStimulusEnterUserActiveState:
-            if (_preventUserActive)
-            {
-                DLOG("user active dropped\n");
-                break;
-            }
+        case kStimulusUserIsActive:
             if (!userIsActive)
             {
                 userIsActive = true;
                 userWasActive = true;
-
+                
                 // Stay awake after dropping demand for display power on
                 if (kFullWakeReasonDisplayOn == fullWakeReason)
                     fullWakeReason = fFullWakeReasonDisplayOnAndLocalUser;
@@ -6486,7 +6447,7 @@ void IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
             flags.bit.idleSleepDisabled = true;
             break;
 
-        case kStimulusLeaveUserActiveState:
+        case kStimulusUserIsInactive:
             if (userIsActive)
             {
                 userIsActive = false;
@@ -6703,7 +6664,7 @@ void IOPMrootDomain::evaluatePolicy( int stimulus, uint32_t arg )
             DLOG("user inactive\n");        
         }
 
-        if (!userIsActive && sleepSlider)
+        if (!userIsActive && !ignoreIdleSleepTimer && sleepSlider)
         {
             startIdleSleepTimer(getTimeToIdleSleep());
         }
@@ -6864,8 +6825,9 @@ void IOPMrootDomain::requestFullWake( FullWakeReason reason )
 void IOPMrootDomain::willEnterFullWake( void )
 {
     hibernateRetry = false;
-    sleepToStandby = false;
+    ignoreIdleSleepTimer = false;
     sleepTimerMaintenance = false;
+    sleepToStandby = false;
 
     _systemMessageClientMask = kSystemMessageClientPowerd |
                                kSystemMessageClientLegacyApp;
@@ -6880,13 +6842,9 @@ void IOPMrootDomain::willEnterFullWake( void )
             (kFullWakeReasonLocalUser == fullWakeReason) ?
                 kOSBooleanTrue : kOSBooleanFalse);
     }
-#if HIBERNATION
-    IOHibernateSetWakeCapabilities(_pendingCapability);
-#endif
 
     IOService::setAdvisoryTickleEnable( true );
     tellClients(kIOMessageSystemWillPowerOn);
-    preventTransitionToUserActive(false);
 }
 
 //******************************************************************************

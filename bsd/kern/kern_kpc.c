@@ -37,7 +37,6 @@
 #include <kern/kpc.h>
 
 #include <pexpert/pexpert.h>
-#include <kperf/kperf.h>
 
 /* Various sysctl requests */
 #define REQ_CLASSES              (1)
@@ -387,24 +386,6 @@ kpc_sysctl SYSCTL_HANDLER_ARGS
     
 	if( !kpc_initted )
 		panic("kpc_init not called");
-
-	// Most sysctls require an access check, but a few are public.
-	switch( (uintptr_t) arg1 ) {
-	case REQ_CLASSES:
-	case REQ_CONFIG_COUNT:
-	case REQ_COUNTER_COUNT:
-		// These read-only sysctls are public.
-		break;
-
-	default:
-		// Require kperf access to read or write anything else.
-		// This is either root or the blessed pid.
-		ret = kperf_access_check();
-		if (ret) {
-			return ret;
-		}
-		break;
-	}
 
 	lck_mtx_lock(&sysctl_buffer_lock);
 

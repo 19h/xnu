@@ -30,7 +30,6 @@
 #include <IOKit/IODataQueueShared.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
-#include <libkern/OSAtomic.h>
 
 #ifdef enqueue
 #undef enqueue
@@ -80,10 +79,6 @@ Boolean IODataQueue::initWithCapacity(UInt32 size)
         return false;
     }
 
-    if (size > UINT32_MAX - DATA_QUEUE_MEMORY_HEADER_SIZE) {
-        return false;
-    }
-    
     allocSize = round_page(size + DATA_QUEUE_MEMORY_HEADER_SIZE);
 
     if (allocSize < size) {
@@ -104,16 +99,6 @@ Boolean IODataQueue::initWithCapacity(UInt32 size)
 
 Boolean IODataQueue::initWithEntries(UInt32 numEntries, UInt32 entrySize)
 {
-    // Checking overflow for (numEntries + 1)*(entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE):
-    //  check (entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE)
-    if ((entrySize > UINT32_MAX - DATA_QUEUE_ENTRY_HEADER_SIZE) ||
-        //  check (numEntries + 1)
-        (numEntries > UINT32_MAX-1) ||
-        //  check (numEntries + 1)*(entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE)
-        (entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE > UINT32_MAX/(numEntries+1))) {
-        return false;
-    }
-    
     return (initWithCapacity((numEntries + 1) * (DATA_QUEUE_ENTRY_HEADER_SIZE + entrySize)));
 }
 
@@ -135,20 +120,10 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
     const UInt32       entrySize = dataSize + DATA_QUEUE_ENTRY_HEADER_SIZE;
     IODataQueueEntry * entry;
 
-    // Check for overflow of entrySize
-    if (dataSize > UINT32_MAX - DATA_QUEUE_ENTRY_HEADER_SIZE) {
-        return false;
-    }
-    // Check for underflow of (dataQueue->queueSize - tail)
-    if (dataQueue->queueSize < tail) {
-        return false;
-    }
-
     if ( tail >= head )
     {
         // Is there enough room at the end for the entry?
-        if ((entrySize <= UINT32_MAX - tail) &&
-            ((tail + entrySize) <= dataQueue->queueSize) )
+        if ( (tail + entrySize) <= dataQueue->queueSize )
         {
             entry = (IODataQueueEntry *)((UInt8 *)dataQueue->queue + tail);
 
@@ -158,8 +133,8 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
             // The tail can be out of bound when the size of the new entry
             // exactly matches the available space at the end of the queue.
             // The tail can range from 0 to dataQueue->queueSize inclusive.
-            
-            OSAddAtomic(entrySize, (SInt32 *)&dataQueue->tail);
+
+            dataQueue->tail += entrySize;
         }
         else if ( head > entrySize ) 	// Is there enough room at the beginning?
         {
@@ -178,7 +153,7 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
             }
 
             memcpy(&dataQueue->queue->data, data, dataSize);
-            OSCompareAndSwap(dataQueue->tail, entrySize, &dataQueue->tail);
+            dataQueue->tail = entrySize;
         }
         else
         {
@@ -196,7 +171,7 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
 
             entry->size = dataSize;
             memcpy(&entry->data, data, dataSize);
-            OSAddAtomic(entrySize, (SInt32 *)&dataQueue->tail);
+            dataQueue->tail += entrySize;
         }
         else
         {

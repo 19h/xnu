@@ -1352,6 +1352,7 @@ IOPlatformExpertDevice::initWithArgs(
                             void * dtTop, void * p2, void * p3, void * p4 )
 {
     IORegistryEntry * 	dt = 0;
+    void *		argsData[ 4 ];
     bool		ok;
 
     // dtTop may be zero on non- device tree systems
@@ -1367,6 +1368,13 @@ IOPlatformExpertDevice::initWithArgs(
     workLoop = IOWorkLoop::workLoop();
     if (!workLoop)
         return false;
+
+    argsData[ 0 ] = dtTop;
+    argsData[ 1 ] = p2;
+    argsData[ 2 ] = p3;
+    argsData[ 3 ] = p4;
+
+    setProperty("IOPlatformArgs", (void *)argsData, sizeof(argsData));
 
     return( true);
 }

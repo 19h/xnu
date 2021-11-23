@@ -911,10 +911,7 @@ pmap_lowmem_finalize(void)
 	 */
 	DPRINTF("%s: Removing mappings from 0->0x%lx\n", __FUNCTION__, vm_kernel_base);
 
-	/*
-	 * Remove all mappings past the boot-cpu descriptor aliases and low globals.
-	 * Non-boot-cpu GDT aliases will be remapped later as needed. 
-	 */
+	/* Remove all mappings past the descriptor aliases and low globals */
 	pmap_remove(kernel_pmap, LOWGLOBAL_ALIAS + PAGE_SIZE, vm_kernel_base);
 
 	/*

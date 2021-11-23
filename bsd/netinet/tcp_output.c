@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -854,7 +854,6 @@ after_sack_rexmit:
 
 	recwin = tcp_sbspace(tp);
 
-
 	/*
 	 * If the socket is capable of doing unordered send,
 	 * pull the amount of data that can be sent from the
@@ -993,8 +992,8 @@ after_sack_rexmit:
 	 * If our state indicates that FIN should be sent
 	 * and we have not yet done so, then we need to send.
 	 */
-	if ((flags & TH_FIN) &&
-	    (!(tp->t_flags & TF_SENTFIN) || tp->snd_nxt == tp->snd_una))
+	if (flags & TH_FIN &&
+	    ((tp->t_flags & TF_SENTFIN) == 0 || tp->snd_nxt == tp->snd_una))
 		goto send;
 	/*
 	 * In SACK, it is possible for tcp_output to fail to send a segment
@@ -1801,8 +1800,7 @@ send:
 		if (flags & (TH_SYN|TH_FIN)) {
 			if (flags & TH_SYN)
 				tp->snd_nxt++;
-			if ((flags & TH_FIN) && 
-				!(tp->t_flags & TF_SENTFIN)) {
+			if (flags & TH_FIN) {
 				tp->snd_nxt++;
 				tp->t_flags |= TF_SENTFIN;
 			}
@@ -1834,8 +1832,7 @@ send:
 timer:
 		if (tp->t_timer[TCPT_REXMT] == 0 &&
 		    ((sack_rxmit && tp->snd_nxt != tp->snd_max) ||
-			tp->snd_nxt != tp->snd_una ||
-			(flags & TH_FIN))) {
+			tp->snd_nxt != tp->snd_una)) {
 			if (tp->t_timer[TCPT_PERSIST]) {
 				tp->t_timer[TCPT_PERSIST] = 0;
 				tp->t_rxtshift = 0;
@@ -1852,8 +1849,7 @@ timer:
 		int xlen = len;
 		if (flags & TH_SYN)
 			++xlen;
-		if ((flags & TH_FIN) && 
-			!(tp->t_flags & TF_SENTFIN)) {
+		if (flags & TH_FIN) {
 			++xlen;
 			tp->t_flags |= TF_SENTFIN;
 		}

@@ -155,7 +155,6 @@ void c_seg_insert_into_age_q(c_segment_t);
 void vm_decompressor_lock(void);
 void vm_decompressor_unlock(void);
 
-void vm_compressor_delay_trim(void);
 void vm_compressor_do_warmup(void);
 void vm_compressor_record_warmup_start(void);
 void vm_compressor_record_warmup_end(void);
