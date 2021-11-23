@@ -37,7 +37,6 @@
  16 byte aligned if VIA ACE is being used
 */
 
-
 /* ---------------------------------------------------------------------------------------------------------------- 
 
 	aes_encrypt_cbc function (see aes_modes.c or aes_modes_asm.s) :

@@ -129,6 +129,10 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 	AUDIT_ARG(value32, uap->data);
 
 	if (uap->req == PT_DENY_ATTACH) {
+#if (DEVELOPMENT || DEBUG) && defined(__arm__)
+		if (PE_i_can_has_debugger(NULL))
+			return(0);
+#endif
 		proc_lock(p);
 		if (ISSET(p->p_lflag, P_LTRACED)) {
 			proc_unlock(p);
