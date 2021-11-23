@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -1119,9 +1116,32 @@ void
 vm_pageout_throttle(
 	register vm_page_t m)
 {
+        register vm_object_t object;
+
+	/*
+	 * need to keep track of the object we 
+	 * started with... if we drop the object lock
+	 * due to the throttle, it's possible that someone
+	 * else will gather this page into an I/O if this
+	 * is an external object... the page will then be
+	 * potentially freed before we unwedge from the
+	 * throttle... this is ok since no one plays with
+	 * the page directly after the throttle... the object
+	 * and offset are passed into the memory_object_data_return
+	 * function where eventually it's relooked up against the
+	 * object... if it's changed state or there is no longer
+	 * a page at that offset, the pageout just finishes without
+	 * issuing an I/O
+	 */
+	object = m->object;
+
 	assert(!m->laundry);
 	m->laundry = TRUE;
-	while (vm_page_laundry_count >= vm_page_laundry_max) {
+	if (!object->internal)
+		vm_page_burst_count++;
+	vm_page_laundry_count++;
+
+	while (vm_page_laundry_count > vm_page_laundry_max) {
 		/*
 		 * Set the threshold for when vm_page_free()
 		 * should wake us up.
@@ -1130,18 +1150,15 @@ vm_pageout_throttle(
 
 		assert_wait((event_t) &vm_page_laundry_count, THREAD_UNINT);
 		vm_page_unlock_queues();
-		vm_object_unlock(m->object);
+		vm_object_unlock(object);
 		/*
 		 * Pause to let the default pager catch up.
 		 */
 		thread_block((void (*)(void)) 0);
 
-		vm_object_lock(m->object);
+		vm_object_lock(object);
 		vm_page_lock_queues();
 	}
-	if (!m->object->internal)
-		vm_page_burst_count++;
-	vm_page_laundry_count++;
 }
 
 /*

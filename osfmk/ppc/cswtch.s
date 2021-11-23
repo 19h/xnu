@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,11 +58,15 @@ LEXT(machine_load_context)
 			mfmsr	r5								/* Since we are passing control, get our MSR values */
 			lwz		r11,SAVprev+4(r3)				/* Get the previous savearea */
 			lwz		r1,saver1+4(r3)					/* Load new stack pointer */
+			lwz		r10,ACT_MACT_SPF(r9)			/* Get the special flags */
 			stw		r0,saver3+4(r3)					/* Make sure we pass in a 0 for the continuation */
 			stw		r0,FM_BACKPTR(r1)				/* zero backptr */
 			stw		r5,savesrr1+4(r3)				/* Pass our MSR to the new guy */
 			stw		r11,ACT_MACT_PCB(r9)			/* Unstack our savearea */
+			oris	r10,r10,hi16(OnProc)			/* Set OnProc bit */
 			stw		r0,ACT_PREEMPT_CNT(r9)			/* Enable preemption */
+			stw		r10,ACT_MACT_SPF(r9)			/* Update the special flags */
+			stw		r10,spcFlags(r6)				/*  Set per_proc copy of the special flags */
 			b		EXT(exception_exit)				/* Go for it */
 	
 /* thread_t Switch_context(thread_t	old,

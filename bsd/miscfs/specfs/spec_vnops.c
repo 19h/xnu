@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -74,6 +71,7 @@
 #include <sys/malloc.h>
 #include <sys/disk.h>
 #include <miscfs/specfs/specdev.h>
+#include <miscfs/specfs/lockf.h>
 #include <vfs/vfs_support.h>
 
 #include <sys/kdebug.h>
@@ -129,7 +127,7 @@ struct vnodeopv_entry_desc spec_vnodeop_entries[] = {
 	{ &vop_print_desc, (VOPFUNC)spec_print },		/* print */
 	{ &vop_islocked_desc, (VOPFUNC)nop_islocked },		/* islocked */
 	{ &vop_pathconf_desc, (VOPFUNC)spec_pathconf },		/* pathconf */
-	{ &vop_advlock_desc, (VOPFUNC)err_advlock },		/* advlock */
+	{ &vop_advlock_desc, (VOPFUNC)spec_advlock },		/* advlock */
 	{ &vop_blkatoff_desc, (VOPFUNC)err_blkatoff },		/* blkatoff */
 	{ &vop_valloc_desc, (VOPFUNC)err_valloc },		/* valloc */
 	{ &vop_vfree_desc, (VOPFUNC)err_vfree },		/* vfree */
@@ -667,6 +665,100 @@ spec_strategy(ap)
 
         (*bdevsw[major(bp->b_dev)].d_strategy)(bp);
         return (0);
+}
+
+/*
+ * Advisory record locking support
+ */
+int
+spec_advlock(ap)
+	struct vop_advlock_args /* {
+		struct vnode *a_vp;
+		caddr_t  a_id;
+		int  a_op;
+		struct flock *a_fl;
+		int  a_flags;
+	} */ *ap;
+{
+	register struct flock *fl = ap->a_fl;
+	register struct lockf *lock;
+	off_t start, end;
+	int error;
+
+	/*
+	 * Avoid the common case of unlocking when inode has no locks.
+	 */
+	if (ap->a_vp->v_specinfo->si_lockf == (struct lockf *)0) {
+		if (ap->a_op != F_SETLK) {
+			fl->l_type = F_UNLCK;
+			return (0);
+		}
+	}
+	/*
+	 * Convert the flock structure into a start and end.
+	 */
+	switch (fl->l_whence) {
+
+	case SEEK_SET:
+	case SEEK_CUR:
+		/*
+		 * Caller is responsible for adding any necessary offset
+		 * when SEEK_CUR is used.
+		 */
+		start = fl->l_start;
+		break;
+
+	case SEEK_END:
+		start = ap->a_vp->v_specinfo->si_devsize + fl->l_start;
+		break;
+
+	default:
+		return (EINVAL);
+	}
+	if (fl->l_len == 0)
+		end = -1;
+	else if (fl->l_len > 0)
+		end = start + fl->l_len - 1;
+	else { /* l_len is negative */
+		end = start - 1;
+		start += fl->l_len;
+	}
+	if (start < 0)
+		return (EINVAL);
+	/*
+	 * Create the lockf structure
+	 */
+	MALLOC(lock, struct lockf *, sizeof *lock, M_LOCKF, M_WAITOK);
+	lock->lf_start = start;
+	lock->lf_end = end;
+	lock->lf_id = ap->a_id;
+	lock->lf_specinfo = ap->a_vp->v_specinfo;
+	lock->lf_type = fl->l_type;
+	lock->lf_next = (struct lockf *)0;
+	TAILQ_INIT(&lock->lf_blkhd);
+	lock->lf_flags = ap->a_flags;
+	/*
+	 * Do the requested operation.
+	 */
+	switch(ap->a_op) {
+	case F_SETLK:
+		return (spec_lf_setlock(lock));
+
+	case F_UNLCK:
+		error = spec_lf_clearlock(lock);
+		FREE(lock, M_LOCKF);
+		return (error);
+
+	case F_GETLK:
+		error = spec_lf_getlock(lock, fl);
+		FREE(lock, M_LOCKF);
+		return (error);
+	
+	default:
+		_FREE(lock, M_LOCKF);
+		return (EINVAL);
+	}
+	/* NOTREACHED */
 }
 
 /*

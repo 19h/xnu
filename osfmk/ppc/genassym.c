@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -124,6 +121,8 @@ int main(int argc, char *argv[])
 	DECLARE("FamVMmodebit",		FamVMmodebit);
 	DECLARE("perfMonitor",		perfMonitor);
 	DECLARE("perfMonitorbit",	perfMonitorbit);
+	DECLARE("OnProc",		OnProc);
+	DECLARE("OnProcbit",		OnProcbit);
 
 	/* Per Proc info structure */
 	DECLARE("PP_CPU_NUMBER",		offsetof(struct per_proc_info *, cpu_number));
@@ -169,10 +168,6 @@ int main(int argc, char *argv[])
 	DECLARE("pfCanNapb",			pfCanNapb);
 	DECLARE("pfCanDoze",			pfCanDoze);
 	DECLARE("pfCanDozeb",			pfCanDozeb);
-	DECLARE("pfThermal",			pfThermal);
-	DECLARE("pfThermalb",			pfThermalb);
-	DECLARE("pfThermInt",			pfThermInt);
-	DECLARE("pfThermIntb",			pfThermIntb);
 	DECLARE("pfSlowNap",				pfSlowNap);
 	DECLARE("pfSlowNapb",				pfSlowNapb);
 	DECLARE("pfNoMuMMCK",				pfNoMuMMCK);
@@ -233,18 +228,22 @@ int main(int argc, char *argv[])
 	DECLARE("pfl2crOriginal", 		offsetof(struct per_proc_info *, pf.l2crOriginal));
 	DECLARE("pfl3crOriginal", 		offsetof(struct per_proc_info *, pf.l3crOriginal));
 	DECLARE("pfBootConfig",			offsetof(struct per_proc_info *, pf.pfBootConfig));
+	DECLARE("pfPowerModes",			offsetof(struct per_proc_info *, pf.pfPowerModes));
+	DECLARE("pfPowerTune0",			offsetof(struct per_proc_info *, pf.pfPowerTune0));
+	DECLARE("pfPowerTune1",			offsetof(struct per_proc_info *, pf.pfPowerTune1));
+	DECLARE("pmDPLLVmin",			pmDPLLVmin);
+	DECLARE("pmDPLLVminb",			pmDPLLVminb);
+	DECLARE("pmPowerTune",			pmPowerTune);
+	DECLARE("pmPowerTuneb",			pmPowerTuneb);
+	DECLARE("pmDFS",				pmDFS);
+	DECLARE("pmDFSb",				pmDFSb);
+	DECLARE("pmDualPLL",			pmDualPLL);
+	DECLARE("pmDualPLLb",			pmDualPLLb);
 	DECLARE("pfPTEG", 				offsetof(struct per_proc_info *, pf.pfPTEG));
 	DECLARE("pfMaxVAddr", 			offsetof(struct per_proc_info *, pf.pfMaxVAddr));
 	DECLARE("pfMaxPAddr", 			offsetof(struct per_proc_info *, pf.pfMaxPAddr));
 	DECLARE("pfSize", 				sizeof(procFeatures));
 	
-	DECLARE("thrmmaxTemp", 			offsetof(struct per_proc_info *, thrm.maxTemp));
-	DECLARE("thrmthrottleTemp", 	offsetof(struct per_proc_info *, thrm.throttleTemp));
-	DECLARE("thrmlowTemp", 			offsetof(struct per_proc_info *, thrm.lowTemp));
-	DECLARE("thrmhighTemp", 		offsetof(struct per_proc_info *, thrm.highTemp));
-	DECLARE("thrm3val", 			offsetof(struct per_proc_info *, thrm.thrm3val));
-	DECLARE("thrmSize", 			sizeof(thrmControl));
-
 	DECLARE("validSegs", 			offsetof(struct per_proc_info *, validSegs));
 	DECLARE("ppUserPmapVirt", 		offsetof(struct per_proc_info *, ppUserPmapVirt));
 	DECLARE("ppUserPmap", 			offsetof(struct per_proc_info *, ppUserPmap));
@@ -1082,6 +1081,11 @@ int main(int argc, char *argv[])
 	
 	DECLARE("saveinstr",	offsetof(struct savearea *, save_instr));
 
+	DECLARE("savexdat0",	offsetof(struct savearea *, save_xdat0));
+	DECLARE("savexdat1",	offsetof(struct savearea *, save_xdat1));
+	DECLARE("savexdat2",	offsetof(struct savearea *, save_xdat2));
+	DECLARE("savexdat3",	offsetof(struct savearea *, save_xdat3));
+	
 	DECLARE("saver0",		offsetof(struct savearea *, save_r0));
 	DECLARE("saver1",		offsetof(struct savearea *, save_r1));
 	DECLARE("saver2",		offsetof(struct savearea *, save_r2));

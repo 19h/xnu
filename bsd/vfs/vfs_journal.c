@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -980,21 +977,12 @@ replay_journal(journal *jnl)
 			goto bad_replay;
 		}
 	
-		for(i=1,max_bsize=0; i < blhdr->num_blocks; i++) {
+		for(i=1; i < blhdr->num_blocks; i++) {
 			if (blhdr->binfo[i].bnum < 0 && blhdr->binfo[i].bnum != (off_t)-1) {
 				printf("jnl: replay_journal: bogus block number 0x%llx\n", blhdr->binfo[i].bnum);
 				goto bad_replay;
 			}
-			if (blhdr->binfo[i].bsize > max_bsize) {
-				max_bsize = blhdr->binfo[i].bsize;
-			}
 		}
-
-		// make sure it's at least one page in size.
-		if (max_bsize & (PAGE_SIZE - 1)) {
-			max_bsize = (max_bsize + PAGE_SIZE) & ~(PAGE_SIZE - 1);
-		}
-
 
 		//printf("jnl: replay_journal: adding %d blocks in journal entry @ 0x%llx to co_buf\n", 
 		//       blhdr->num_blocks-1, jnl->jhdr->start);
@@ -1042,6 +1030,25 @@ replay_journal(journal *jnl)
 
     //printf("jnl: replay_journal: replaying %d blocks\n", num_full);
     
+    /*
+     * make sure it's at least one page in size, so
+     * start max_bsize at PAGE_SIZE
+     */
+    for (i = 0, max_bsize = PAGE_SIZE; i < num_full; i++) {
+
+            if (co_buf[i].block_num == (off_t)-1)
+	            continue;
+
+	    if (co_buf[i].block_size > max_bsize)
+	            max_bsize = co_buf[i].block_size;
+    }
+    /*
+     * round max_bsize up to the nearest PAGE_SIZE multiple
+     */
+    if (max_bsize & (PAGE_SIZE - 1)) {
+            max_bsize = (max_bsize + PAGE_SIZE) & ~(PAGE_SIZE - 1);
+    }
+
     if (kmem_alloc(kernel_map, (vm_offset_t *)&block_ptr, max_bsize)) {
 	goto bad_replay;
     }

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -71,6 +68,7 @@
  * special devices. It is allocated in checkalias and freed
  * in vgone.
  */
+struct lockf;
 struct specinfo {
 	struct	vnode **si_hashchain;
 	struct	vnode *si_specnext;
@@ -78,6 +76,7 @@ struct specinfo {
 	dev_t	si_rdev;
 	daddr_t si_size;                  /* device block size in bytes */
 	u_int64_t	si_devsize;	  /* actual device size in bytes */
+	struct lockf	*si_lockf;	/* head of advisory lock list */
 };
 /*
  * Exported shorthand
@@ -154,7 +153,7 @@ int	spec_strategy __P((struct vop_strategy_args *));
 int	spec_print __P((struct vop_print_args *));
 #define spec_islocked ((int (*) __P((struct  vop_access_args *)))nop_islocked)
 int	spec_pathconf __P((struct vop_pathconf_args *));
-#define spec_advlock ((int (*) __P((struct  vop_access_args *)))err_advlock)
+int	spec_advlock __P((struct  vop_advlock_args *));
 #define spec_blkatoff ((int (*) __P((struct  vop_access_args *)))err_blkatoff)
 #define spec_valloc ((int (*) __P((struct  vop_access_args *)))err_valloc)
 #define spec_vfree ((int (*) __P((struct  vop_access_args *)))err_vfree)

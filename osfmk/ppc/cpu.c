@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -53,6 +50,9 @@ int real_ncpus = 1;
 
 int wncpu = NCPUS;
 resethandler_t	resethandler_target;
+
+decl_simple_lock_data(static,SignalReadyLock);
+static unsigned int     SignalReadyWait = 0xFFFFFFFFU;
 
 #define MMCR0_SUPPORT_MASK 0xf83f1fff
 #define MMCR1_SUPPORT_MASK 0xffc00000
@@ -365,7 +365,16 @@ cpu_machine_init(
 		cpu_sync_timebase();
 	}
 	ml_init_interrupt();
+	if (cpu != master_cpu)
+		simple_lock(&SignalReadyLock);
 	tproc_info->cpu_flags |= BootDone|SignalReady;
+	if (cpu != master_cpu) {
+		if (SignalReadyWait != 0) {
+			SignalReadyWait--;
+			thread_wakeup(&tproc_info->cpu_flags);
+		}
+		simple_unlock(&SignalReadyLock);
+	}
 }
 
 kern_return_t
@@ -417,6 +426,11 @@ cpu_start(
 	} else {
 		extern void _start_cpu(void);
 
+		if (SignalReadyWait == 0xFFFFFFFFU) {
+			SignalReadyWait = 0;
+			simple_lock_init(&SignalReadyLock,0);
+		}
+
 		proc_info->cpu_number = cpu;
 		proc_info->cpu_flags &= BootDone;
 		proc_info->istackptr = (vm_offset_t)&intstack + (INTSTACK_SIZE*(cpu+1)) - FM_SIZE;
@@ -467,9 +481,26 @@ cpu_start(
 		    proc_info->start_paddr == EXCEPTION_VECTOR(T_RESET)) {
 
 			/* TODO: realese mutex lock reset_handler_lock */
+		} else {
+			simple_lock(&SignalReadyLock);
+
+			while (!((*(volatile short *)&per_proc_info[cpu].cpu_flags) & SignalReady)) {
+				SignalReadyWait++;
+				thread_sleep_simple_lock((event_t)&per_proc_info[cpu].cpu_flags,
+							&SignalReadyLock, THREAD_UNINT);
+			}
+			simple_unlock(&SignalReadyLock);
 		}
 		return(ret);
 	}
+}
+
+void
+cpu_exit_wait(
+	int cpu)
+{
+	if ( cpu != master_cpu)
+		while (!((*(volatile short *)&per_proc_info[cpu].cpu_flags) & SleepState)) {};
 }
 
 perfTrap perfCpuSigHook = 0;            /* Pointer to CHUD cpu signal hook routine */
@@ -589,9 +620,21 @@ cpu_signal_handler(
   							return;
 						
 						case CPRQscom:
-							fwSCOM((scomcomm *)holdParm2);	/* Do the function */
+							if(((scomcomm *)holdParm2)->scomfunc) {	/* Are we writing */
+								((scomcomm *)holdParm2)->scomstat = ml_scom_write(((scomcomm *)holdParm2)->scomreg, ((scomcomm *)holdParm2)->scomdata);	/* Write scom */
+							}
+							else {					/* No, reading... */
+								((scomcomm *)holdParm2)->scomstat = ml_scom_read(((scomcomm *)holdParm2)->scomreg, &((scomcomm *)holdParm2)->scomdata);	/* Read scom */
+							}
 							return;
 
+						case CPRQsps:
+							{
+							extern void ml_set_processor_speed_slave(unsigned long speed);
+
+							ml_set_processor_speed_slave(holdParm2);
+							return;
+						}
 						default:
 							panic("cpu_signal_handler: unknown CPU request - %08X\n", holdParm1);
 							return;

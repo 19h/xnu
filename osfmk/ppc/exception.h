@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -66,10 +63,6 @@ struct procFeatures {
 #define pfCanNapb	5
 #define pfCanDoze	0x02000000
 #define pfCanDozeb	6
-#define pfThermal	0x01000000
-#define pfThermalb	7
-#define pfThermInt	0x00800000
-#define pfThermIntb	8
 #define pfSlowNap	0x00400000
 #define pfSlowNapb	9
 #define pfNoMuMMCK	0x00200000
@@ -132,25 +125,24 @@ struct procFeatures {
 	uint64_t		pfHID5;				/* 0x068 */
 	unsigned int	l2crOriginal;		/* 0x070 */
 	unsigned int	l3crOriginal;		/* 0x074 */
-	unsigned int	pfBootConfig;		/* 0x07C */
-	unsigned int	reserved[1];		/* 0x80 */
+	unsigned int	pfBootConfig;		/* 0x078 */
+	unsigned int	pfPowerModes;		/* 0x07C */
+#define pmDPLLVmin		0x00010000
+#define pmDPLLVminb		15
+#define pmPowerTune		0x00000004
+#define pmPowerTuneb	29
+#define pmDFS			0x00000002
+#define pmDFSb			30
+#define pmDualPLL		0x00000001
+#define pmDualPLLb		31
+	unsigned int	pfPowerTune0;		/* 0x080 */
+	unsigned int	pfPowerTune1;		/* 0x084 */
+	unsigned int	rsrvd88[6];			/* 0x088 */
 };
 #pragma pack()
 
 typedef struct procFeatures procFeatures;
 
-#pragma pack(4)							/* Make sure the structure stays as we defined it */
-struct thrmControl {
-	unsigned int	maxTemp;			/* Maximum temprature before damage */
-	unsigned int	throttleTemp;		/* Temprature at which to throttle down */
-	unsigned int	lowTemp;			/* Interrupt when temprature drops below */
-	unsigned int	highTemp;			/* Interrupt when temprature exceeds this */
-	unsigned int	thrm3val;			/* Value for thrm3 register */
-	unsigned int	rsvd[3];			/* Pad to cache line */
-};
-#pragma pack()
-
-typedef struct thrmControl thrmControl;
 
 /*
  *
@@ -337,6 +329,7 @@ struct per_proc_info {
 #define CPRQsegload	2					/* Segment registers reload */
 #define CPRQscom	3					/* SCOM */
 #define CPRQchud	4					/* CHUD perfmon */
+#define CPRQsps		5					/* Set Processor Speed */
 	unsigned int	MPsigpParm0;		/* SIGP parm 0 */
 	unsigned int	MPsigpParm1;		/* SIGP parm 1 */
 	unsigned int	MPsigpParm2;		/* SIGP parm 2 */
@@ -346,9 +339,6 @@ struct per_proc_info {
 
 	/* PPC cache line boundary here - 0A0 */
 	procFeatures 	pf;					/* Processor features */
-	
-	/* PPC cache line boundary here - 120 */
-	thrmControl		thrm;				/* Thermal controls */
 	
 	/* PPC cache line boundary here - 140 */
 	unsigned int	ppRsvd140[8];		/* Reserved */

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -296,12 +293,31 @@ fifo_read(ap)
 	if (ap->a_ioflag & IO_NDELAY)
 		rso->so_state |= SS_NBIO;
 	startresid = uio->uio_resid;
-	VOP_UNLOCK(ap->a_vp, 0, p);
-	thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
-	error = soreceive(rso, (struct sockaddr **)0, uio, (struct mbuf **)0,
-	    (struct mbuf **)0, (int *)0);
-	thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
-	vn_lock(ap->a_vp, LK_EXCLUSIVE | LK_RETRY, p);
+	/* fifo conformance - if we have a reader open on the fifo but no 
+	 * writers then we need to make sure we do not block.  We do that by 
+	 * checking the receive buffer and if empty set error to EWOULDBLOCK.
+	 * If error is set to EWOULDBLOCK we skip the call into soreceive
+	 */
+	error = 0;
+	if (ap->a_vp->v_fifoinfo->fi_writers < 1) {
+		 error = (rso->so_rcv.sb_cc == 0) ? EWOULDBLOCK : 0;
+	}
+
+	/* skip soreceive to avoid blocking when we have no writers */
+	if (error != EWOULDBLOCK) {
+		VOP_UNLOCK(ap->a_vp, 0, p);
+		thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
+
+		error = soreceive(rso, (struct sockaddr **)0, uio, (struct mbuf **)0,
+	    					(struct mbuf **)0, (int *)0);
+
+		thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
+		vn_lock(ap->a_vp, LK_EXCLUSIVE | LK_RETRY, p);
+	}
+	else {
+		/* clear EWOULDBLOCK and return EOF (zero) */
+		error = 0;
+	}
 	/*
 	 * Clear EOF indication after first such return.
 	 */
