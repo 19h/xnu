@@ -32,6 +32,8 @@
 #include "ppc/asm.h"
 #elif defined (__i386__)
 #include "i386/asm.h"
+#elif defined (__arm__)
+#include "arm/asm.h"
 #else
 #error architecture not supported
 #endif

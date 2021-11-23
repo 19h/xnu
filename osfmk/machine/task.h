@@ -32,6 +32,8 @@
 #include "ppc/task.h"
 #elif defined (__i386__)
 #include "i386/task.h"
+#elif defined (__arm__)
+#include "arm/task.h"
 #else
 #error architecture not supported
 #endif

@@ -54,6 +54,10 @@ END(___syscall)
 // that value anyway.
 __SYSCALL(__syscall, syscall, 0);
 
+#elif defined(__arm__)
+
+__SYSCALL(__syscall, syscall, 7)
+
 #else
 #error Unsupported architecture
 #endif

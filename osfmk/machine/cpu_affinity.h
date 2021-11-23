@@ -34,6 +34,8 @@
 #include "ppc/cpu_affinity.h"
 #elif defined (__i386__)
 #include "i386/cpu_affinity.h"
+#elif defined (__arm__)
+#include "arm/cpu_affinity.h"
 #else
 #error architecture not supported
 #endif

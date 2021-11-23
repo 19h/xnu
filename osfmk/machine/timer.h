@@ -32,6 +32,8 @@
 #include "ppc/timer.h"
 #elif defined (__i386__)
 #include "i386/timer.h"
+#elif defined (__arm__)
+#include "arm/timer.h"
 #else
 #error architecture not supported
 #endif

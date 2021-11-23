@@ -32,6 +32,8 @@
 #include "ppc/vmparam.h"
 #elif defined (__i386__) || defined(__x86_64__)
 #include "i386/vmparam.h"
+#elif defined (__arm__)
+#include "arm/vmparam.h"
 #else
 #error architecture not supported
 #endif

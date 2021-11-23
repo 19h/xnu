@@ -32,6 +32,8 @@
 #include "ppc/_limits.h"
 #elif defined (__i386__) || defined(__x86_64__)
 #include "i386/_limits.h"
+#elif defined (__arm__)
+#include "arm/_limits.h"
 #else
 #error architecture not supported
 #endif

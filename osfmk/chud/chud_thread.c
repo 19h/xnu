@@ -48,6 +48,8 @@
 #	include <i386/mp.h>	
 #elif defined(__ppc__) || defined(__ppc64__)
 #	include <ppc/cpu_internal.h>
+#elif defined(__arm__)
+#	include <arm/cpu_internal.h>
 #else
 // fall back on declaring it extern.  The linker will sort us out.
 extern unsigned int real_ncpus;

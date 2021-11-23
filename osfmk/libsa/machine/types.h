@@ -32,6 +32,8 @@
 #include "ppc/types.h"
 #elif defined (__i386__)
 #include "i386/types.h"
+#elif defined (__arm__)
+#include "arm/types.h"
 #else
 #error architecture not supported
 #endif
