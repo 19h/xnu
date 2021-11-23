@@ -83,7 +83,6 @@
 #define MAXPRI		(NRQS-1)
 #define MINPRI		IDLEPRI			/* lowest legal priority schedulable */
 #define	IDLEPRI		0				/* idle thread priority */
-#define DEPRESSPRI	MINPRI			/* depress priority */
 
 /*
  *	High-level priority assignments
@@ -158,7 +157,14 @@
 #define BASEPRI_FOREGROUND	(BASEPRI_DEFAULT + 16)				/* 47 */
 #define BASEPRI_BACKGROUND	(BASEPRI_DEFAULT + 15)				/* 46 */
 #define BASEPRI_DEFAULT		(MAXPRI_USER - (NRQS / 4))			/* 31 */
+#define MAXPRI_THROTTLE		(MINPRI + 4)						/*  4 */
 #define MINPRI_USER			MINPRI								/*  0 */
+
+#ifdef CONFIG_EMBEDDED
+#define DEPRESSPRI	MAXPRI_THROTTLE
+#else
+#define DEPRESSPRI	MINPRI			/* depress priority */
+#endif
 
 /*
  *	Macro to check for invalid priorities.

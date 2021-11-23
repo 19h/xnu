@@ -117,6 +117,8 @@
 #include <kern/thread_call.h>
 #include <kern/sched_prim.h>
 #include <kern/assert.h>
+#include <sys/codesign.h>
+
 #if CONFIG_DTRACE
 /* Do not include dtrace.h, it redefines kmem_[alloc/free] */
 extern void (*dtrace_fasttrap_exit_ptr)(proc_t);
@@ -300,7 +302,7 @@ proc_prepareexit(proc_t p, int rv)
 	ut = get_bsdthread_info(self);
 
  	/* If a core should be generated, notify crash reporter */
-	if (hassigprop(WTERMSIG(rv), SA_CORE)) {
+	if (hassigprop(WTERMSIG(rv), SA_CORE) || ((p->p_csflags & CS_KILLED) != 0)) {
 		/* 
 		 * Workaround for processes checking up on PT_DENY_ATTACH:
 		 * should be backed out post-Leopard (details in 5431025).
@@ -769,13 +771,14 @@ proc_exit(proc_t p)
 		proc_list_lock();
 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXIT) | DBG_FUNC_END,
 					      pid, exitval, 0, 0, 0);
-		p->p_stat = SZOMB;
 		/* check for sysctl zomb lookup */
 		while ((p->p_listflag & P_LIST_WAITING) == P_LIST_WAITING) {
 			msleep(&p->p_stat, proc_list_mlock, PWAIT, "waitcoll", 0);
 		}
 		/* safe to use p as this is a system reap */
+		p->p_stat = SZOMB;
 		p->p_listflag |= P_LIST_WAITING;
+
 		/*
 		 * This is a named reference and it is not granted
 		 * if the reap is already in progress. So we get
@@ -1894,12 +1897,13 @@ vproc_exit(proc_t p)
 		proc_list_unlock();
 	} else {
 		proc_list_lock();
-		p->p_stat = SZOMB;
 		/* check for lookups by zomb sysctl */
 		while ((p->p_listflag & P_LIST_WAITING) == P_LIST_WAITING) {
 			msleep(&p->p_stat, proc_list_mlock, PWAIT, "waitcoll", 0);
 		}
+		p->p_stat = SZOMB;
 		p->p_listflag |= P_LIST_WAITING;
+
 		/*
 		 * This is a named reference and it is not granted
 		 * if the reap is already in progress. So we get

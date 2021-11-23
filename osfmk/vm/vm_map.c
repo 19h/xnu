@@ -253,7 +253,7 @@ static kern_return_t	vm_map_remap_range_allocate(
 	vm_map_address_t	*address,
 	vm_map_size_t		size,
 	vm_map_offset_t		mask,
-	boolean_t		anywhere,
+	int			flags,
 	vm_map_entry_t		*map_entry);
 
 static void		vm_map_region_look_for_page(
@@ -563,17 +563,22 @@ vm_map_init(
 {
 	vm_map_zone = zinit((vm_map_size_t) sizeof(struct _vm_map), 40*1024,
 			    PAGE_SIZE, "maps");
+	zone_change(vm_map_zone, Z_NOENCRYPT, TRUE);
+
 
 	vm_map_entry_zone = zinit((vm_map_size_t) sizeof(struct vm_map_entry),
 				  1024*1024, PAGE_SIZE*5,
 				  "non-kernel map entries");
+	zone_change(vm_map_entry_zone, Z_NOENCRYPT, TRUE);
 
 	vm_map_kentry_zone = zinit((vm_map_size_t) sizeof(struct vm_map_entry),
 				   kentry_data_size, kentry_data_size,
 				   "kernel map entries");
+	zone_change(vm_map_kentry_zone, Z_NOENCRYPT, TRUE);
 
 	vm_map_copy_zone = zinit((vm_map_size_t) sizeof(struct vm_map_copy),
 				 16*1024, PAGE_SIZE, "map copies");
+	zone_change(vm_map_copy_zone, Z_NOENCRYPT, TRUE);
 
 	/*
 	 *	Cram the map and kentry zones with initial data.
@@ -4704,6 +4709,8 @@ vm_map_submap_pmap_clean(
 
 	submap_end = offset + (end - start);
 	submap_start = offset;
+
+	vm_map_lock_read(sub_map);
 	if(vm_map_lookup_entry(sub_map, offset, &entry)) {
 		
 		remove_size = (entry->vme_end - entry->vme_start);
@@ -4775,7 +4782,8 @@ vm_map_submap_pmap_clean(
 			}
 		}
 		entry = entry->vme_next;
-	} 
+	}
+	vm_map_unlock_read(sub_map);
 	return;
 }
 
@@ -8708,6 +8716,7 @@ submap_recurse:
 		fault_info->hi_offset = (entry->vme_end - entry->vme_start) + entry->offset;
 		fault_info->no_cache  = entry->no_cache;
 		fault_info->stealth = FALSE;
+		fault_info->mark_zf_absent = FALSE;
 	}
 
 	/*
@@ -10050,6 +10059,7 @@ vm_map_willneed(
 	fault_info.behavior      = VM_BEHAVIOR_SEQUENTIAL;
 	fault_info.no_cache      = FALSE;			/* ignored value */
 	fault_info.stealth	 = TRUE;
+	fault_info.mark_zf_absent = FALSE;
 
 	/*
 	 * The MADV_WILLNEED operation doesn't require any changes to the
@@ -11145,7 +11155,7 @@ vm_map_remap(
 	vm_map_address_t	*address,
 	vm_map_size_t		size,
 	vm_map_offset_t		mask,
-	boolean_t		anywhere,
+	int			flags,
 	vm_map_t		src_map,
 	vm_map_offset_t		memory_address,
 	boolean_t		copy,
@@ -11194,7 +11204,7 @@ vm_map_remap(
 	*address = vm_map_trunc_page(*address);
 	vm_map_lock(target_map);
 	result = vm_map_remap_range_allocate(target_map, address, size,
-					     mask, anywhere, &insp_entry);
+					     mask, flags, &insp_entry);
 
 	for (entry = map_header.links.next;
 	     entry != (struct vm_map_entry *)&map_header.links;
@@ -11245,18 +11255,19 @@ vm_map_remap_range_allocate(
 	vm_map_address_t	*address,	/* IN/OUT */
 	vm_map_size_t		size,
 	vm_map_offset_t		mask,
-	boolean_t		anywhere,
+	int			flags,
 	vm_map_entry_t		*map_entry)	/* OUT */
 {
-	register vm_map_entry_t	entry;
-	register vm_map_offset_t	start;
-	register vm_map_offset_t	end;
+	vm_map_entry_t	entry;
+	vm_map_offset_t	start;
+	vm_map_offset_t	end;
+	kern_return_t	kr;
 
 StartAgain: ;
 
 	start = *address;
 
-	if (anywhere)
+	if (flags & VM_FLAGS_ANYWHERE)
 	{
 		/*
 		 *	Calculate the first possible address.
@@ -11367,6 +11378,37 @@ StartAgain: ;
 		    (end > map->max_offset) ||
 		    (start >= end)) {
 			return(KERN_INVALID_ADDRESS);
+		}
+
+		/*
+		 * If we're asked to overwrite whatever was mapped in that
+		 * range, first deallocate that range.
+		 */
+		if (flags & VM_FLAGS_OVERWRITE) {
+			vm_map_t zap_map;
+
+			/*
+			 * We use a "zap_map" to avoid having to unlock
+			 * the "map" in vm_map_delete(), which would compromise
+			 * the atomicity of the "deallocate" and then "remap"
+			 * combination.
+			 */
+			zap_map = vm_map_create(PMAP_NULL,
+						start,
+						end - start,
+						map->hdr.entries_pageable);
+			if (zap_map == VM_MAP_NULL) {
+				return KERN_RESOURCE_SHORTAGE;
+			}
+
+			kr = vm_map_delete(map, start, end,
+					   VM_MAP_REMOVE_SAVE_ENTRIES,
+					   zap_map);
+			if (kr == KERN_SUCCESS) {
+				vm_map_destroy(zap_map,
+					       VM_MAP_REMOVE_NO_PMAP_CLEANUP);
+				zap_map = VM_MAP_NULL;
+			}
 		}
 
 		/*
@@ -12547,3 +12589,95 @@ void vm_map_switch_protect(vm_map_t	map,
 	map->switch_protect=val;
 	vm_map_unlock(map);
 }
+
+/* Add (generate) code signature for memory range */
+#if CONFIG_DYNAMIC_CODE_SIGNING
+kern_return_t vm_map_sign(vm_map_t map, 
+		 vm_map_offset_t start, 
+		 vm_map_offset_t end)
+{
+	vm_map_entry_t entry;
+	vm_page_t m;
+	vm_object_t object;
+	
+	/*
+	 * Vet all the input parameters and current type and state of the
+	 * underlaying object.  Return with an error if anything is amiss.
+	 */
+	if (map == VM_MAP_NULL)
+		return(KERN_INVALID_ARGUMENT);
+		
+	vm_map_lock_read(map);
+	
+	if (!vm_map_lookup_entry(map, start, &entry) || entry->is_sub_map) {
+		/*
+		 * Must pass a valid non-submap address.
+		 */
+		vm_map_unlock_read(map);
+		return(KERN_INVALID_ADDRESS);
+	}
+	
+	if((entry->vme_start > start) || (entry->vme_end < end)) {
+		/*
+		 * Map entry doesn't cover the requested range. Not handling
+		 * this situation currently.
+		 */
+		vm_map_unlock_read(map);
+		return(KERN_INVALID_ARGUMENT);
+	}
+	
+	object = entry->object.vm_object;
+	if (object == VM_OBJECT_NULL) {
+		/*
+		 * Object must already be present or we can't sign.
+		 */
+		vm_map_unlock_read(map);
+		return KERN_INVALID_ARGUMENT;
+	}
+	
+	vm_object_lock(object);
+	vm_map_unlock_read(map);
+	
+	while(start < end) {
+		uint32_t refmod;
+		
+		m = vm_page_lookup(object, start - entry->vme_start + entry->offset );
+		if (m==VM_PAGE_NULL) {
+			/* shoud we try to fault a page here? we can probably 
+			 * demand it exists and is locked for this request */
+			vm_object_unlock(object);
+			return KERN_FAILURE;
+		}
+		/* deal with special page status */
+		if (m->busy || 
+		    (m->unusual && (m->error || m->restart || m->private || m->absent))) {
+			vm_object_unlock(object);
+			return KERN_FAILURE;
+		}
+		
+		/* Page is OK... now "validate" it */
+		/* This is the place where we'll call out to create a code 
+		 * directory, later */
+		m->cs_validated = TRUE;
+
+		/* The page is now "clean" for codesigning purposes. That means
+		 * we don't consider it as modified (wpmapped) anymore. But 
+		 * we'll disconnect the page so we note any future modification
+		 * attempts. */
+		m->wpmapped = FALSE;
+		refmod = pmap_disconnect(m->phys_page);
+		
+		/* Pull the dirty status from the pmap, since we cleared the 
+		 * wpmapped bit */
+		if ((refmod & VM_MEM_MODIFIED) && !m->dirty) {
+			m->dirty = TRUE;
+		}
+		
+		/* On to the next page */
+		start += PAGE_SIZE;
+	}
+	vm_object_unlock(object);
+	
+	return KERN_SUCCESS;
+}
+#endif

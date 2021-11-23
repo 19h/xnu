@@ -174,12 +174,12 @@ extern void vm_fault_classify(vm_object_t	object,
 extern void vm_fault_classify_init(void);
 #endif
 
+unsigned long vm_pmap_enter_blocked = 0;
 
 unsigned long vm_cs_validates = 0;
 unsigned long vm_cs_revalidates = 0;
 unsigned long vm_cs_query_modified = 0;
 unsigned long vm_cs_validated_dirtied = 0;
-
 #if CONFIG_ENFORCE_SIGNED_CODE
 int cs_enforcement_disable=0;
 #else
@@ -1150,6 +1150,8 @@ vm_fault_page(
 					 */
 					my_fault = vm_fault_zero_page(m, no_zero_fill);
 
+					if (fault_info->mark_zf_absent && no_zero_fill == TRUE)
+						m->absent = TRUE;
 					break;
 				} else {
 					if (must_be_resident)
@@ -1623,6 +1625,8 @@ vm_fault_page(
 			}
 			my_fault = vm_fault_zero_page(m, no_zero_fill);
 
+			if (fault_info->mark_zf_absent && no_zero_fill == TRUE)
+				m->absent = TRUE;
 			break;
 
 		} else {
@@ -2196,7 +2200,7 @@ vm_fault_enter(vm_page_t m,
 	       int *type_of_fault)
 {
 	unsigned int	cache_attr;
-	kern_return_t	kr;
+	kern_return_t	kr, pe_result;
 	boolean_t	previously_pmapped = m->pmapped;
 	boolean_t	must_disconnect = 0;
 	boolean_t	map_is_switched, map_is_switch_protected;
@@ -2351,7 +2355,7 @@ vm_fault_enter(vm_page_t m,
 			/* Page might have been tainted before or not; now it
 			 * definitively is. If the page wasn't tainted, we must
 			 * disconnect it from all pmaps later. */
-			must_disconnect = ~m->cs_tainted;
+			must_disconnect = !m->cs_tainted;
 			m->cs_tainted = TRUE;
 			cs_enter_tainted_accepted++;
 		}
@@ -2401,7 +2405,34 @@ vm_fault_enter(vm_page_t m,
 				prot &= ~VM_PROT_EXECUTE;
 			}
 		}
-		PMAP_ENTER(pmap, vaddr, m, prot, cache_attr, wired);
+
+		/* Prevent a deadlock by not
+		 * holding the object lock if we need to wait for a page in
+		 * pmap_enter() - <rdar://problem/7138958> */
+		PMAP_ENTER_OPTIONS(pmap, vaddr, m, prot, cache_attr,
+				  wired, PMAP_OPTIONS_NOWAIT, pe_result);
+
+		if(pe_result == KERN_RESOURCE_SHORTAGE) {
+			/* The nonblocking version of pmap_enter did not succeed.
+			 * Use the blocking version instead. Requires marking
+			 * the page busy and unlocking the object */
+			boolean_t was_busy = m->busy;
+			m->busy = TRUE;
+			vm_object_unlock(m->object);
+			
+			PMAP_ENTER(pmap, vaddr, m, prot, cache_attr, wired);
+
+			/* Take the object lock again. */
+			vm_object_lock(m->object);
+			
+			/* If the page was busy, someone else will wake it up.
+			 * Otherwise, we have to do it now. */
+			assert(m->busy);
+			if(!was_busy) {
+				PAGE_WAKEUP_DONE(m);
+			}
+			vm_pmap_enter_blocked++;
+		}
 	}
 
 	/*
@@ -2417,7 +2448,7 @@ vm_fault_enter(vm_page_t m,
 				vm_page_wire(m);
 			}
 		} else {
-		        vm_page_unwire(m);
+		        vm_page_unwire(m, TRUE);
 		}
 		vm_page_unlock_queues();
 
@@ -2627,6 +2658,7 @@ RetryFault:
 	pmap = real_map->pmap;
 	fault_info.interruptible = interruptible;
 	fault_info.stealth = FALSE;
+	fault_info.mark_zf_absent = FALSE;
 
 	/*
 	 * If the page is wired, we must fault for the current protection
@@ -3856,6 +3888,7 @@ vm_fault_unwire(
 	fault_info.hi_offset = (entry->vme_end - entry->vme_start) + entry->offset;
 	fault_info.no_cache = entry->no_cache;
 	fault_info.stealth = TRUE;
+	fault_info.mark_zf_absent = FALSE;
 
 	/*
 	 *	Since the pages are wired down, we must be able to
@@ -3934,7 +3967,7 @@ vm_fault_unwire(
 			} else {
 				if (VM_PAGE_WIRED(result_page)) {
 					vm_page_lockspin_queues();
-					vm_page_unwire(result_page);
+					vm_page_unwire(result_page, TRUE);
 					vm_page_unlock_queues();
 				}
 				if(entry->zero_wired_pages) {
@@ -4008,7 +4041,7 @@ vm_fault_wire_fast(
 #define RELEASE_PAGE(m)	{				\
 	PAGE_WAKEUP_DONE(m);				\
 	vm_page_lockspin_queues();			\
-	vm_page_unwire(m);				\
+	vm_page_unwire(m, TRUE);			\
 	vm_page_unlock_queues();			\
 }
 
@@ -4178,7 +4211,7 @@ vm_fault_copy_dst_cleanup(
 		object = page->object;
 		vm_object_lock(object);
 		vm_page_lockspin_queues();
-		vm_page_unwire(page);
+		vm_page_unwire(page, TRUE);
 		vm_page_unlock_queues();
 		vm_object_paging_end(object);	
 		vm_object_unlock(object);
@@ -4262,6 +4295,7 @@ vm_fault_copy(
 	fault_info_src.hi_offset = fault_info_src.lo_offset + amount_left;
 	fault_info_src.no_cache   = FALSE;
 	fault_info_src.stealth = TRUE;
+	fault_info_src.mark_zf_absent = FALSE;
 
 	fault_info_dst.interruptible = interruptible;
 	fault_info_dst.behavior = VM_BEHAVIOR_SEQUENTIAL;
@@ -4270,6 +4304,7 @@ vm_fault_copy(
 	fault_info_dst.hi_offset = fault_info_dst.lo_offset + amount_left;
 	fault_info_dst.no_cache   = FALSE;
 	fault_info_dst.stealth = TRUE;
+	fault_info_dst.mark_zf_absent = FALSE;
 
 	do { /* while (amount_left > 0) */
 		/*

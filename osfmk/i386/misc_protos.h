@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -128,7 +128,7 @@ extern void rtc_nanotime_init_commpage(void);
 
 extern void	rtc_sleep_wakeup(uint64_t base);
 
-extern void rtc_lapic_start_ticking(void);
+extern void	rtc_timer_start(void);
 
 extern void	rtc_clock_stepping(
 			uint32_t new_frequency,
@@ -137,6 +137,7 @@ extern void	rtc_clock_stepped(
 			uint32_t new_frequency,
 			uint32_t old_frequency);
 extern void	rtc_clock_napped(uint64_t, uint64_t);
+extern void	rtc_clock_adjust(uint64_t);
 
 extern void     pmap_lowmem_finalize(void);
 

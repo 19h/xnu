@@ -528,13 +528,18 @@ act_machine_switch_pcb( thread_t new )
 
 		/*
 		 * Switch user's GS base if necessary
-		 * by setting the Kernel's GS base MSR
+		 * by setting the Kernel GS base MSR
 		 * - this will become the user's on the swapgs when
-		 * returning to user-space.
+		 * returning to user-space. Avoid this for
+		 * kernel threads (no user TLS support required)
+		 * and verify the memory shadow of the segment base
+		 * in the event it was altered in user space.
 		 */
-		if (cdp->cpu_uber.cu_user_gs_base != pcb->cthread_self) {
-			cdp->cpu_uber.cu_user_gs_base = pcb->cthread_self;
-			wrmsr64(MSR_IA32_KERNEL_GS_BASE, pcb->cthread_self);
+		if ((pcb->cthread_self != 0) || (new->task != kernel_task)) {
+			if ((cdp->cpu_uber.cu_user_gs_base != pcb->cthread_self) || (pcb->cthread_self != rdmsr64(MSR_IA32_KERNEL_GS_BASE))) {
+				cdp->cpu_uber.cu_user_gs_base = pcb->cthread_self;
+				wrmsr64(MSR_IA32_KERNEL_GS_BASE, pcb->cthread_self);
+			}
 		}
 	} else {
 		x86_saved_state_compat32_t	*iss32compat;
@@ -881,7 +886,7 @@ machine_thread_state_initialize(
      * And if we're target, re-arm the no-fpu trap.
      */
 	if (thread->machine.pcb->ifps) {
-		(void) fpu_set_fxstate(thread, NULL);
+		(void) fpu_set_fxstate(thread, NULL, x86_FLOAT_STATE64);
 
 		if (thread == current_thread())
 			clear_fpu();
@@ -1350,7 +1355,7 @@ machine_thread_set_state(
 		if (thread_is_64bit(thr_act))
 			return(KERN_INVALID_ARGUMENT);
 
-		return fpu_set_fxstate(thr_act, tstate);
+		return fpu_set_fxstate(thr_act, tstate, flavor);
 	}
 
 	case x86_FLOAT_STATE64:
@@ -1361,7 +1366,7 @@ machine_thread_set_state(
 		if ( !thread_is_64bit(thr_act))
 			return(KERN_INVALID_ARGUMENT);
 
-		return fpu_set_fxstate(thr_act, tstate);
+		return fpu_set_fxstate(thr_act, tstate, flavor);
 	}
 
 	case x86_FLOAT_STATE:
@@ -1374,13 +1379,35 @@ machine_thread_set_state(
 		state = (x86_float_state_t *)tstate;
 		if (state->fsh.flavor == x86_FLOAT_STATE64 && state->fsh.count == x86_FLOAT_STATE64_COUNT &&
 		    thread_is_64bit(thr_act)) {
-			return fpu_set_fxstate(thr_act, (thread_state_t)&state->ufs.fs64);
+			return fpu_set_fxstate(thr_act, (thread_state_t)&state->ufs.fs64, x86_FLOAT_STATE64);
 		}
 		if (state->fsh.flavor == x86_FLOAT_STATE32 && state->fsh.count == x86_FLOAT_STATE32_COUNT &&
 		    !thread_is_64bit(thr_act)) {
-			return fpu_set_fxstate(thr_act, (thread_state_t)&state->ufs.fs32); 
+			return fpu_set_fxstate(thr_act, (thread_state_t)&state->ufs.fs32, x86_FLOAT_STATE32); 
 		}
 		return(KERN_INVALID_ARGUMENT);
+	}
+
+	case x86_AVX_STATE32:
+	{
+		if (count != x86_AVX_STATE32_COUNT)
+			return(KERN_INVALID_ARGUMENT);
+
+		if (thread_is_64bit(thr_act))
+			return(KERN_INVALID_ARGUMENT);
+
+		return fpu_set_fxstate(thr_act, tstate, flavor);
+	}
+
+	case x86_AVX_STATE64:
+	{
+		if (count != x86_AVX_STATE64_COUNT)
+			return(KERN_INVALID_ARGUMENT);
+
+		if (!thread_is_64bit(thr_act))
+			return(KERN_INVALID_ARGUMENT);
+
+		return fpu_set_fxstate(thr_act, tstate, flavor);
 	}
 
 	case x86_THREAD_STATE32: 
@@ -1591,7 +1618,7 @@ machine_thread_get_state(
 
 		*count = x86_FLOAT_STATE32_COUNT;
 
-		return fpu_get_fxstate(thr_act, tstate);
+		return fpu_get_fxstate(thr_act, tstate, flavor);
 	    }
 
 	    case x86_FLOAT_STATE64:
@@ -1604,7 +1631,7 @@ machine_thread_get_state(
 
 		*count = x86_FLOAT_STATE64_COUNT;
 
-		return fpu_get_fxstate(thr_act, tstate);
+		return fpu_get_fxstate(thr_act, tstate, flavor);
 	    }
 
 	    case x86_FLOAT_STATE:
@@ -1625,17 +1652,43 @@ machine_thread_get_state(
 		        state->fsh.flavor = x86_FLOAT_STATE64;
 		        state->fsh.count  = x86_FLOAT_STATE64_COUNT;
 
-			kret = fpu_get_fxstate(thr_act, (thread_state_t)&state->ufs.fs64);
+			kret = fpu_get_fxstate(thr_act, (thread_state_t)&state->ufs.fs64, x86_FLOAT_STATE64);
 		} else {
 		        state->fsh.flavor = x86_FLOAT_STATE32;
 			state->fsh.count  = x86_FLOAT_STATE32_COUNT;
 
-			kret = fpu_get_fxstate(thr_act, (thread_state_t)&state->ufs.fs32);
+			kret = fpu_get_fxstate(thr_act, (thread_state_t)&state->ufs.fs32, x86_FLOAT_STATE32);
 		}
 		*count = x86_FLOAT_STATE_COUNT;
 
 		return(kret);
 	    }
+
+	case x86_AVX_STATE32:
+	{
+		if (*count != x86_AVX_STATE32_COUNT)
+			return(KERN_INVALID_ARGUMENT);
+
+		if (thread_is_64bit(thr_act))
+			return(KERN_INVALID_ARGUMENT);
+
+		*count = x86_AVX_STATE32_COUNT;
+
+		return fpu_get_fxstate(thr_act, tstate, flavor);
+	}
+
+	case x86_AVX_STATE64:
+	{
+		if (*count != x86_AVX_STATE64_COUNT)
+			return(KERN_INVALID_ARGUMENT);
+
+		if ( !thread_is_64bit(thr_act))
+			return(KERN_INVALID_ARGUMENT);
+
+		*count = x86_AVX_STATE64_COUNT;
+
+		return fpu_get_fxstate(thr_act, tstate, flavor);
+	}
 
 	    case x86_THREAD_STATE32: 
 	    {
@@ -2088,6 +2141,15 @@ machine_thread_create(
 	pcb->cthread_self = 0;
 	pcb->uldt_selector = 0;
 
+	/* Ensure that the "cthread" descriptor describes a valid
+	 * segment.
+	 */
+	if ((pcb->cthread_desc.access & ACC_P) == 0) {
+		struct real_descriptor	*ldtp;
+		ldtp = (struct real_descriptor *)current_ldt();
+		pcb->cthread_desc = ldtp[sel_idx(USER_DS)];
+	}
+
 
 	return(KERN_SUCCESS);
 }
@@ -2486,7 +2548,6 @@ act_thread_csave(void)
 		val = x86_FLOAT_STATE64_COUNT; 
 		kret = machine_thread_get_state(thr_act, x86_FLOAT_STATE64,
 				(thread_state_t) &ic64->fs, &val);
-
 		if (kret != KERN_SUCCESS) {
 			kfree(ic64, sizeof(struct x86_act_context64));
 			return((void *)0);
@@ -2569,13 +2630,8 @@ act_thread_catt(void *ctx)
 		kret = machine_thread_set_state(thr_act, x86_SAVED_STATE32,
 						(thread_state_t) &ic32->ss, x86_SAVED_STATE32_COUNT);
 		if (kret == KERN_SUCCESS) {
-		        kret = machine_thread_set_state(thr_act, x86_FLOAT_STATE32,
+			(void) machine_thread_set_state(thr_act, x86_FLOAT_STATE32,
 						 (thread_state_t) &ic32->fs, x86_FLOAT_STATE32_COUNT);
-			if (kret == KERN_SUCCESS && thr_act->machine.pcb->ids)
-				machine_thread_set_state(thr_act,
-							 x86_DEBUG_STATE32,
-							 (thread_state_t)&ic32->ds,
-							 x86_DEBUG_STATE32_COUNT);
 		}
 		kfree(ic32, sizeof(struct x86_act_context32));
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -46,6 +46,7 @@
 #include <sys/quota.h>
 #include <sys/dirent.h>
 #include <sys/event.h>
+#include <sys/disk.h>
 #include <kern/thread_call.h>
 
 #include <kern/locks.h>
@@ -312,7 +313,6 @@ typedef struct hfsmount {
 	u_int64_t       hfs_max_pending_io;
 					
 	thread_call_t   hfs_syncer;	      // removeable devices get sync'ed by this guy
-
 } hfsmount_t;
 
 #define HFS_META_DELAY     (100)
@@ -391,6 +391,7 @@ enum privdirtype {FILE_HARDLINKS, DIR_HARDLINKS};
  */
 #define HFS_RDONLY_DOWNGRADE      0x80000
 #define HFS_DID_CONTIG_SCAN      0x100000
+#define HFS_UNMAP                0x200000
 
 
 /* Macro to update next allocation block in the HFS mount structure.  If 
@@ -716,6 +717,8 @@ extern u_int32_t hfs_freeblks(struct hfsmount * hfsmp, int wantreserve);
 
 short MacToVFSError(OSErr err);
 
+void hfs_metadatazone_init(struct hfsmount *hfsmp);
+
 /* HFS directory hint functions. */
 extern directoryhint_t * hfs_getdirhint(struct cnode *, int, int);
 extern void  hfs_reldirhint(struct cnode *, directoryhint_t *);
@@ -755,7 +758,7 @@ extern int hfs_btsync(struct vnode *vp, int sync_transaction);
 extern void replace_desc(struct cnode *cp, struct cat_desc *cdp);
 
 extern int hfs_vgetrsrc(struct hfsmount *hfsmp, struct vnode *vp,
-			struct vnode **rvpp, int can_drop_lock);
+			struct vnode **rvpp, int can_drop_lock, int error_on_unlinked);
 
 extern int hfs_update(struct vnode *, int);
 

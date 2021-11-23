@@ -3420,6 +3420,7 @@ nfs_noremotehang(thread_t thd)
 int
 nfs_sigintr(struct nfsmount *nmp, struct nfsreq *req, thread_t thd, int nmplocked)
 {
+	proc_t p;
 	int error = 0;
 
 	if (nmp == NULL)
@@ -3468,8 +3469,8 @@ nfs_sigintr(struct nfsmount *nmp, struct nfsreq *req, thread_t thd, int nmplocke
 		return (EINTR);
 
 	/* mask off thread and process blocked signals. */
-	if ((nmp->nm_flag & NFSMNT_INT) &&
-	    proc_pendingsignals(get_bsdthreadtask_info(thd), NFSINT_SIGMASK))
+	if ((nmp->nm_flag & NFSMNT_INT) && ((p = get_bsdthreadtask_info(thd))) &&
+	    proc_pendingsignals(p, NFSINT_SIGMASK))
 		return (EINTR);
 	return (0);
 }
@@ -3952,10 +3953,10 @@ nfsrv_rcv_locked(socket_t so, struct nfsrv_sock *slp, int waitflag)
 	if (slp->ns_sotype == SOCK_STREAM) {
 		/*
 		 * If there are already records on the queue, defer soreceive()
-		 * to an nfsd so that there is feedback to the TCP layer that
+		 * to an(other) nfsd so that there is feedback to the TCP layer that
 		 * the nfs servers are heavily loaded.
 		 */
-		if (slp->ns_rec && waitflag == MBUF_DONTWAIT) {
+		if (slp->ns_rec) {
 			ns_flag = SLP_NEEDQ;
 			goto dorecs;
 		}

@@ -23,7 +23,7 @@ DATAFILES= \
 	bpf.h dlil.h \
 	ethernet.h if.h if_arp.h \
 	if_dl.h if_llc.h if_media.h if_mib.h \
-	if_types.h if_var.h \
+	if_types.h if_utun.h if_var.h \
 	kext_net.h ndrv.h pfkeyv2.h \
 	route.h
 
@@ -34,7 +34,8 @@ KERNELFILES= \
 PRIVATE_DATAFILES = \
 	if_atm.h if_vlan_var.h if_ppp.h firewire.h \
 	ppp_defs.h radix.h if_bond_var.h lacp.h ndrv_var.h \
-	raw_cb.h etherdefs.h iso88025.h if_pflog.h pfvar.h
+	raw_cb.h etherdefs.h iso88025.h if_pflog.h pfvar.h \
+	if_bridgevar.h
 
 PRIVATE_KERNELFILES = ${KERNELFILES} \
 	bpfdesc.h dlil_pvt.h ppp_comp.h \

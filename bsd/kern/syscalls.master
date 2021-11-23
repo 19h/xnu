@@ -545,7 +545,7 @@
 362	AUE_KQUEUE	ALL	{ int kqueue(void); } 
 363	AUE_NULL	ALL	{ int kevent(int fd, const struct kevent *changelist, int nchanges, struct kevent *eventlist, int nevents, const struct timespec *timeout); } 
 364	AUE_LCHOWN	ALL	{ int lchown(user_addr_t path, uid_t owner, gid_t group); }
-365	AUE_STACKSNAPSHOT	ALL	{ int stack_snapshot(pid_t pid, user_addr_t tracebuf, uint32_t tracebuf_size, uint32_t options) NO_SYSCALL_STUB; }
+365	AUE_STACKSNAPSHOT	ALL	{ int stack_snapshot(pid_t pid, user_addr_t tracebuf, uint32_t tracebuf_size, uint32_t flags, uint32_t dispatch_offset) NO_SYSCALL_STUB; }
 #if CONFIG_WORKQUEUE
 366	AUE_NULL	ALL	{ int bsdthread_register(user_addr_t threadstart, user_addr_t wqthread, int pthsize,user_addr_t dummy_value, user_addr_t targetconc_ptr, uint64_t dispatchqueue_offset) NO_SYSCALL_STUB; } 
 367	AUE_WORKQOPEN	ALL	{ int workq_open(void) NO_SYSCALL_STUB; }
@@ -563,7 +563,7 @@
 370     AUE_NULL        ALL     { int nosys(void); }   { old __semwait_signal }
 371     AUE_NULL        ALL     { int nosys(void); }   { old __semwait_signal }
 #endif
-372	AUE_NULL	ALL	{ user_addr_t thread_selfid (void) NO_SYSCALL_STUB; } 
+372	AUE_NULL	ALL	{ uint64_t thread_selfid (void) NO_SYSCALL_STUB; } 
 373	AUE_NULL	ALL	{ int nosys(void); } 
 374	AUE_NULL	ALL	{ int nosys(void); } 
 375	AUE_NULL	ALL	{ int nosys(void); } 
@@ -645,3 +645,12 @@
 427	AUE_FSGETPATH	ALL	{ user_ssize_t fsgetpath(user_addr_t buf, size_t bufsize, user_addr_t fsid, uint64_t objid) NO_SYSCALL_STUB; } { private fsgetpath (File Manager SPI) }
 428	AUE_NULL	ALL	{ mach_port_name_t audit_session_self(void); }
 429	AUE_NULL	ALL	{ int audit_session_join(mach_port_name_t port); }
+430 AUE_NULL	ALL { int pid_suspend(int pid); }
+431 AUE_NULL	ALL { int pid_resume(int pid); }
+#if CONFIG_EMBEDDED
+432	AUE_NULL	ALL	{ int fileport_makeport(int fd, user_addr_t portnamep); }
+433	AUE_NULL	ALL	{ int fileport_makefd(mach_port_name_t port); }
+#else
+432	AUE_NULL	ALL	{ int nosys(void); } 
+433	AUE_NULL	ALL	{ int nosys(void); } 
+#endif

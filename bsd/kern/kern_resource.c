@@ -102,14 +102,17 @@
 
 #include <kern/task.h>
 #include <kern/clock.h>		/* for absolutetime_to_microtime() */
-#include <netinet/in.h>		/* for TRAFFIC_MGT_SO_BACKGROUND */
+#include <netinet/in.h>		/* for TRAFFIC_MGT_SO_* */
 #include <sys/socketvar.h>	/* for struct socket */
 
 #include <vm/vm_map.h>
 
 int	donice(struct proc *curp, struct proc *chgp, int n);
 int	dosetrlimit(struct proc *p, u_int which, struct rlimit *limp);
+int	uthread_get_background_state(uthread_t);
+static void do_background_socket(struct proc *p, thread_t thread, int priority);
 static int do_background_thread(struct proc *curp, int priority);
+static int do_background_task(struct proc *curp, int priority);
 
 rlim_t maxdmap = MAXDSIZ;	/* XXX */ 
 rlim_t maxsmap = MAXSSIZ - PAGE_SIZE;	/* XXX */ 
@@ -229,7 +232,7 @@ getpriority(struct proc *curp, struct getpriority_args *uap, int32_t *retval)
 		ut = get_bsdthread_info(thread);
 
 		low = 0;
-		if ( (ut->uu_flag & UT_BACKGROUND) != 0 ) {
+		if ( (ut->uu_flag & UT_BACKGROUND_TRAFFIC_MGT) != 0 ) {
 			low = 1;
 		}
 		break;
@@ -369,7 +372,27 @@ setpriority(struct proc *curp, struct setpriority_args *uap, __unused int32_t *r
 			return (EINVAL);
 		}
 		error = do_background_thread(curp, uap->prio);
+		(void) do_background_socket(curp, current_thread(), uap->prio);
 		found++;
+		break;
+	}
+
+	case PRIO_DARWIN_PROCESS: {
+		if (uap->who == 0)
+			p = curp;
+		else {
+			p = proc_find(uap->who);
+			if (p == 0)
+				break;
+			refheld = 1;
+		}
+
+		error = do_background_task(p, uap->prio);
+		(void) do_background_socket(p, NULL, uap->prio);
+		
+		found++;
+		if (refheld != 0)
+			proc_rele(p);
 		break;
 	}
 
@@ -427,20 +450,133 @@ out:
 	return (error);
 }
 
+static int
+do_background_task(struct proc *p, int priority)
+{
+	int error = 0;
+	task_category_policy_data_t info;
+
+	/* set the max scheduling priority on the task */
+	if (priority & PRIO_DARWIN_BG) { 
+		info.role = TASK_THROTTLE_APPLICATION;
+	} else {
+		info.role = TASK_DEFAULT_APPLICATION;
+	}
+
+	error = task_policy_set(p->task,
+			TASK_CATEGORY_POLICY,
+			(task_policy_t) &info,
+			TASK_CATEGORY_POLICY_COUNT);
+
+	if (error)
+		goto out;
+
+	proc_lock(p);
+
+	/* mark proc structure as backgrounded */
+	if (priority & PRIO_DARWIN_BG) {
+		p->p_lflag |= P_LBACKGROUND;
+	} else {
+		p->p_lflag &= ~P_LBACKGROUND;
+	}
+
+	/* set or reset the disk I/O priority */
+	p->p_iopol_disk = (priority == PRIO_DARWIN_BG ? 
+			IOPOL_THROTTLE : IOPOL_DEFAULT); 
+
+	proc_unlock(p);
+
+out:
+	return (error);
+}
+
+static void 
+do_background_socket(struct proc *p, thread_t thread, int priority)
+{
+	struct filedesc                     *fdp;
+	struct fileproc                     *fp;
+	int                                 i;
+
+	if (priority & PRIO_DARWIN_BG) {
+		/*
+		 * For PRIO_DARWIN_PROCESS (thread is NULL), simply mark
+		 * the sockets with the background flag.  There's nothing
+		 * to do here for the PRIO_DARWIN_THREAD case.
+		 */
+		if (thread == NULL) {
+			proc_fdlock(p);
+			fdp = p->p_fd;
+
+			for (i = 0; i < fdp->fd_nfiles; i++) {
+				struct socket       *sockp;
+
+				fp = fdp->fd_ofiles[i];
+				if (fp == NULL || (fdp->fd_ofileflags[i] & UF_RESERVED) != 0 ||
+						fp->f_fglob->fg_type != DTYPE_SOCKET) {
+					continue;
+				}
+				sockp = (struct socket *)fp->f_fglob->fg_data;
+				socket_set_traffic_mgt_flags(sockp, TRAFFIC_MGT_SO_BACKGROUND);
+				sockp->so_background_thread = NULL;
+			}
+			proc_fdunlock(p);
+		}
+
+	} else {
+		u_int32_t	traffic_mgt;
+		/*
+		 * See comments on do_background_thread().  Deregulate network
+		 * traffics only for setpriority(PRIO_DARWIN_THREAD).
+		 */
+		traffic_mgt = (thread == NULL) ? 0 : TRAFFIC_MGT_SO_BG_REGULATE;
+
+		/* disable networking IO throttle.
+		 * NOTE - It is a known limitation of the current design that we 
+		 * could potentially clear TRAFFIC_MGT_SO_BACKGROUND bit for 
+		 * sockets created by other threads within this process.  
+		 */
+		proc_fdlock(p);
+		fdp = p->p_fd;
+		for ( i = 0; i < fdp->fd_nfiles; i++ ) {
+			struct socket       *sockp;
+
+			fp = fdp->fd_ofiles[ i ];
+			if ( fp == NULL || (fdp->fd_ofileflags[ i ] & UF_RESERVED) != 0 ||
+					fp->f_fglob->fg_type != DTYPE_SOCKET ) {
+				continue;
+			}
+			sockp = (struct socket *)fp->f_fglob->fg_data;
+			/* skip if only clearing this thread's sockets */
+			if ((thread) && (sockp->so_background_thread != thread)) {
+				continue;
+			}
+			socket_clear_traffic_mgt_flags(sockp, TRAFFIC_MGT_SO_BACKGROUND | traffic_mgt);
+			sockp->so_background_thread = NULL;
+		}
+		proc_fdunlock(p);
+	}
+}
+
+
 /*
  * do_background_thread
  * Returns:	0			Success
  * XXX - todo - does this need a MACF hook?
+ *
+ * NOTE: To maintain binary compatibility with PRIO_DARWIN_THREAD with respect
+ *	 to network traffic management, UT_BACKGROUND_TRAFFIC_MGT is set/cleared
+ *	 along with UT_BACKGROUND flag, as the latter alone no longer implies
+ *	 any form of traffic regulation (it simply means that the thread is
+ *	 background.)  With PRIO_DARWIN_PROCESS, any form of network traffic
+ *	 management must be explicitly requested via whatever means appropriate,
+ *	 and only TRAFFIC_MGT_SO_BACKGROUND is set via do_background_socket().
  */
 static int
-do_background_thread(struct proc *curp, int priority)
+do_background_thread(struct proc *curp __unused, int priority)
 {
-	int									i;
 	thread_t							thread;
 	struct uthread						*ut;
 	thread_precedence_policy_data_t		policy;
-	struct filedesc						*fdp;
-	struct fileproc						*fp;
 	
 	thread = current_thread();
 	ut = get_bsdthread_info(thread);
@@ -452,8 +588,13 @@ do_background_thread(struct proc *curp, int priority)
 			return(0);
 		}
 
-		/* clear background bit in thread and disable disk IO throttle */
-		ut->uu_flag &= ~UT_BACKGROUND;
+		/*
+		 * Clear background bit in thread and disable disk IO
+		 * throttle as well as network traffic management.
+		 * The corresponding socket flags for sockets created by
+		 * this thread will be cleared in do_background_socket().
+		 */
+		ut->uu_flag &= ~(UT_BACKGROUND | UT_BACKGROUND_TRAFFIC_MGT);
 		ut->uu_iopol_disk = IOPOL_NORMAL;
 
 		/* reset thread priority (we did not save previous value) */
@@ -461,31 +602,6 @@ do_background_thread(struct proc *curp, int priority)
 		thread_policy_set( thread, THREAD_PRECEDENCE_POLICY,
 						   (thread_policy_t)&policy,
 						   THREAD_PRECEDENCE_POLICY_COUNT );
-
-		/* disable networking IO throttle.
-		 * NOTE - It is a known limitation of the current design that we 
-		 * could potentially clear TRAFFIC_MGT_SO_BACKGROUND bit for 
-		 * sockets created by other threads within this process.  
-		 */
-		proc_fdlock(curp);
-		fdp = curp->p_fd;
-		for ( i = 0; i < fdp->fd_nfiles; i++ ) {
-			struct socket		*sockp;
-			
-			fp = fdp->fd_ofiles[ i ];
-			if ( fp == NULL || (fdp->fd_ofileflags[ i ] & UF_RESERVED) != 0 || 
-				 fp->f_fglob->fg_type != DTYPE_SOCKET ) {
-				continue;
-			}
-			sockp = (struct socket *)fp->f_fglob->fg_data;
-			if ( sockp->so_background_thread != thread ) {
-				continue;
-			}
-			sockp->so_traffic_mgt_flags &= ~TRAFFIC_MGT_SO_BACKGROUND;
-			sockp->so_background_thread = NULL;
-		}
-		proc_fdunlock(curp);
-
 		return(0);
 	}
 	
@@ -495,22 +611,48 @@ do_background_thread(struct proc *curp, int priority)
 		return(0);
 	}
 
-	/* tag thread as background and throttle disk IO */
-	ut->uu_flag |= UT_BACKGROUND;
+	/*
+	 * Tag thread as background and throttle disk IO, as well
+	 * as regulate network traffics.  Future sockets created
+	 * by this thread will have their corresponding socket
+	 * flags set at socket create time.
+	 */
+	ut->uu_flag |= (UT_BACKGROUND | UT_BACKGROUND_TRAFFIC_MGT);
 	ut->uu_iopol_disk = IOPOL_THROTTLE;
 
 	policy.importance = INT_MIN;
 	thread_policy_set( thread, THREAD_PRECEDENCE_POLICY,
 					   (thread_policy_t)&policy,
 					   THREAD_PRECEDENCE_POLICY_COUNT );
-	
+
 	/* throttle networking IO happens in socket( ) syscall.
-	 * If UT_BACKGROUND is set in the current thread then
-	 * TRAFFIC_MGT_SO_BACKGROUND socket option is set.
+	 * If UT_{BACKGROUND,BACKGROUND_TRAFFIC_MGT} is set in the current
+	 * thread then TRAFFIC_MGT_SO_{BACKGROUND,BG_REGULATE} is set.
+	 * Existing sockets are taken care of by do_background_socket().
 	 */
 	return(0);
 }
 
+/*
+ * If the thread or its proc has been put into the background
+ * with setpriority(PRIO_DARWIN_{THREAD,PROCESS}, *, PRIO_DARWIN_BG),
+ * report that status.
+ *
+ * Returns: PRIO_DARWIN_BG if background
+ * 			0 if foreground
+ */
+int
+uthread_get_background_state(uthread_t uth)
+{
+	proc_t p = uth->uu_proc;
+	if (p && (p->p_lflag & P_LBACKGROUND))
+		return PRIO_DARWIN_BG;
+	
+	if (uth->uu_flag & UT_BACKGROUND)
+		return PRIO_DARWIN_BG;
+
+	return 0;
+}
 
 /*
  * Returns:	0			Success
@@ -1172,15 +1314,16 @@ thread_is_io_throttled(void) {
 	int	policy;
 	struct uthread  *ut;
 
-	policy = current_proc()->p_iopol_disk;
-
 	ut = get_bsdthread_info(current_thread());
 
-	if (ut->uu_iopol_disk != IOPOL_DEFAULT)
-		policy = ut->uu_iopol_disk;
+	if(ut){
+		policy = current_proc()->p_iopol_disk;
 
-	if (policy == IOPOL_THROTTLE)
-		return TRUE;
+		if (ut->uu_iopol_disk != IOPOL_DEFAULT)
+			policy = ut->uu_iopol_disk;
 
+		if (policy == IOPOL_THROTTLE)
+			return TRUE;
+	}
 	return FALSE;
 }

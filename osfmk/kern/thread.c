@@ -259,6 +259,7 @@ thread_init(void)
 			thread_max * sizeof(struct thread),
 			THREAD_CHUNK * sizeof(struct thread),
 			"threads");
+	zone_change(thread_zone, Z_NOENCRYPT, TRUE);
 	
 	lck_grp_attr_setdefault(&thread_lck_grp_attr);
 	lck_grp_init(&thread_lck_grp, "thread", &thread_lck_grp_attr);
@@ -822,6 +823,7 @@ thread_create_running(
 kern_return_t
 thread_create_workq(
 	task_t				task,
+	thread_continue_t		thread_return,
 	thread_t			*new_thread)
 {
 	kern_return_t		result;
@@ -830,8 +832,7 @@ thread_create_workq(
 	if (task == TASK_NULL || task == kernel_task)
 		return (KERN_INVALID_ARGUMENT);
 
-	result = thread_create_internal(task, -1, (thread_continue_t)thread_bootstrap_return,
-													TH_OPTION_NOCRED | TH_OPTION_NOSUSP, &thread);
+	result = thread_create_internal(task, -1, thread_return, TH_OPTION_NOCRED | TH_OPTION_NOSUSP, &thread);
 	if (result != KERN_SUCCESS)
 		return (result);
 

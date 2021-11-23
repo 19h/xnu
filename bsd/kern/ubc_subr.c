@@ -374,6 +374,8 @@ ubc_init(void)
 	i = (vm_size_t) sizeof (struct ubc_info);
 
 	ubc_info_zone = zinit (i, 10000*i, 8192, "ubc_info zone");
+
+	zone_change(ubc_info_zone, Z_NOENCRYPT, TRUE);
 }
 
 
@@ -2468,7 +2470,7 @@ ubc_cs_blob_add(
 		cs_blob_size_max = (UInt32) blob->csb_mem_size;
 	}
 
-	if (cs_debug) {
+	if (cs_debug > 1) {
 		proc_t p;
 
 		p = current_proc();

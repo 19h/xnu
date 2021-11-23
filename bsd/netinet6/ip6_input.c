@@ -637,7 +637,11 @@ ip6_input(m)
 		ifnet_lock_done(ifp);
 		if (in6m)
 			ours = 1;
+#if MROUTING
 		else if (!ip6_mrouter) {
+#else
+		else {
+#endif
 			ip6stat.ip6s_notmember++;
 			ip6stat.ip6s_cantforward++;
 			in6_ifstat_inc(ifp, ifs6_in_discard);
@@ -902,12 +906,14 @@ ip6_input(m)
 		 * ip6_mforward() returns a non-zero value, the packet
 		 * must be discarded, else it may be accepted below.
 		 */
+#if MROUTING
 		if (ip6_mrouter && ip6_mforward(ip6, m->m_pkthdr.rcvif, m)) {
 			ip6stat.ip6s_cantforward++;
 			m_freem(m);
 			lck_mtx_unlock(ip6_mutex);
 			return;
 		}
+#endif
 		if (!ours) {
 			m_freem(m);
 			lck_mtx_unlock(ip6_mutex);
@@ -949,7 +955,8 @@ injectit:
 
 	while (nxt != IPPROTO_DONE) {
 		struct ipfilter *filter;
-		
+		int (*pr_input)(struct mbuf **, int *);
+
 		if (ip6_hdrnestlimit && (++nest > ip6_hdrnestlimit)) {
 			ip6stat.ip6s_toomanyhdr++;
 			goto badunlocked;
@@ -1022,13 +1029,18 @@ injectit:
 			}
 			ipf_unref();
 		}
-		if (!(ip6_protox[nxt]->pr_flags & PR_PROTOLOCK)) {
+
+		if ((pr_input = ip6_protox[nxt]->pr_input) == NULL) {
+			m_freem(m);
+			m = NULL;
+			nxt = IPPROTO_DONE;
+		} else if (!(ip6_protox[nxt]->pr_flags & PR_PROTOLOCK)) {
 			lck_mtx_lock(inet6_domain_mutex);
-			nxt = (*ip6_protox[nxt]->pr_input)(&m, &off);
+			nxt = pr_input(&m, &off);
 			lck_mtx_unlock(inet6_domain_mutex);
+		} else {
+			nxt = pr_input(&m, &off);
 		}
-		else
-			nxt = (*ip6_protox[nxt]->pr_input)(&m, &off);
 	}
 	return;
  bad:

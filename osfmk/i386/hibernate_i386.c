@@ -44,7 +44,11 @@
 #include <vm/vm_page.h>
 #include <i386/i386_lowmem.h>
 
+extern ppnum_t max_ppnum;
+
 #define MAX_BANKS	32
+
+int hibernate_page_list_allocate_avoided;
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -69,11 +73,18 @@ hibernate_page_list_allocate(void)
     msize = args->MemoryMapDescriptorSize;
     mcount = args->MemoryMapSize / msize;
 
+    hibernate_page_list_allocate_avoided = 0;
+
     num_banks = 0;
     for (i = 0; i < mcount; i++, mptr = (EfiMemoryRange *)(((vm_offset_t)mptr) + msize))
     {
 	base = (ppnum_t) (mptr->PhysicalStart >> I386_PGSHIFT);
 	num = (ppnum_t) mptr->NumberOfPages;
+
+	if (base > max_ppnum)
+		continue;
+	if ((base + num - 1) > max_ppnum)
+		num = max_ppnum - base + 1;
 	if (!num)
 	    continue;
 
@@ -85,7 +96,6 @@ hibernate_page_list_allocate(void)
 	    case kEfiBootServicesCode:
 	    case kEfiBootServicesData:
 	    case kEfiConventionalMemory:
-	    case kEfiACPIReclaimMemory:
 	    case kEfiACPIMemoryNVS:
 	    case kEfiPalCode:
 
@@ -119,6 +129,11 @@ hibernate_page_list_allocate(void)
 	    // runtime services will be restarted, so no save
 	    case kEfiRuntimeServicesCode:
 	    case kEfiRuntimeServicesData:
+	    // contents are volatile once the platform expert starts
+	    case kEfiACPIReclaimMemory:
+		hibernate_page_list_allocate_avoided += num;
+		break;
+
 	    // non dram
 	    case kEfiReservedMemoryType:
 	    case kEfiUnusableMemory:
@@ -211,10 +226,13 @@ hibernate_processor_setup(IOHibernateImageHeader * header)
 
     header->runtimePages     = args->efiRuntimeServicesPageStart;
     header->runtimePageCount = args->efiRuntimeServicesPageCount;
-    if (args->Version == kBootArgsVersion1 && args->Revision >= kBootArgsRevision1_5) {
-        header->runtimeVirtualPages = args->efiRuntimeServicesVirtualPageStart;
+    header->runtimeVirtualPages = args->efiRuntimeServicesVirtualPageStart;
+    if (args->Version == kBootArgsVersion1 && args->Revision >= kBootArgsRevision1_6) {
+        header->performanceDataStart = args->performanceDataStart;
+        header->performanceDataSize = args->performanceDataSize;
     } else {
-        header->runtimeVirtualPages = 0;
+        header->performanceDataStart = 0;
+        header->performanceDataSize = 0;
     }
 
     return (KERN_SUCCESS);

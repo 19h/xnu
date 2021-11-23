@@ -59,6 +59,7 @@ struct thread_call_group {
 	timer_call_data_t	delayed_timer;
 
 	struct wait_queue	idle_wqueue;
+	struct wait_queue	daemon_wqueue;
 	uint32_t			idle_count, active_count;
 };
 
@@ -137,6 +138,7 @@ thread_call_initialize(void)
 
 	i = sizeof (thread_call_data_t);
 	thread_call_zone = zinit(i, 4096 * i, 16 * i, "thread_call");
+	zone_change(thread_call_zone, Z_NOENCRYPT, TRUE);
 
     simple_lock_init(&thread_call_lock, 0);
 
@@ -149,6 +151,7 @@ thread_call_initialize(void)
 	timer_call_setup(&group->delayed_timer, thread_call_delayed_timer, group);
 
 	wait_queue_init(&group->idle_wqueue, SYNC_POLICY_FIFO);
+	wait_queue_init(&group->daemon_wqueue, SYNC_POLICY_FIFO);
 
     queue_init(&thread_call_internal_queue);
     for (
@@ -772,7 +775,7 @@ thread_call_wake(
 	else
 	if (!thread_call_daemon_awake) {
 		thread_call_daemon_awake = TRUE;
-		thread_wakeup_one(&thread_call_daemon_awake);
+		wait_queue_wakeup_one(&group->daemon_wqueue, NULL, THREAD_AWAKENED);
 	}
 }
 
@@ -901,8 +904,8 @@ thread_call_daemon_continue(
 		simple_lock(&thread_call_lock);
     }
 
-	thread_call_daemon_awake = FALSE;
-    assert_wait(&thread_call_daemon_awake, THREAD_UNINT);
+    thread_call_daemon_awake = FALSE;
+    wait_queue_assert_wait(&group->daemon_wqueue, NULL, THREAD_UNINT, 0);
     
     simple_unlock(&thread_call_lock);
 	(void) spllo();

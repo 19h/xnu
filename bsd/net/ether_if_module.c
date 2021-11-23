@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -112,10 +112,6 @@ extern struct ifqueue pkintrq;
 extern struct ifqueue atalkintrq;
 #endif
 
-
-#if BRIDGE
-#include <net/bridge.h>
-#endif
 
 #define memcpy(x,y,z)	bcopy(y, x, z)
 

@@ -116,6 +116,9 @@ struct buf {
 	int	b_validoff;		/* Offset in buffer of valid region. */
 	int	b_validend;		/* Offset of end of valid region. */
 	proc_t 	b_proc;			/* Associated proc; NULL if kernel. */
+#if CONFIG_PROTECT
+	struct cprotect *b_cpentry; 	/* address of cp_entry, to be passed further down  */
+#endif /* CONFIG_PROTECT */
 #ifdef JOE_DEBUG
         void *	b_owner;
         int     b_tag;
@@ -147,6 +150,7 @@ struct buf {
  * Parameters for buffer cache garbage collection 
  */
 #define BUF_STALE_THRESHHOLD 	30	/* Collect if untouched in the last 30 seconds */
+#define BUF_MAX_GC_COUNT	1000	/* Generally 6-8 MB */
 
 /*
  * mask used by buf_flags... these are the readable external flags
@@ -187,6 +191,7 @@ struct buf {
  */
 #define B_NEED_IODONE   0x20000000	/* need biodone on the real_bp associated with a cluster_io */
 #define B_COMMIT_UPL    0x40000000	/* commit/abort the UPL on I/O success/failure */
+#define B_TDONE		0x80000000	/* buf_t that is part of a cluster level transaction has completed */
 
 
 /* Flags to low-level allocation routines. */

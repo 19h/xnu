@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -155,7 +155,7 @@ typedef struct _cframe_t {
 static unsigned panic_io_port;
 static unsigned	commit_paniclog_to_nvram;
 
-int debug_boot_arg;
+unsigned int debug_boot_arg;
 
 void
 machine_startup(void)
@@ -167,13 +167,14 @@ machine_startup(void)
             halt_in_debugger = halt_in_debugger ? 0 : 1;
 #endif
 
-	if (PE_parse_boot_argn("debug", &boot_arg, sizeof (boot_arg))) {
-		if (boot_arg & DB_HALT) halt_in_debugger=1;
-		if (boot_arg & DB_PRT) disable_debug_output=FALSE; 
-		if (boot_arg & DB_SLOG) systemLogDiags=TRUE; 
-		if (boot_arg & DB_NMI) panicDebugging=TRUE; 
-		if (boot_arg & DB_LOG_PI_SCRN) logPanicDataToScreen=TRUE;
-		debug_boot_arg = boot_arg;
+	if (PE_parse_boot_argn("debug", &debug_boot_arg, sizeof (debug_boot_arg))) {
+		if (debug_boot_arg & DB_HALT) halt_in_debugger=1;
+		if (debug_boot_arg & DB_PRT) disable_debug_output=FALSE; 
+		if (debug_boot_arg & DB_SLOG) systemLogDiags=TRUE; 
+		if (debug_boot_arg & DB_NMI) panicDebugging=TRUE; 
+		if (debug_boot_arg & DB_LOG_PI_SCRN) logPanicDataToScreen=TRUE;
+	} else {
+		debug_boot_arg = 0;
 	}
 
 	if (!PE_parse_boot_argn("nvram_paniclog", &commit_paniclog_to_nvram, sizeof (commit_paniclog_to_nvram)))
@@ -226,9 +227,6 @@ machine_startup(void)
 	}
 	if (PE_parse_boot_argn("yield", &boot_arg, sizeof (boot_arg))) {
 		sched_poll_yield_shift = boot_arg;
-	}
-	if (PE_parse_boot_argn("idlehalt", &boot_arg, sizeof (boot_arg))) {
-		idlehalt = boot_arg;
 	}
 /* The I/O port to issue a read from, in the event of a panic. Useful for
  * triggering logic analyzers.
@@ -714,13 +712,11 @@ panic_io_port_read(void) {
 /* For use with the MP rendezvous mechanism
  */
 
-#if !CONFIG_EMBEDDED
 static void
 machine_halt_cpu(__unused void *arg) {
 	panic_io_port_read();
 	pmCPUHalt(PM_HALT_DEBUG);
 }
-#endif
 
 void
 Debugger(
@@ -762,7 +758,7 @@ Debugger(
 #endif
 
 		/* Print backtrace - callee is internally synchronized */
-		panic_i386_backtrace(stackptr, 20, NULL, FALSE, NULL);
+		panic_i386_backtrace(stackptr, 64, NULL, FALSE, NULL);
 
 		/* everything should be printed now so copy to NVRAM
 		 */
@@ -819,23 +815,28 @@ Debugger(
 			}
                     }
                 }
-		draw_panic_dialog();
+
+		/* If the user won't be able to read the dialog,
+		 * don't bother trying to show it
+		 */
+		if (!PE_reboot_on_panic())
+			draw_panic_dialog();
 
 		if (!panicDebugging) {
 			/* Clear the MP rendezvous function lock, in the event
 			 * that a panic occurred while in that codepath.
 			 */
 			mp_rendezvous_break_lock();
-#if CONFIG_EMBEDDED
-			PEHaltRestart(kPEPanicRestartCPU);
-#else
+			if (PE_reboot_on_panic()) {
+				PEHaltRestart(kPEPanicRestartCPU);
+			}
+
 			/* Force all CPUs to disable interrupts and HLT.
 			 * We've panicked, and shouldn't depend on the
 			 * PEHaltRestart() mechanism, which relies on several
 			 * bits of infrastructure.
 			 */
 			mp_rendezvous_no_intrs(machine_halt_cpu, NULL);
-#endif
 			/* NOT REACHED */
 		}
         }

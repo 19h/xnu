@@ -34,7 +34,7 @@
 
 __BEGIN_DECLS
 
-#include <vm/pmap.h>
+#include <vm/vm_pageout.h>
 #include <mach/memory_object_types.h>
 #include <device/device_port.h>
 
@@ -46,21 +46,20 @@ kern_return_t IOIteratePageableMaps(vm_size_t size,
 vm_map_t IOPageableMapForAddress(uintptr_t address);
 
 kern_return_t 
-IOMemoryDescriptorMapMemEntry(vm_map_t map, ipc_port_t entry, IOOptionBits options, bool pageable,
+IOMemoryDescriptorMapMemEntry(vm_map_t * map, ipc_port_t entry, IOOptionBits options, bool pageable,
 				mach_vm_size_t offset, mach_vm_address_t * address, mach_vm_size_t length);
 kern_return_t 
-IOMemoryDescriptorMapCopy(vm_map_t map, 
-				vm_map_t src_map, 
-				mach_vm_offset_t src_address,
+IOMemoryDescriptorMapCopy(vm_map_t * map, 
 				IOOptionBits options,
 				mach_vm_size_t offset, 
 				mach_vm_address_t * address, mach_vm_size_t length);
 
 mach_vm_address_t
-IOKernelAllocateContiguous(mach_vm_size_t size,
-			    mach_vm_address_t maxPhys, mach_vm_size_t alignment);
+IOKernelAllocateWithPhysicalRestrict(mach_vm_size_t size, mach_vm_address_t maxPhys, 
+			                mach_vm_size_t alignment, bool contiguous);
 void
-IOKernelFreeContiguous(mach_vm_address_t address, mach_vm_size_t size);
+IOKernelFreePhysical(mach_vm_address_t address, mach_vm_size_t size);
+
 
 extern vm_size_t debug_iomallocpageable_size;
 
@@ -114,7 +113,7 @@ struct IODMACommandInternal
     UInt64 fPreparedOffset;
     UInt64 fPreparedLength;
 
-	UInt32 fSourceAlignMask;
+    UInt32 fSourceAlignMask;
 	
     UInt8  fCursor;
     UInt8  fCheckAddressing;
@@ -126,12 +125,13 @@ struct IODMACommandInternal
     UInt8  fNewMD;
     UInt8  fLocalMapper;
 	
-	ppnum_t  fCopyMapperPageAlloc;
-    ppnum_t  fCopyPageCount;
-    ppnum_t  fNextRemapIndex;
-    addr64_t fCopyNext;
+    vm_page_t fCopyPageAlloc;
+    vm_page_t fCopyNext;
+    vm_page_t fNextRemapPage;
 
-	ppnum_t  fLocalMapperPageAlloc;
+    ppnum_t  fCopyPageCount;
+
+    ppnum_t  fLocalMapperPageAlloc;
     ppnum_t  fLocalMapperPageCount;
 
     class IOBufferMemoryDescriptor * fCopyMD;

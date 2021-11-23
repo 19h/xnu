@@ -690,7 +690,7 @@ extern kern_return_t vm_map_remap(
 				vm_map_offset_t		*address,
 				vm_map_size_t		size,
 				vm_map_offset_t		mask,
-				boolean_t		anywhere,
+				int			flags,
 				vm_map_t		src_map,
 				vm_map_offset_t		memory_address,
 				boolean_t		copy,
@@ -1023,6 +1023,12 @@ extern kern_return_t vm_map_get_upl(
 				unsigned int	*page_infoCnt,
 				int		*flags,
 				int		force_data_sync);
+
+#if CONFIG_DYNAMIC_CODE_SIGNING
+extern kern_return_t vm_map_sign(vm_map_t map, 
+				 vm_map_offset_t start, 
+				 vm_map_offset_t end);
+#endif
 
 __END_DECLS
 

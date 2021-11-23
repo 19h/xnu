@@ -125,7 +125,7 @@ static void	buf_reassign(buf_t bp, vnode_t newvp);
 static errno_t	buf_acquire_locked(buf_t bp, int flags, int slpflag, int slptimeo);
 static int	buf_iterprepare(vnode_t vp, struct buflists *, int flags);
 static void	buf_itercomplete(vnode_t vp, struct buflists *, int flags);
-static boolean_t buffer_cache_gc(void);
+boolean_t buffer_cache_gc(int);
 
 __private_extern__ int  bdwrite_internal(buf_t, int);
 
@@ -341,6 +341,29 @@ buf_markfua(buf_t bp) {
 
         SET(bp->b_flags, B_FUA);
 }
+
+#ifdef CONFIG_PROTECT
+void *
+buf_getcpaddr(buf_t bp) {
+	return bp->b_cpentry;
+}
+
+void 
+buf_setcpaddr(buf_t bp, void *cp_entry_addr) {
+	bp->b_cpentry = (struct cprotect *) cp_entry_addr;
+}
+
+#else
+void *
+buf_getcpaddr(buf_t bp __unused) {
+	return NULL;
+}
+
+void 
+buf_setcpaddr(buf_t bp __unused, void *cp_entry_addr __unused) {
+	return;
+}
+#endif /* CONFIG_PROTECT */
 
 errno_t
 buf_error(buf_t bp) {
@@ -749,8 +772,6 @@ buf_clear(buf_t bp) {
 	}
 	bp->b_resid = 0;
 }
-
-
 
 /*
  * Read or write a buffer that is not contiguous on disk.
@@ -2964,6 +2985,9 @@ bcleanbuf(buf_t bp, boolean_t discard)
 		bp->b_bcount = 0;
 		bp->b_dirtyoff = bp->b_dirtyend = 0;
 		bp->b_validoff = bp->b_validend = 0;
+#ifdef CONFIG_PROTECT
+		bp->b_cpentry = 0;
+#endif
 
 		lck_mtx_lock_spin(buf_mtxp);
 	}
@@ -3445,6 +3469,9 @@ alloc_io_buf(vnode_t vp, int priv)
 	bp->b_bufsize = 0;
 	bp->b_upl = NULL;
 	bp->b_vp = vp;
+#ifdef CONFIG_PROTECT
+	bp->b_cpentry = 0;
+#endif
 
 	if (vp && (vp->v_type == VBLK || vp->v_type == VCHR))
 		bp->b_dev = vp->v_rdev;
@@ -3648,12 +3675,17 @@ dump_buffer:
 	return(0);
 }
 
-static boolean_t 
-buffer_cache_gc(void)
+boolean_t 
+buffer_cache_gc(int all)
 {
 	buf_t bp;
 	boolean_t did_large_zfree = FALSE;
 	int now = buf_timestamp();
+	uint32_t count = 0;
+	int thresh_hold = BUF_STALE_THRESHHOLD;
+
+	if (all)
+		thresh_hold = 0;
 
 	lck_mtx_lock_spin(buf_mtxp);
 
@@ -3661,7 +3693,7 @@ buffer_cache_gc(void)
 	bp = TAILQ_FIRST(&bufqueues[BQ_META]);
 
 	/* Only collect buffers unused in the last N seconds. Note: ordered by timestamp. */
-	while ((bp != NULL) && ((now - bp->b_timestamp) > BUF_STALE_THRESHHOLD)) {
+	while ((bp != NULL) && ((now - bp->b_timestamp) > thresh_hold) && (all || (count < BUF_MAX_GC_COUNT))) {
 		int result, size;
 		boolean_t is_zalloc;
 
@@ -3674,6 +3706,7 @@ buffer_cache_gc(void)
 			did_large_zfree = TRUE;
 		}
 		bp = TAILQ_FIRST(&bufqueues[BQ_META]);
+		count++;
 	} 
 
 	lck_mtx_unlock(buf_mtxp);

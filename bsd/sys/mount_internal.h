@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -202,6 +202,7 @@ struct mount {
  * ioflags
  */
 #define MNT_IOFLAGS_FUA_SUPPORTED	0x00000001
+#define MNT_IOFLAGS_UNMAP_SUPPORTED	0x00000002
 
 /*
  * ioqueue depth for devices that don't report one
@@ -227,6 +228,10 @@ extern struct mount * dead_mountp;
  *		because the bits here were broken out from the high bits
  *		of the mount flags.
  */
+#ifdef CONFIG_IMGSRC_ACCESS
+#define MNTK_HAS_MOVED		0x00002000
+#define MNTK_BACKS_ROOT		0x00004000
+#endif /* CONFIG_IMGSRC_ACCESS */
 #define MNTK_AUTH_CACHE_TTL	0x00008000      /* rights cache has TTL - TTL of 0 disables cache */
 #define	MNTK_PATH_FROM_ID	0x00010000	/* mounted file system supports id-to-path lookups */
 #define	MNTK_UNMOUNT_PREFLIGHT	0x00020000	/* mounted file system wants preflight check during unmount */
@@ -235,6 +240,7 @@ extern struct mount * dead_mountp;
 #define	MNTK_LOCK_LOCAL		0x00100000	/* advisory locking is done above the VFS itself */
 #define MNTK_VIRTUALDEV 	0x00200000      /* mounted on a virtual device i.e. a disk image */
 #define MNTK_ROOTDEV    	0x00400000      /* this filesystem resides on the same device as the root */
+#define MNTK_SSD		0x00800000	/* underlying device is of the solid state variety */
 #define MNTK_UNMOUNT		0x01000000	/* unmount in progress */
 #define	MNTK_MWAIT		0x02000000	/* waiting for unmount to finish */
 #define MNTK_WANTRDWR		0x04000000	/* upgrade to read/write requested */

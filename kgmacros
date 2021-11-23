@@ -64,6 +64,7 @@ document kgm
 |     showtaskvme    Display info about the task's vm_map entries
 |     showtaskipc    Display info about the specified task's ipc space
 |     showtaskrights Display info about the task's ipc space entries
+|     showtaskrightsbt Display info about the task's ipc space entries with back traces
 |     showtaskbusyports    Display all of the task's ports with unread messages
 |
 |     showact	     Display info about a thread specified by activation
@@ -213,7 +214,8 @@ document kgm
 |     showallgdbcorestacks Corefile equivalent of "showallgdbstacks"
 |     kdp-reenter	Schedule reentry into the debugger and continue.
 |     kdp-reboot	Restart remote target
-|     kdp-version       Get KDP version number
+|     kdp-version	Get KDP version number
+|     kdp-connect	"shorthand" connection macro
 |
 |     zstack		Print zalloc caller stack (zone leak debugging)
 |     findoldest	Find oldest zone leak debugging record
@@ -587,12 +589,15 @@ define showactint
 			set $stkmask = 0x3
 		end
 		set $kgm_return = 0
+		set $kgm_actint_framecount = 0
 	    	while ($mysp != 0) && (($mysp & $stkmask) == 0) \
 		      && ($mysp != $prevsp) \
 		      && ((((unsigned long) $mysp ^ (unsigned long) $prevsp) < 0x2000) \
 		      || (((unsigned long)$mysp < ((unsigned long) ($kgm_thread->kernel_stack+kernel_stack_size))) \
-		      && ((unsigned long)$mysp > (unsigned long) ($kgm_thread->kernel_stack))))
+		      && ((unsigned long)$mysp > (unsigned long) ($kgm_thread->kernel_stack)))) \
+		      && ($kgm_actint_framecount < 128)
 			printf "\n          "
+			set $kgm_actint_framecount = $kgm_actint_framecount + 1
 			showptrhdrpad
 			printf "      "
  			showptr $mysp
@@ -779,7 +784,7 @@ define showwaitqwaitercount
     set $kgm_wc_wqe = (WaitQueueElement *)$kgm_wc_linksp->next
     set $kgm_wc_count = 0
     while ( (queue_entry_t)$kgm_wc_wqe != (queue_entry_t)$kgm_wc_linksp)
-	if ($kgm_wc_wqe->wqe_type != &_wait_queue_link)
+	if ($kgm_wc_wqe->wqe_type != &_wait_queue_link) && ($kgm_wc_wqe->wqe_type != &_wait_queue_link_noalloc)
         	set $kgm_wc_count = $kgm_wc_count + 1
 	end
         set $kgm_wc_wqe = (WaitQueueElement *)$kgm_wc_wqe->wqe_links.next
@@ -788,7 +793,7 @@ define showwaitqwaitercount
 end
 
 define showwaitqmembercount
-    set $kgm_mc_waitqsetp = (WaitQueueSet*)$arg0
+    set $kgm_mc_waitqsetp = (struct wait_queue_set *)$arg0
     set $kgm_mc_setlinksp = &($kgm_mc_waitqsetp->wqs_setlinks)
     set $kgm_mc_wql = (WaitQueueLink *)$kgm_mc_setlinksp->next
     set $kgm_mc_count = 0
@@ -850,7 +855,7 @@ define showwaitqmemberof
 end
 
 define showwaitqmembers
-    set $kgm_ms_waitqsetp = (WaitQueueSet*)$arg0
+    set $kgm_ms_waitqsetp = (struct wait_queue_set *)$arg0
     set $kgm_ms_setlinksp = &($kgm_ms_waitqsetp->wqs_setlinks)
     set $kgm_ms_wql = (WaitQueueLink *)$kgm_ms_setlinksp->next
     set $kgm_ms_found = 0
@@ -866,15 +871,15 @@ define showwaitqmembers
 end
 
 define showwaitqheader
-    printf "wait_queue  ref_count   interlock   "
+    printf "wait_queue  prepostq    interlock   "
     printf "pol  type   member_cnt  waiter_cnt\n"
 end
 
 define showwaitqint
-    set $kgm_waitqp = (WaitQueue*)$arg0
+    set $kgm_waitqp = (WaitQueue *)$arg0
     printf "0x%08x  ", $kgm_waitqp
     if ($kgm_waitqp->wq_type == 0xf1d1)
-	printf "0x%08x  ", ((WaitQueueSet*)$kgm_waitqp)->wqs_refcount
+	printf "0x%08x  ", &((struct wait_queue_set *)$kgm_waitqp)->wqs_preposts
     else
 	printf "0x00000000  "
     end
@@ -985,6 +990,93 @@ define showvmint
     printf "\n"
 end
 
+
+define showmapwiredp
+    set $kgm_mapp = (vm_map_t)$arg0
+    set $kgm_map = *$kgm_mapp
+    set $kgm_head_vmep = &($kgm_mapp->hdr.links)
+    set $kgm_vmep = $kgm_map.hdr.links.next
+    set $kgm_objp_prev = (struct vm_object *)0
+    if $arg1 == 0
+        set $kgm_saw_kernel_obj = 0
+	set $kgm_wired_count = 0
+	set $kgm_objp_print_space = 1
+    else
+	set $kgm_objp_print_space = 0
+    end
+    while (($kgm_vmep != 0) && ($kgm_vmep != $kgm_head_vmep))
+        set $kgm_vme = *$kgm_vmep
+	set $kgm_objp = $kgm_vme.object.vm_object
+	if $kgm_vme.is_sub_map
+	    if $arg1 == 0
+	        set $kgm_mapp_orig = $kgm_mapp
+		set $kgm_vmep_orig = $kgm_vmep
+		set $kgm_vme_orig = $kgm_vme
+		set $kgm_head_vmep_orig = $kgm_head_vmep
+		printf "\n****"
+		showptr $kgm_objp
+		showmapwiredp $kgm_objp 1
+		set $kgm_vme = $kgm_vme_orig
+		set $kgm_vmep = $kgm_vmep_orig
+		set $kgm_mapp = $kgm_mapp_orig
+		set $kgm_head_vmep = $kgm_head_vmep_orig
+		set $kgm_objp = (struct vm_object *)0
+	    else
+	        printf "\n????"	    
+		showptr $kgm_mapp
+	        printf "    "
+	        showptr $kgm_vmep
+		set $kgm_objp = (struct vm_object *)0
+		printf "\n"
+	    end
+	end
+	if ($kgm_objp == $kgm_objp_prev)
+	    set $kgm_objp = (struct vm_object *)0
+	end
+	if $kgm_objp == kernel_object
+	   if $kgm_saw_kernel_obj
+	       set $kgm_objp = (struct vm_object *)0
+	   end
+	   set $kgm_saw_kernel_obj = 1
+	end
+	if $kgm_objp && $kgm_objp->wired_page_count
+	    if $kgm_objp_print_space == 1
+	        printf "    "
+		showptr $kgm_mapp
+	    end
+	    set $kgm_objp_print_space = 1
+	    printf "    "
+	    showptr $kgm_vmep
+	    printf "  0x%016llx  ", $kgm_vme.links.start
+	    printf "%5d", $kgm_vme.alias
+            printf "%6d  ",($kgm_vme.links.end - $kgm_vme.links.start) >> 12
+	    showptr $kgm_objp
+	    printf "[%3d]", $kgm_objp->ref_count
+	    printf "%7d\n", $kgm_objp->wired_page_count
+	    set $kgm_wired_count = $kgm_wired_count + $kgm_objp->wired_page_count
+	    set $kgm_objp_prev = $kgm_objp
+	end
+        set $kgm_vmep = $kgm_vme.links.next
+    end
+    if $arg1 == 0
+        printf "total wired count = %d\n", $kgm_wired_count
+    end
+end
+
+define showmapwired
+    printf "    map       "
+    showptrhdrpad
+    printf "    entry     "
+    showptrhdrpad
+    printf "  start               alias  #page  object    "
+    showptrhdrpad
+    printf "       wired\n"
+    showmapwiredp $arg0 0
+end
+document showmapwired
+Syntax: (gdb) showmapwired <vm_map>
+| Routine to print out a summary listing of all the entries with wired pages in a vm_map
+end
 
 define showmapvme
 	showmapheader
@@ -1136,6 +1228,12 @@ define showipcint
             if $kgm_ie.ie_bits & 0x001f0000
                 set $kgm_name = (($kgm_iindex << 8)|($kgm_ie.ie_bits >> 24))
                 showipceint $kgm_iep $kgm_name
+                if $arg2 != 0 && ipc_portbt != 0
+		    if $kgm_ie.ie_object != 0 && ($kgm_ie.ie_bits & 0x00070000) && ((ipc_port_t) $kgm_ie.ie_object)->ip_callstack[0] != 0
+                        printf "              user bt: "
+                        showportbt $kgm_ie.ie_object $kgm_is.is_task
+                    end
+                end
             end
             set $kgm_iindex = $kgm_iindex + 1
             set $kgm_iep = &($kgm_is.is_table[$kgm_iindex])
@@ -1151,7 +1249,7 @@ end
 define showipc
     set $kgm_isp = (ipc_space_t)$arg0
     showipcheader
-    showipcint $kgm_isp 0
+    showipcint $kgm_isp 0 0
 end
 document showipc
 Syntax: (gdb) showipc <ipc_space>
@@ -1161,7 +1259,7 @@ end
 define showrights
 	set $kgm_isp = (ipc_space_t)$arg0
     showipcheader
-	showipcint $kgm_isp 1
+	showipcint $kgm_isp 1 0
 end
 document showrights
 Syntax: (gdb) showrights <ipc_space>
@@ -1174,7 +1272,7 @@ define showtaskipc
 	showtaskheader
     showipcheader
 	showtaskint $kgm_taskp
-	showipcint $kgm_taskp->itk_space 0
+	showipcint $kgm_taskp->itk_space 0 0
 end
 document showtaskipc
 Syntax: (gdb) showtaskipc <task>
@@ -1187,11 +1285,23 @@ define showtaskrights
 	showtaskheader
     showipcheader
 	showtaskint $kgm_taskp
-	showipcint $kgm_taskp->itk_space 1
+	showipcint $kgm_taskp->itk_space 1 0
 end
 document showtaskrights
 Syntax: (gdb) showtaskrights <task>
 | Routine to print info about the ipc rights for a task
+end
+
+define showtaskrightsbt
+	set $kgm_taskp = (task_t)$arg0
+	showtaskheader
+    showipcheader
+	showtaskint $kgm_taskp
+	showipcint $kgm_taskp->itk_space 1 1
+end
+document showtaskrightsbt
+Syntax: (gdb) showtaskrightsbt <task>
+| Routine to print info about the ipc rights for a task with backtraces
 end
 
 define showallipc
@@ -1201,7 +1311,7 @@ define showallipc
         showtaskheader
         showipcheader
         showtaskint $kgm_cur_taskp
-        showipcint $kgm_cur_taskp->itk_space 0
+        showipcint $kgm_cur_taskp->itk_space 0 0
     	set $kgm_cur_taskp = (struct task *)($kgm_cur_taskp->tasks.next)
     end
 end
@@ -1218,7 +1328,7 @@ define showallrights
         showtaskheader
         showipcheader
         showtaskint $kgm_cur_taskp
-        showipcint $kgm_cur_taskp->itk_space 1
+        showipcint $kgm_cur_taskp->itk_space 1 0
     	set $kgm_cur_taskp = (struct task *)($kgm_cur_taskp->tasks.next)
     end
 end
@@ -1570,6 +1680,9 @@ define showkobject
     if ($kgm_kotype == 31)
 	printf "UPL"
     end
+    if ($kgm_kotype == 34)
+	printf "FD"
+    end
     printf ")\n"
 end
 
@@ -1631,6 +1744,25 @@ define showportmember
     printf "0x%08x\n", $kgm_portp->ip_messages.data.port.msgcount
 end
 
+define showportbt
+    set $kgm_iebt = ((ipc_port_t) $arg0)->ip_callstack
+    set $kgm_iepid = ((ipc_port_t) $arg0)->ip_spares[0]
+    set $kgm_procpid = ((proc_t) (((task_t) $arg1)->bsd_info))->p_pid
+    if $kgm_iebt[0] != 0
+        showptr $kgm_iebt[0]
+        set $kgm_iebt_loop_ctr = 1
+        while ($kgm_iebt_loop_ctr < 16 && $kgm_iebt[$kgm_iebt_loop_ctr])
+            printf " "
+            showptr $kgm_iebt[$kgm_iebt_loop_ctr]
+            set $kgm_iebt_loop_ctr = $kgm_iebt_loop_ctr + 1
+        end
+        if $kgm_iepid != $kgm_procpid
+            printf " (%d)", $kgm_iepid
+        end
+        printf "\n"
+    end
+end
+
 define showportint
     printf "0x%08x  ", $arg0
     set $kgm_portp = (struct ipc_port *)$arg0
@@ -1671,11 +1803,11 @@ define showpsetint
     printf "Set "
     printf "%5d  ", $kgm_psetp->ips_object.io_references
     printf "0x%08x  ", $kgm_psetp->ips_messages.data.pset.local_name
-    set $kgm_setlinksp = &($kgm_psetp->ips_messages.data.set_queue.wqs_setlinks)
+    set $kgm_setlinksp = &($kgm_psetp->ips_messages.data.pset.set_queue.wqs_setlinks)
     set $kgm_wql = (WaitQueueLink *)$kgm_setlinksp->next
     set $kgm_found = 0
     while ( (queue_entry_t)$kgm_wql != (queue_entry_t)$kgm_setlinksp)
-        set $kgm_portp = (struct ipc_port *)((int)($kgm_wql->wql_element->wqe_queue) - ((int)$kgm_portoff))
+        set $kgm_portp = (struct ipc_port *)((uintptr_t)$kgm_wql->wql_element.wqe_queue - $kgm_portoff)
 	if !$kgm_found  
 	    set $kgm_destspacep = (struct ipc_space *)0
 	    showportdestproc $kgm_portp
@@ -1711,17 +1843,17 @@ end
 
 define showmqueue
     set $kgm_mqueue = *(struct ipc_mqueue *)$arg0
+    set $kgm_psetoff = (uintptr_t)&(((struct ipc_pset *)0)->ips_messages)
+    set $kgm_portoff = (uintptr_t)&(((struct ipc_port *)0)->ip_messages)
     if ($kgm_mqueue.data.pset.set_queue.wqs_wait_queue.wq_type == 0xf1d1)
-	set $kgm_psetoff = &(((struct ipc_pset *)0)->ips_messages)
-	set $kgm_pset = (((long)$arg0) - ((long)$kgm_psetoff))
+	set $kgm_psetp = (struct ipc_pset *)(((uintptr_t)$arg0) - $kgm_psetoff)
         showpsetheader
-	showpsetint $kgm_pset 1
+	showpsetint $kgm_psetp 1
     end
     if ($kgm_mqueue.data.pset.set_queue.wqs_wait_queue.wq_type == 0xf1d0)
-        set $kgm_portoff = &(((struct ipc_port *)0)->ip_messages)
-	set $kgm_port = (((long)$arg0) - ((long)$kgm_portoff))
+	set $kgm_portp = (struct ipc_port *)(((uintptr_t)$arg0) - $kgm_portoff)
 	showportheader
-	showportint $kgm_port 1
+	showportint $kgm_portp 1
     end
 end
 
@@ -1744,6 +1876,9 @@ define zprint_one
     end
     if ($kgm_zone->expandable)
         printf "X"
+    end
+    if ($kgm_zone->noencrypt)
+       printf "$"
     end
     printf "\n"
 end
@@ -2562,7 +2697,7 @@ define getdumpinfo
        dumpinfoint KDP_DUMPINFO_GETINFO
        set $kgm_dumpinfo = (kdp_dumpinfo_reply_t *) manual_pkt.data
        if $kgm_dumpinfo->type & KDP_DUMPINFO_REBOOT
-       	  printf "Sysem will reboot after kernel info gets dumped.\n"
+       	  printf "System will reboot after kernel info gets dumped.\n"
        else
        	  printf "Sysem will not reboot after kernel info gets dumped.\n"
        end
@@ -6997,7 +7132,7 @@ define showbootermemorymap
 	     set $kgm_mptr = (EfiMemoryRange *)((unsigned long)kernelBootArgs->MemoryMap + $kgm_voffset + $kgm_i * $kgm_msize)
 #	     p/x *$kgm_mptr
 	     if $kgm_mptr->Type == 0
-	       printf "reserved  "
+	       printf "Reserved  "
 	     end
 	     if $kgm_mptr->Type == 1
 	       printf "LoaderCode"
@@ -7018,7 +7153,7 @@ define showbootermemorymap
 	       printf "RT_data   "
 	     end
 	     if $kgm_mptr->Type == 7
-	       printf "available "
+	       printf "Convention"
 	     end
 	     if $kgm_mptr->Type == 8
     	       printf "Unusable  "
@@ -9122,6 +9257,8 @@ set $_ioapic_index_ver         = 0x01
 set $_ioapic_index_redir_base  = 0x10
 
 set $_apic_vector_mask         = 0xFF
+set $_apic_timer_tsc_deadline  = 0x40000
+set $_apic_timer_periodic      = 0x20000
 set $_apic_masked              = 0x10000
 set $_apic_trigger_level       = 0x08000
 set $_apic_polarity_high       = 0x02000
@@ -9169,30 +9306,39 @@ end
 define _apic_print
        set $value = $arg0
 
-       printf "[VEC=%3d ", $value & $_apic_vector_mask
+       printf "[VEC=%3d", $value & $_apic_vector_mask
        if $value & $_apic_masked
-	  printf "MASK=yes "
+	  printf " MASK=yes"
        else
-	  printf "MASK=no  "
+	  printf " MASK=no "
        end       
 
        if $value & $_apic_trigger_level
-       	  printf "TRIG=level "
+       	  printf " TRIG=level"
        else
-	  printf "TRIG=edge  "
+	  printf " TRIG=edge "
        end
 
        if $value & $_apic_polarity_high
-       	  printf "POL=high"
+       	  printf " POL=high"
        else
-	  printf "POL=low "
+	  printf " POL=low "
        end
 
        if $value & $_apic_pending
-       	  printf " PEND=yes]\n"
+       	  printf " PEND=yes"
        else
-	  printf " PEND=no ]\n"
+	  printf " PEND=no "
        end
+
+       if $value & $_apic_timer_periodic
+	  printf " PERIODIC"
+       end
+       if $value & $_apic_timer_tsc_deadline
+	  printf " TSC_DEADLINE"
+       end
+
+       printf "]\n"
 end
 
 define ioapic_read32
@@ -10181,4 +10327,18 @@ document showallbusyports
 Syntax:  showallbusyports
 |Routine to print information about all receive rights on the system that
 |have enqueued messages.
+end
+
+define kdp-connect
+    if $argc > 0
+	kdp-reattach $arg0
+    else
+    	printf "Attempting to attach to localhost...\n"
+    	kdp-reattach localhost
+    end
+end
+
+document kdp-connect
+Syntax: (gdb) kdpconnect <address-of-remote-host>
+| Attach to the machine with given hostname or IP address, or 'localhost' if blank 
 end

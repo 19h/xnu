@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -46,6 +46,8 @@
 #include <mach/vm_param.h>
 #include <i386/pmap.h>
 #include <i386/misc_protos.h>
+#include <i386/mp.h>
+
 #if MACH_KDB
 #include <machine/db_machdep.h>
 #include <ddb/db_aout.h>
@@ -96,8 +98,8 @@ vm_offset_t ml_static_malloc(
 
 void ml_get_bouncepool_info(vm_offset_t *phys_addr, vm_size_t *size)
 {
-        *phys_addr = bounce_pool_base;
-	*size      = bounce_pool_size;
+        *phys_addr = 0;
+	*size      = 0;
 }
 
 
@@ -335,8 +337,6 @@ register_cpu(
 		if (this_cpu_datap->lcpu.core == NULL)
 			goto failed;
 
-		pmCPUStateInit();
-
 #if NCOPY_WINDOWS > 0
 		this_cpu_datap->cpu_pmap = pmap_cpu_alloc(boot_cpu);
 		if (this_cpu_datap->cpu_pmap == NULL)
@@ -434,7 +434,7 @@ ml_cpu_get_info(ml_cpu_info_t *cpu_infop)
 	 * Are we supporting MMX/SSE/SSE2/SSE3?
 	 * As distinct from whether the cpu has these capabilities.
 	 */
-	os_supports_sse = !!(get_cr4() & CR4_XMM);
+	os_supports_sse = !!(get_cr4() & CR4_OSXMM);
 	if ((cpuid_features() & CPUID_FEATURE_SSE4_2) && os_supports_sse)
 		cpu_infop->vector_unit = 8;
 	else if ((cpuid_features() & CPUID_FEATURE_SSE4_1) && os_supports_sse)
@@ -543,7 +543,8 @@ ml_init_lock_timeout(void)
 	}
 	MutexSpin = (unsigned int)abstime;
 
-	nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &LastDebuggerEntryAllowance);
+	nanoseconds_to_absolutetime(4ULL * NSEC_PER_SEC, &LastDebuggerEntryAllowance);
+	interrupt_latency_tracker_setup();
 }
 
 /*
@@ -646,6 +647,10 @@ vm_offset_t ml_stack_remaining(void)
 	} else {
 	    return (local - current_thread()->kernel_stack);
 	}
+}
+
+boolean_t machine_timeout_suspended(void) {
+	return (mp_recent_debugger_activity() || panic_active() || pmap_tlb_flush_timeout || spinlock_timed_out);
 }
 
 #if MACH_KDB

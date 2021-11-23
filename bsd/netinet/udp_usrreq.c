@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -1096,12 +1096,18 @@ udp_output(inp, m, addr, control, p)
 	struct ip_moptions *mopts;
 	struct route ro;
 	struct ip_out_args ipoa;
+#if PKT_PRIORITY
+	mbuf_traffic_class_t mtc = MBUF_TC_NONE;
+#endif /* PKT_PRIORITY */
 
 	KERNEL_DEBUG(DBG_FNC_UDP_OUTPUT | DBG_FUNC_START, 0,0,0,0,0);
 
-	if (control)
-		m_freem(control);		/* XXX */
-
+	if (control != NULL) {
+#if PKT_PRIORITY
+		mtc = mbuf_traffic_class_from_control(control);
+#endif /* PKT_PRIORITY */
+		m_freem(control);
+	}
 	KERNEL_DEBUG(DBG_LAYER_OUT_BEG, inp->inp_fport, inp->inp_lport,
 		     inp->inp_laddr.s_addr, inp->inp_faddr.s_addr,
 		     (htons((u_short)len + sizeof (struct udphdr))));
@@ -1254,6 +1260,10 @@ udp_output(inp, m, addr, control, p)
 	/* Copy the cached route and take an extra reference */
 	inp_route_copyout(inp, &ro);
 
+#if PKT_PRIORITY
+	set_traffic_class(m, so, mtc);
+#endif /* PKT_PRIORITY */
+
 	socket_unlock(so, 0);
 	/* XXX jgraessley please look at XXX */
 	error = ip_output_list(m, 0, inpopts, &ro, soopts, mopts, &ipoa);
@@ -1263,17 +1273,48 @@ udp_output(inp, m, addr, control, p)
 	inp_route_copyin(inp, &ro);
 
 	if (udp_dodisconnect) {
+#if IFNET_ROUTE_REFCNT
+		/* Always discard the cached route for unconnected socket */
+		if (inp->inp_route.ro_rt != NULL) {
+			rtfree(inp->inp_route.ro_rt);
+			inp->inp_route.ro_rt = NULL;
+		}
+#endif /* IFNET_ROUTE_REFCNT */
 		in_pcbdisconnect(inp);
 		inp->inp_laddr = origladdr;	/* XXX rehash? */
 	}
+#if IFNET_ROUTE_REFCNT
+	else if (inp->inp_route.ro_rt != NULL &&
+	    (inp->inp_route.ro_rt->rt_flags & (RTF_MULTICAST|RTF_BROADCAST))) {
+		/* Always discard non-unicast cached route */
+		rtfree(inp->inp_route.ro_rt);
+		inp->inp_route.ro_rt = NULL;
+	}
+#endif /* IFNET_ROUTE_REFCNT */
+
 	KERNEL_DEBUG(DBG_FNC_UDP_OUTPUT | DBG_FUNC_END, error, 0,0,0,0);
 	return (error);
 
 abort:
         if (udp_dodisconnect) {
-                in_pcbdisconnect(inp);
-                inp->inp_laddr = origladdr; /* XXX rehash? */
+#if IFNET_ROUTE_REFCNT
+		/* Always discard the cached route for unconnected socket */
+		if (inp->inp_route.ro_rt != NULL) {
+			rtfree(inp->inp_route.ro_rt);
+			inp->inp_route.ro_rt = NULL;
+		}
+#endif /* IFNET_ROUTE_REFCNT */
+		in_pcbdisconnect(inp);
+		inp->inp_laddr = origladdr; /* XXX rehash? */
         }
+#if IFNET_ROUTE_REFCNT
+	else if (inp->inp_route.ro_rt != NULL &&
+	    (inp->inp_route.ro_rt->rt_flags & (RTF_MULTICAST|RTF_BROADCAST))) {
+		/* Always discard non-unicast cached route */
+		rtfree(inp->inp_route.ro_rt);
+		inp->inp_route.ro_rt = NULL;
+	}
+#endif /* IFNET_ROUTE_REFCNT */
 
 release:
 	m_freem(m);

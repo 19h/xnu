@@ -132,6 +132,7 @@ static lck_grp_t	*cl_mtx_grp;
 static lck_attr_t	*cl_mtx_attr;
 static lck_grp_attr_t   *cl_mtx_grp_attr;
 static lck_mtx_t	*cl_mtxp;
+static lck_mtx_t	*cl_transaction_mtxp;
 
 
 #define	IO_UNKNOWN	0
@@ -242,6 +243,11 @@ cluster_init(void) {
 
 	if (cl_mtxp == NULL)
 	        panic("cluster_init: failed to allocate cl_mtxp");
+
+	cl_transaction_mtxp = lck_mtx_alloc_init(cl_mtx_grp, cl_mtx_attr);
+
+	if (cl_transaction_mtxp == NULL)
+	        panic("cluster_init: failed to allocate cl_transaction_mtxp");
 }
 
 
@@ -510,26 +516,36 @@ cluster_iodone(buf_t bp, void *callback_arg)
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_START,
 		     cbp_head, bp->b_lblkno, bp->b_bcount, bp->b_flags, 0);
 
-	for (cbp = cbp_head; cbp; cbp = cbp->b_trans_next) {
-	        /*
-		 * all I/O requests that are part of this transaction
-		 * have to complete before we can process it
-		 */
-	        if ( !(cbp->b_flags & B_DONE)) {
+	if (cbp_head->b_trans_next || !(cbp_head->b_flags & B_EOT)) {
 
+		lck_mtx_lock_spin(cl_transaction_mtxp);
+
+		bp->b_flags |= B_TDONE;
+		
+		for (cbp = cbp_head; cbp; cbp = cbp->b_trans_next) {
+		        /*
+			 * all I/O requests that are part of this transaction
+			 * have to complete before we can process it
+			 */
+		        if ( !(cbp->b_flags & B_TDONE)) {
+
+			        KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
+					     cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
+
+				lck_mtx_unlock(cl_transaction_mtxp);
+				return 0;
+			}
+			if (cbp->b_flags & B_EOT)
+			        transaction_complete = TRUE;
+		}
+		lck_mtx_unlock(cl_transaction_mtxp);
+
+		if (transaction_complete == FALSE) {
 		        KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-				     cbp_head, cbp, cbp->b_bcount, cbp->b_flags, 0);
+				     cbp_head, 0, 0, 0, 0);
 
 			return 0;
 		}
-		if (cbp->b_flags & B_EOT)
-		        transaction_complete = TRUE;
-	}
-	if (transaction_complete == FALSE) {
-	        KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 20)) | DBG_FUNC_END,
-			     cbp_head, 0, 0, 0, 0);
-
-		return 0;
 	}
 	error       = 0;
 	total_size  = 0;
@@ -759,6 +775,14 @@ cluster_complete_transaction(buf_t *cbp_head, void *callback_arg, int *retval, i
 	        for (cbp = *cbp_head; cbp; cbp = cbp->b_trans_next)
 		        buf_biowait(cbp);
 	}
+	/*
+	 * we've already waited on all of the I/Os in this transaction,
+	 * so mark all of the buf_t's in this transaction as B_TDONE
+	 * so that cluster_iodone sees the transaction as completed
+	 */
+	for (cbp = *cbp_head; cbp; cbp = cbp->b_trans_next)
+	        cbp->b_flags |= B_TDONE;
+
 	error = cluster_iodone(*cbp_head, callback_arg);
 
 	if ( !(flags & CL_ASYNC) && error && *retval == 0) {
@@ -2718,7 +2742,7 @@ cluster_write_copy(vnode_t vp, struct uio *uio, u_int32_t io_req_size, off_t old
 			 * because IO_HEADZEROFILL and IO_TAILZEROFILL not set
 			 */
 		        if ((start_offset + total_size) > max_io_size)
-			        total_size -= start_offset;
+			        total_size = max_io_size - start_offset;
 		        xfer_resid = total_size;
 
 		        retval = cluster_copy_ubc_data_internal(vp, uio, &xfer_resid, 1, 1);
@@ -3780,7 +3804,6 @@ cluster_read_direct(vnode_t vp, struct uio *uio, off_t filesize, int *read_type,
 	int              force_data_sync;
 	int              retval = 0;
 	int		 no_zero_fill = 0;
-	int		 abort_flag = 0;
 	int              io_flag = 0;
 	int		 misaligned = 0;
 	struct clios     iostate;
@@ -3991,13 +4014,11 @@ next_dread:
 		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 72)) | DBG_FUNC_START,
 			     (int)upl_offset, upl_needed_size, (int)iov_base, io_size, 0);
 
-		if (upl_offset == 0 && ((io_size & PAGE_MASK) == 0)) {
+		if (upl_offset == 0 && ((io_size & PAGE_MASK) == 0))
 		        no_zero_fill = 1;
-			abort_flag = UPL_ABORT_DUMP_PAGES | UPL_ABORT_FREE_ON_EMPTY;
-		} else {
+		else
 		        no_zero_fill = 0;
-		        abort_flag = UPL_ABORT_FREE_ON_EMPTY;
-		}
+
 		for (force_data_sync = 0; force_data_sync < 3; force_data_sync++) {
 		        pages_in_pl = 0;
 			upl_size = upl_needed_size;
@@ -4028,13 +4049,13 @@ next_dread:
 			pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
 
 			for (i = 0; i < pages_in_pl; i++) {
-			        if (!upl_valid_page(pl, i))
+			        if (!upl_page_present(pl, i))
 				        break;		  
 			}
 			if (i == pages_in_pl)
 			        break;
 
-			ubc_upl_abort(upl, abort_flag);
+			ubc_upl_abort(upl, 0);
 		}
 		if (force_data_sync >= 3) {
 		        KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 72)) | DBG_FUNC_END,
@@ -4052,7 +4073,7 @@ next_dread:
 			        io_size = 0;
 		}
 		if (io_size == 0) {
-			ubc_upl_abort(upl, abort_flag);
+			ubc_upl_abort(upl, 0);
 			goto wait_for_dreads;
 		}
 		KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 72)) | DBG_FUNC_END,
@@ -4100,7 +4121,7 @@ next_dread:
 			 * go wait for any other reads to complete before
 			 * returning the error to the caller
 			 */
-			ubc_upl_abort(upl, abort_flag);
+			ubc_upl_abort(upl, 0);
 
 		        goto wait_for_dreads;
 	        }
@@ -5614,6 +5635,14 @@ is_file_clean(vnode_t vp, off_t filesize)
 #define DRT_HASH_SMALL_MODULUS	23
 #define DRT_HASH_LARGE_MODULUS	401
 
+/*
+ * Physical memory required before the large hash modulus is permitted.
+ *
+ * On small memory systems, the large hash modulus can lead to phsyical
+ * memory starvation, so we avoid using it there.
+ */
+#define DRT_HASH_LARGE_MEMORY_REQUIRED	(1024LL * 1024LL * 1024LL)	/* 1GiB */
+
 #define DRT_SMALL_ALLOCATION	1024	/* 104 bytes spare */
 #define DRT_LARGE_ALLOCATION	16384	/* 344 bytes spare */
 
@@ -5756,8 +5785,12 @@ vfs_drt_alloc_map(struct vfs_drt_clustermap **cmapp)
 		 * see whether we should grow to the large one.
 		 */
 		if (ocmap->scm_modulus == DRT_HASH_SMALL_MODULUS) {
-			/* if the ring is nearly full */
-			if (active_buckets > (DRT_HASH_SMALL_MODULUS - 5)) {
+			/* 
+			 * If the ring is nearly full and we are allowed to
+			 * use the large modulus, upgrade.
+			 */
+			if ((active_buckets > (DRT_HASH_SMALL_MODULUS - 5)) &&
+			    (max_mem >= DRT_HASH_LARGE_MEMORY_REQUIRED)) {
 				nsize = DRT_HASH_LARGE_MODULUS;
 			} else {
 				nsize = DRT_HASH_SMALL_MODULUS;

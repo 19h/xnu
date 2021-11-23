@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -95,12 +95,15 @@
 #define KEV_DL_PROTO_DETACHED	15
 #define KEV_DL_LINK_ADDRESS_CHANGED	16
 #define KEV_DL_WAKEFLAGS_CHANGED	17
+#define KEV_DL_IF_IDLE_ROUTE_REFCNT	18
 
 #include <net/if_var.h>
 #include <sys/types.h>
 #endif
 
 #ifdef KERNEL_PRIVATE
+#define         IF_MAXUNIT      0x7fff  /* historical value */
+
 struct if_clonereq {
 	int	ifcr_total;		/* total cloners (out) */
 	int	ifcr_count;		/* room for this many in user buffer */
@@ -154,6 +157,18 @@ struct if_clonereq32 {
 #define IFEF_REUSE	0x20000000 /* DLIL ifnet recycler, ifnet is not new */
 #define IFEF_INUSE	0x40000000 /* DLIL ifnet recycler, ifnet in use */
 #define IFEF_UPDOWNCHANGE	0x80000000 /* Interface's up/down state is changing */
+
+/*
+ * !!! NOTE !!!
+ *
+ * if_idle_flags definitions: (all bits are reserved for internal/future
+ * use). Setting these flags MUST be done via the ifnet_set_idle_flags()
+ * KPI due to the associated reference counting.  Clearing them may be done by
+ * calling the KPI, otherwise implicitly at interface detach time.  Setting
+ * the if_idle_flags field to a non-zero value will cause the networking
+ * stack to aggressively purge expired objects (routes, etc.)
+ */
+#define IFRF_IDLE_NOTIFY	0x1	/* Generate notifications on idle */
 
 /* flags set internally only: */
 #define	IFF_CANTCHANGE \
@@ -325,6 +340,7 @@ struct	ifreq {
 		struct	ifdevmtu ifru_devmtu;
 		struct	ifkpi	ifru_kpi;
 		u_int32_t ifru_wake_flags;
+		u_int32_t ifru_route_refcnt;
 	} ifr_ifru;
 #define	ifr_addr	ifr_ifru.ifru_addr	/* address */
 #define	ifr_dstaddr	ifr_ifru.ifru_dstaddr	/* other end of p-to-p link */
@@ -347,6 +363,7 @@ struct	ifreq {
 #endif /* KERNEL_PRIVATE */
 #define ifr_kpi		ifr_ifru.ifru_kpi
 #define ifr_wake_flags	ifr_ifru.ifru_wake_flags /* wake capabilities of devive */
+#define ifr_route_refcnt ifr_ifru.ifru_route_refcnt /* route references on interface */
 };
 
 #define	_SIZEOF_ADDR_IFREQ(ifr) \
@@ -402,6 +419,34 @@ struct ifmediareq32 {
 	int	ifm_active;		/* active options */
 	int	ifm_count;		/* # entries in ifm_ulist array */
 	user32_addr_t ifmu_ulist;	/* 32-bit pointer */
+};
+#pragma pack()
+#endif /* KERNEL_PRIVATE */
+
+
+#pragma pack(4)
+struct  ifdrv {
+	char		ifd_name[IFNAMSIZ];     /* if name, e.g. "en0" */
+	unsigned long	ifd_cmd;
+	size_t		ifd_len;
+	void		*ifd_data;
+};
+#pragma pack()
+
+#ifdef KERNEL_PRIVATE
+#pragma pack(4)
+struct ifdrv32 {
+	char		ifd_name[IFNAMSIZ];     /* if name, e.g. "en0" */
+	u_int32_t	ifd_cmd;
+	u_int32_t	ifd_len;
+	user32_addr_t	ifd_data;
+};
+
+struct  ifdrv64 {
+	char		ifd_name[IFNAMSIZ];     /* if name, e.g. "en0" */
+	u_int64_t	ifd_cmd;
+	u_int64_t	ifd_len;
+	user64_addr_t	ifd_data;
 };
 #pragma pack()
 #endif /* KERNEL_PRIVATE */
