@@ -82,7 +82,7 @@ fileport_port_to_fileglob(ipc_port_t port)
 
 	ip_lock(port);
 	if (ip_active(port) && IKOT_FILEPORT == ip_kotype(port)) {
-		fg = (void *)port->ip_kobject;
+		fg = (void *) ip_get_kobject(port);
 	}
 	ip_unlock(port);
 
@@ -112,7 +112,7 @@ fileport_notify(mach_msg_header_t *msg)
 
 	ip_lock(port);
 
-	fg = (struct fileglob *)port->ip_kobject;
+	fg = (struct fileglob *) ip_get_kobject(port);
 
 	if (!ip_active(port)) {
 		panic("Inactive port passed to fileport_notify()\n");
@@ -156,7 +156,7 @@ fileport_invoke(task_t task, mach_port_name_t name,
 
 	kr = ipc_object_copyin(task->itk_space, name,
 	    MACH_MSG_TYPE_COPY_SEND, (ipc_object_t *)&fileport, 0, NULL,
-	    IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND);
+	    IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}

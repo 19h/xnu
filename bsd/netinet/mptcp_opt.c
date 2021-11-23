@@ -137,7 +137,7 @@ mptcp_setup_join_subflow_syn_opts(struct socket *so, u_char *opt, unsigned optle
 	if (tp->t_mpflags & TMPF_BACKUP_PATH) {
 		mpjoin_req.mmjo_subtype_bkp |= MPTCP_BACKUP;
 	} else if (inp->inp_boundifp && IFNET_IS_CELLULAR(inp->inp_boundifp) &&
-	    mpts->mpts_mpte->mpte_svctype < MPTCP_SVCTYPE_AGGREGATE) {
+	    mptcp_subflows_need_backup_flag(mpts->mpts_mpte)) {
 		mpjoin_req.mmjo_subtype_bkp |= MPTCP_BACKUP;
 		tp->t_mpflags |= TMPF_BACKUP_PATH;
 	} else {
@@ -202,7 +202,7 @@ mptcp_send_mpfail(struct tcpcb *tp, u_char *opt, unsigned int optlen)
 	struct mptcb *mp_tp = NULL;
 	struct mptcp_mpfail_opt fail_opt;
 	uint64_t dsn;
-	int len = sizeof(struct mptcp_mpfail_opt);
+	uint8_t len = sizeof(struct mptcp_mpfail_opt);
 
 	mp_tp = tptomptp(tp);
 	if (mp_tp == NULL) {
@@ -235,11 +235,11 @@ mptcp_send_mpfail(struct tcpcb *tp, u_char *opt, unsigned int optlen)
 static int
 mptcp_send_infinite_mapping(struct tcpcb *tp, u_char *opt, unsigned int optlen)
 {
+	struct socket *so = tp->t_inpcb->inp_socket;
+	uint8_t len = sizeof(struct mptcp_dsn_opt);
 	struct mptcp_dsn_opt infin_opt;
 	struct mptcb *mp_tp = NULL;
-	size_t len = sizeof(struct mptcp_dsn_opt);
-	struct socket *so = tp->t_inpcb->inp_socket;
-	int csum_len = 0;
+	uint8_t csum_len = 0;
 
 	if (!so) {
 		return optlen;
@@ -334,7 +334,7 @@ mptcp_ok_to_fin(struct tcpcb *tp, u_int64_t dsn, u_int32_t datalen)
 unsigned int
 mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
     unsigned int optlen, int flags, int len,
-    boolean_t *p_mptcp_acknow)
+    boolean_t *p_mptcp_acknow, boolean_t *do_not_compress)
 {
 	struct inpcb *inp = (struct inpcb *)tp->t_inpcb;
 	struct socket *so = inp->inp_socket;
@@ -374,6 +374,9 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 		} else if (!(tp->t_mpflags & TMPF_INFIN_SENT)) {
 			optlen = mptcp_send_infinite_mapping(tp, opt, optlen);
 		}
+
+		*do_not_compress = TRUE;
+
 		goto ret_optlen;
 	}
 
@@ -405,11 +408,14 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 		} else {
 			/* its a retransmission of the MP_CAPABLE ACK */
 		}
+
+		*do_not_compress = TRUE;
+
 		goto ret_optlen;
 	}
 
 	if (tp->t_mpflags & TMPF_SND_JACK) {
-		/* Do the ACK part */
+		*do_not_compress = TRUE;
 		optlen = mptcp_setup_join_ack_opts(tp, opt, optlen);
 		if (!tp->t_mpuna) {
 			tp->t_mpuna = tp->snd_una;
@@ -422,7 +428,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 		goto ret_optlen;
 	}
 
-	if (!(tp->t_mpflags & TMPF_MPTCP_TRUE)) {
+	if (!(tp->t_mpflags & (TMPF_MPTCP_TRUE | TMPF_PREESTABLISHED))) {
 		goto ret_optlen;
 	}
 	/*
@@ -440,10 +446,14 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 		} else {
 			tp->t_mpflags &= ~TMPF_SND_REM_ADDR;
 		}
+
+		*do_not_compress = TRUE;
 	}
 
 	if (tp->t_mpflags & TMPF_SND_MPPRIO) {
 		optlen = mptcp_snd_mpprio(tp, opt, optlen);
+
+		*do_not_compress = TRUE;
 	}
 
 	if (mp_tp->mpt_flags & MPTCPF_SND_64BITDSN) {
@@ -497,7 +507,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 		 * XXX If this delay causes issue, remove the 2-byte padding.
 		 */
 		struct mptcp_dss64_ack32_opt dsn_ack_opt;
-		unsigned int dssoptlen = sizeof(dsn_ack_opt);
+		uint8_t dssoptlen = sizeof(dsn_ack_opt);
 		uint16_t dss_csum;
 
 		if (do_csum) {
@@ -545,12 +555,11 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 		}
 
 		optlen += dssoptlen;
-		mptcplog((LOG_DEBUG, "%s: long DSS = %llx ACK = %llx \n", __func__,
-		    mptcp_ntoh64(dsn_ack_opt.mdss_dsn),
-		    mptcp_ntoh64(dsn_ack_opt.mdss_ack)),
-		    MPTCP_SOCKET_DBG, MPTCP_LOGLVL_LOG);
 
 		tp->t_mpflags &= ~TMPF_MPTCP_ACKNOW;
+
+		*do_not_compress = TRUE;
+
 		goto ret_optlen;
 	}
 
@@ -558,7 +567,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 	    (!send_64bit_dsn) &&
 	    !(tp->t_mpflags & TMPF_MPTCP_ACKNOW)) {
 		struct mptcp_dsn_opt dsn_opt;
-		unsigned int dssoptlen = sizeof(struct mptcp_dsn_opt);
+		uint8_t dssoptlen = sizeof(struct mptcp_dsn_opt);
 		uint16_t dss_csum;
 
 		if (do_csum) {
@@ -599,6 +608,9 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 
 		optlen += dssoptlen;
 		tp->t_mpflags &= ~TMPF_MPTCP_ACKNOW;
+
+		*do_not_compress = TRUE;
+
 		goto ret_optlen;
 	}
 
@@ -608,7 +620,7 @@ mptcp_setup_opts(struct tcpcb *tp, int32_t off, u_char *opt,
 	    !(tp->t_mpflags & TMPF_SEND_DSN) &&
 	    !(tp->t_mpflags & TMPF_SEND_DFIN)) {
 		struct mptcp_data_ack_opt dack_opt;
-		unsigned int dssoptlen = 0;
+		uint8_t dssoptlen = 0;
 do_ack32_only:
 		dssoptlen = sizeof(dack_opt);
 
@@ -634,7 +646,7 @@ do_ack32_only:
 	    !(tp->t_mpflags & TMPF_SEND_DSN) &&
 	    !(tp->t_mpflags & TMPF_SEND_DFIN)) {
 		struct mptcp_data_ack64_opt dack_opt;
-		unsigned int dssoptlen = 0;
+		uint8_t dssoptlen = 0;
 do_ack64_only:
 		dssoptlen = sizeof(dack_opt);
 
@@ -664,7 +676,7 @@ do_ack64_only:
 	    (!send_64bit_ack) &&
 	    (tp->t_mpflags & TMPF_MPTCP_ACKNOW)) {
 		struct mptcp_dss_ack_opt dss_ack_opt;
-		unsigned int dssoptlen = sizeof(dss_ack_opt);
+		uint8_t dssoptlen = sizeof(dss_ack_opt);
 		uint16_t dss_csum;
 
 		if (do_csum) {
@@ -721,7 +733,7 @@ do_ack64_only:
 	    (send_64bit_ack) &&
 	    (tp->t_mpflags & TMPF_MPTCP_ACKNOW)) {
 		struct mptcp_dss32_ack64_opt dss_ack_opt;
-		unsigned int dssoptlen = sizeof(dss_ack_opt);
+		uint8_t dssoptlen = sizeof(dss_ack_opt);
 		uint16_t dss_csum;
 
 		if (do_csum) {
@@ -769,11 +781,14 @@ do_ack64_only:
 			panic("optlen too large");
 		}
 		tp->t_mpflags &= ~TMPF_MPTCP_ACKNOW;
+
+		*do_not_compress = TRUE;
+
 		goto ret_optlen;
 	}
 
 	if (tp->t_mpflags & TMPF_SEND_DFIN) {
-		unsigned int dssoptlen = sizeof(struct mptcp_dss_ack_opt);
+		uint8_t dssoptlen = sizeof(struct mptcp_dss_ack_opt);
 		struct mptcp_dss_ack_opt dss_ack_opt;
 		uint16_t dss_csum;
 
@@ -821,11 +836,12 @@ do_ack64_only:
 		}
 
 		optlen += dssoptlen;
+
+		*do_not_compress = TRUE;
 	}
 
 ret_optlen:
 	if (TRUE == *p_mptcp_acknow) {
-		VERIFY(old_mpt_flags != 0);
 		u_int32_t new_mpt_flags = tp->t_mpflags & TMPF_MPTCP_SIGNALS;
 
 		/*
@@ -958,6 +974,10 @@ mptcp_do_mpcapable_opt(struct tcpcb *tp, u_char *cp, struct tcphdr *th,
 	if (((struct mptcp_mpcapable_opt_common *)cp)->mmco_flags &
 	    MPCAP_UNICAST_IPBIT) {
 		mpte->mpte_flags |= MPTE_UNICAST_IP;
+
+		/* We need an explicit signal for the addresses - zero the existing ones */
+		memset(&mpte->mpte_sub_dst_v4, 0, sizeof(mpte->mpte_sub_dst_v4));
+		memset(&mpte->mpte_sub_dst_v6, 0, sizeof(mpte->mpte_sub_dst_v6));
 	}
 
 	rsp = (struct mptcp_mpcapable_opt_rsp *)cp;
@@ -1058,6 +1078,8 @@ mptcp_data_ack_rcvd(struct mptcb *mp_tp, struct tcpcb *tp, u_int64_t full_dack)
 {
 	uint64_t acked = full_dack - mp_tp->mpt_snduna;
 
+	VERIFY(acked <= INT_MAX);
+
 	if (acked) {
 		struct socket *mp_so = mptetoso(mp_tp->mpt_mpte);
 
@@ -1073,7 +1095,7 @@ mptcp_data_ack_rcvd(struct mptcb *mp_tp, struct tcpcb *tp, u_int64_t full_dack)
 
 			sbdrop(&mp_so->so_snd, (int)mp_so->so_snd.sb_cc);
 		} else {
-			sbdrop(&mp_so->so_snd, acked);
+			sbdrop(&mp_so->so_snd, (int)acked);
 		}
 
 		mp_tp->mpt_snduna += acked;
@@ -1408,6 +1430,8 @@ mptcp_do_dss_opt(struct tcpcb *tp, u_char *cp, struct tcphdr *th)
 	if (dss_rsp->mdss_subtype == MPO_DSS) {
 		if (dss_rsp->mdss_flags & MDSS_F) {
 			tp->t_rcv_map.mpt_dfin = 1;
+		} else {
+			tp->t_rcv_map.mpt_dfin = 0;
 		}
 
 		mptcp_do_dss_opt_meat(cp, tp, th);
@@ -1530,7 +1554,7 @@ mptcp_do_add_addr_opt(struct mptses *mpte, u_char *cp)
 	}
 
 	if (addr_opt->maddr_len == MPTCP_ADD_ADDR_OPT_LEN_V4) {
-		struct sockaddr_in *dst = &mpte->mpte_dst_unicast_v4;
+		struct sockaddr_in *dst = &mpte->mpte_sub_dst_v4;
 		struct in_addr *addr = &addr_opt->maddr_u.maddr_addrv4;
 		in_addr_t haddr = ntohl(addr->s_addr);
 
@@ -1555,7 +1579,7 @@ mptcp_do_add_addr_opt(struct mptses *mpte, u_char *cp)
 		dst->sin_port = mpte->__mpte_dst_v4.sin_port;
 		dst->sin_addr.s_addr = addr->s_addr;
 	} else {
-		struct sockaddr_in6 *dst = &mpte->mpte_dst_unicast_v6;
+		struct sockaddr_in6 *dst = &mpte->mpte_sub_dst_v6;
 		struct in6_addr *addr = &addr_opt->maddr_u.maddr_addrv6;
 
 		if (IN6_IS_ADDR_LINKLOCAL(addr) ||

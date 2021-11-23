@@ -119,6 +119,7 @@ const struct sched_dispatch_table sched_amp_dispatch = {
 	.steal_thread_enabled                           = sched_amp_steal_thread_enabled,
 	.steal_thread                                   = sched_amp_steal_thread,
 	.compute_timeshare_priority                     = sched_compute_timeshare_priority,
+	.choose_node                                    = sched_amp_choose_node,
 	.choose_processor                               = sched_amp_choose_processor,
 	.processor_enqueue                              = sched_amp_processor_enqueue,
 	.processor_queue_shutdown                       = sched_amp_processor_queue_shutdown,
@@ -486,7 +487,7 @@ sched_amp_steal_thread(processor_set_t pset)
 
 	assert(nset != pset);
 
-	if (sched_get_pset_load_average(nset) >= sched_amp_steal_threshold(nset, spill_pending)) {
+	if (sched_get_pset_load_average(nset, 0) >= sched_amp_steal_threshold(nset, spill_pending)) {
 		pset_unlock(pset);
 
 		pset = nset;
@@ -494,12 +495,12 @@ sched_amp_steal_thread(processor_set_t pset)
 		pset_lock(pset);
 
 		/* Allow steal if load average still OK, no idle cores, and more threads on runq than active cores DISPATCHING */
-		if ((sched_get_pset_load_average(pset) >= sched_amp_steal_threshold(pset, spill_pending)) &&
+		if ((sched_get_pset_load_average(pset, 0) >= sched_amp_steal_threshold(pset, spill_pending)) &&
 		    (pset->pset_runq.count > bit_count(pset->cpu_state_map[PROCESSOR_DISPATCHING])) &&
 		    (bit_count(pset->recommended_bitmask & pset->cpu_state_map[PROCESSOR_IDLE]) == 0)) {
 			thread = run_queue_dequeue(&pset->pset_runq, SCHED_HEADQ);
 			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_AMP_STEAL) | DBG_FUNC_NONE, spill_pending, 0, 0, 0);
-			sched_update_pset_load_average(pset);
+			sched_update_pset_load_average(pset, 0);
 		}
 	}
 
@@ -630,6 +631,7 @@ sched_amp_choose_processor(processor_set_t pset, processor_t processor, thread_t
 	processor_set_t nset = pset;
 	bool choose_pcores;
 
+
 again:
 	choose_pcores = pcores_recommended(thread);
 
@@ -668,40 +670,6 @@ sched_amp_thread_group_recommendation_change(struct thread_group *tg, cluster_ty
 }
 
 #if DEVELOPMENT || DEBUG
-extern int32_t sysctl_get_bound_cpuid(void);
-int32_t
-sysctl_get_bound_cpuid(void)
-{
-	int32_t cpuid = -1;
-	thread_t self = current_thread();
-
-	processor_t processor = self->bound_processor;
-	if (processor == NULL) {
-		cpuid = -1;
-	} else {
-		cpuid = processor->cpu_id;
-	}
-
-	return cpuid;
-}
-
-extern void sysctl_thread_bind_cpuid(int32_t cpuid);
-void
-sysctl_thread_bind_cpuid(int32_t cpuid)
-{
-	if (cpuid < 0 || cpuid >= MAX_SCHED_CPUS) {
-		return;
-	}
-
-	processor_t processor = processor_array[cpuid];
-	if (processor == PROCESSOR_NULL) {
-		return;
-	}
-
-	thread_bind(processor);
-
-	thread_block(THREAD_CONTINUE_NULL);
-}
 
 extern char sysctl_get_bound_cluster_type(void);
 char
@@ -722,7 +690,7 @@ extern void sysctl_thread_bind_cluster_type(char cluster_type);
 void
 sysctl_thread_bind_cluster_type(char cluster_type)
 {
-	thread_bind_cluster_type(cluster_type);
+	thread_bind_cluster_type(current_thread(), cluster_type, false);
 }
 
 extern char sysctl_get_task_cluster_type(void);
@@ -763,6 +731,6 @@ sysctl_task_set_cluster_type(char cluster_type)
 
 	thread_block(THREAD_CONTINUE_NULL);
 }
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 
-#endif
+#endif /* __AMP__ */

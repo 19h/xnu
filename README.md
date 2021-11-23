@@ -58,6 +58,19 @@ Note:
 This will also create a bootable image, kernel.[config],  and a kernel binary
 with symbols, kernel.[config].unstripped.
 
+To intall the kernel into a DSTROOT, use the `install_kernels` target:
+
+    $ make install_kernels DSTROOT=/tmp/xnu-dst
+
+Hint:
+For a more satisfying kernel debugging experience, with access to all
+local variables and arguments, but without all the extra check of the
+DEBUG kernel, add something like:
+	CFLAGS_DEVELOPMENTARM64="-O0 -g -DKERNEL_STACK_MULTIPLIER=2"
+	CXXFLAGS_DEVELOPMENTARM64="-O0 -g -DKERNEL_STACK_MULTIPLIER=2"
+to your make command.
+Replace DEVELOPMENT and ARM64 with the appropriate build and platform.
+
 
   * To build with RELEASE kernel configuration
 
@@ -156,18 +169,6 @@ Set up your build environment and from the top directory, run:
     $ make cscope   # this will build cscope database
 
 
-Code Style
-==========
-
-Source files can be reformatted to comply with the xnu code style using the "restyle" make target invoked from the
-top-level project directory.
-
-   $ make restyle      # re-format all source files to be xnu code style conformant.
-
-Compliance can be checked using the "checkstyle" make target.
-
-   $ make checkstyle   # Check all relevant source files for xnu code style conformance.
-
 How to install a new header file from XNU
 =========================================
 
@@ -264,6 +265,14 @@ member file lists and their default location are described below -
        for compilation only. Does not install anything into the SDK.
        Definition -
             EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
+
+    g. `INSTALL_MODULEMAP_INCDIR_MI_LIST` : Installs module map file to a
+       location that is available to everyone in user level, installing at the
+       root of INCDIR.
+       Locations -
+           $(DSTROOT)/usr/include
+       Definition -
+           INSTALL_MODULEMAP_INCDIR_MI_LIST = ${MODULEMAP_INCDIR_FILES}
 
 If you want to install the header file in a sub-directory of the paths
 described in (1), specify the directory name using two variables

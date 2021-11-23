@@ -93,7 +93,6 @@ ref_pset_port_locked(
  */
 
 extern lck_grp_t                host_notify_lock_grp;
-extern lck_attr_t               host_notify_lock_attr;
 
 void
 ipc_host_init(void)
@@ -101,7 +100,7 @@ ipc_host_init(void)
 	ipc_port_t      port;
 	int i;
 
-	lck_mtx_init(&realhost.lock, &host_notify_lock_grp, &host_notify_lock_attr);
+	lck_mtx_init(&realhost.lock, &host_notify_lock_grp, LCK_ATTR_NULL);
 
 	/*
 	 *	Allocate and set up the two host ports.
@@ -281,7 +280,7 @@ convert_port_to_host(
 	if (IP_VALID(port)) {
 		if (ip_kotype(port) == IKOT_HOST ||
 		    ip_kotype(port) == IKOT_HOST_PRIV) {
-			host = (host_t) port->ip_kobject;
+			host = (host_t) ip_get_kobject(port);
 			require_ip_active(port);
 		}
 	}
@@ -303,11 +302,17 @@ convert_port_to_host_priv(
 {
 	host_t host = HOST_NULL;
 
+	/* reject translation if itk_host is not host_priv */
+	if (port != current_task()->itk_host) {
+		return HOST_NULL;
+	}
+
 	if (IP_VALID(port)) {
 		ip_lock(port);
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_HOST_PRIV)) {
-			host = (host_t) port->ip_kobject;
+			assert(ip_get_kobject(port) == &realhost);
+			host = &realhost;
 		}
 		ip_unlock(port);
 	}
@@ -335,7 +340,7 @@ convert_port_to_processor(
 		ip_lock(port);
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_PROCESSOR)) {
-			processor = (processor_t) port->ip_kobject;
+			processor = (processor_t) ip_get_kobject(port);
 		}
 		ip_unlock(port);
 	}
@@ -404,7 +409,7 @@ ref_pset_port_locked(ipc_port_t port, boolean_t matchn, processor_set_t *ppset)
 	if (ip_active(port) &&
 	    ((ip_kotype(port) == IKOT_PSET) ||
 	    (matchn && (ip_kotype(port) == IKOT_PSET_NAME)))) {
-		pset = (processor_set_t) port->ip_kobject;
+		pset = (processor_set_t) ip_get_kobject(port);
 	}
 
 	*ppset = pset;
@@ -519,7 +524,7 @@ convert_port_to_host_security(
 		ip_lock(port);
 		if (ip_active(port) &&
 		    (ip_kotype(port) == IKOT_HOST_SECURITY)) {
-			host = (host_t) port->ip_kobject;
+			host = (host_t) ip_get_kobject(port);
 		}
 		ip_unlock(port);
 	}
@@ -602,8 +607,6 @@ host_set_exception_ports(
 		}
 	}
 #endif
-
-	assert(host_priv == &realhost);
 
 	host_lock(host_priv);
 
@@ -697,8 +700,6 @@ host_get_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	assert(host_priv == &realhost);
-
 	host_lock(host_priv);
 
 	count = 0;
@@ -717,16 +718,13 @@ host_get_exception_ports(
 					break;
 				}
 			}/* for */
-			if (j == count) {
+			if (j == count && count < *CountCnt) {
 				masks[j] = (1 << i);
 				ports[j] =
 				    ipc_port_copy_send(host_priv->exc_actions[i].port);
 				behaviors[j] = host_priv->exc_actions[i].behavior;
 				flavors[j] = host_priv->exc_actions[i].flavor;
 				count++;
-				if (count > *CountCnt) {
-					break;
-				}
 			}
 		}
 	}/* for */
