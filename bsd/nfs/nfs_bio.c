@@ -115,8 +115,7 @@ nfs_bioread(vp, uio, ioflag, cred, getpages)
 	int getpages;
 {
 	register struct nfsnode *np = VTONFS(vp);
-	register int biosize, i;
-	off_t diff;
+	register int biosize, diff, i;
 	struct buf *bp = 0, *rabp;
 	struct vattr vattr;
 	struct proc *p;
@@ -269,7 +268,7 @@ again:
 		bufsize = biosize;
 		if ((off_t)(lbn + 1) * biosize > np->n_size && 
 		    (off_t)(lbn + 1) * biosize - np->n_size < biosize) {
-			bufsize = np->n_size - (off_t)lbn * biosize;
+			bufsize = np->n_size - lbn * biosize;
 			bufsize = (bufsize + DEV_BSIZE - 1) & ~(DEV_BSIZE - 1);
 		}
 		bp = nfs_getcacheblk(vp, lbn, bufsize, p, operation);
@@ -877,7 +876,7 @@ nfs_getcacheblk(vp, bn, size, p, operation)
 		bp = getblk(vp, bn, size, 0, 0, operation);
 
 	if( vp->v_type == VREG)
-		bp->b_blkno = ((off_t)bn * biosize) / DEV_BSIZE;
+		bp->b_blkno = (bn * biosize) / DEV_BSIZE;
 
 	return (bp);
 }

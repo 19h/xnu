@@ -209,14 +209,6 @@ OSStatus	VerifyHeader	(FCB				*filePtr,
 
 
 
-__private_extern__
-OSStatus TreeIsDirty(BTreeControlBlockPtr btreePtr)
-{
-    return (btreePtr->flags & kBTHeaderDirty);
-}
-
-
-
 /*-------------------------------------------------------------------------------
 Routine:	UpdateHeader	-	Write BTreeInfoRec fields to Header node.
 
@@ -237,18 +229,15 @@ OSStatus UpdateHeader(BTreeControlBlockPtr btreePtr, Boolean forceWrite)
 	BTHeaderRec	*header;	
 	UInt32 options;
 
+
 	if ((btreePtr->flags & kBTHeaderDirty) == 0)			// btree info already flushed
 	return	noErr;
 	
 	
 	err = GetNode (btreePtr, kHeaderNodeNum, &node );
-	if (err != noErr) {
+	if (err != noErr)
 		return	err;
-	}
 	
-	// XXXdbg
-	ModifyBlockStart(btreePtr->fileRefNum, &node);
-
 	header = (BTHeaderRec*) ((char *)node.buffer + sizeof(BTNodeDescriptor));
 	
 	header->treeDepth		= btreePtr->treeDepth;
@@ -326,11 +315,8 @@ OSStatus	FindIteratorPosition	(BTreeControlBlockPtr	 btreePtr,
 	// assume foundRecord points to Boolean
 	
 	left->buffer		= nil;
-	left->blockHeader   = nil;
 	middle->buffer		= nil;
-	middle->blockHeader	= nil;
 	right->buffer		= nil;
-	right->blockHeader	= nil;
 	
 	foundIt				= false;
 	

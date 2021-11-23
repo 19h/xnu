@@ -261,11 +261,6 @@ cat_insertfilethread(struct hfsmount *hfsmp, struct cat_desc *descp)
 	if (result)
 		goto exit;
 
-	// XXXdbg - preflight all btree operations to make sure there's enough space
-	result = BTCheckFreeSpace(fcb);
-	if (result)
-		goto exit;
-
 	BDINIT(file_data, &file_rec);
 	result = BTSearchRecord(fcb, &iterator[0], &file_data, &datasize, &iterator[0]);
 	if (result) 
@@ -293,7 +288,6 @@ cat_insertfilethread(struct hfsmount *hfsmp, struct cat_desc *descp)
 		(void) BTFlushPath(fcb);
 	}	
 exit:
-	(void) BTFlushPath(fcb);
 	FREE(iterator, M_TEMP);
 
 	return MacToVFSError(result);
@@ -432,15 +426,6 @@ cat_lookupbykey(struct hfsmount *hfsmp, CatalogKey *keyp, u_long hint, int wantr
 	encoding = getencoding(recp);
 	hint = iterator->hint.nodeNum;
 
-	/* Hide the journal files (if any) */
-	if (hfsmp->jnl &&
-		((cnid == hfsmp->hfs_jnlfileid) ||
-		 (cnid == hfsmp->hfs_jnlinfoblkid))) {
-
-		result = ENOENT;
-		goto exit;
-	}
-
 	/*
 	 * When a hardlink link is encountered, auto resolve it
 	 */
@@ -544,11 +529,6 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 		hfs_setencodingbits(hfsmp, encoding);
 	}
 
-	// XXXdbg - preflight all btree operations to make sure there's enough space
-	result = BTCheckFreeSpace(fcb);
-	if (result)
-		goto exit;
-
 	/*
 	 * Insert the thread record first
 	 */
@@ -637,8 +617,9 @@ cat_create(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	vcb->vcbNxtCNID = nextCNID;
 	vcb->vcbFlags |= 0xFF00;
 
-exit:
 	(void) BTFlushPath(fcb);
+
+exit:
 	FREE(bto, M_TEMP);
 
 	return MacToVFSError(result);
@@ -696,11 +677,6 @@ cat_rename (
 	bzero(to_iterator, sizeof(*to_iterator));
 	if ((result = buildkey(hfsmp, to_cdp, (HFSPlusCatalogKey *)&to_iterator->key, 0)))
 		goto exit;	
-
-	// XXXdbg - preflight all btree operations to make sure there's enough space
-	result = BTCheckFreeSpace(fcb);
-	if (result)
-		goto exit;
 
 	to_key = (HFSPlusCatalogKey *)&to_iterator->key;
 	MALLOC(recp, CatalogRecord *, sizeof(CatalogRecord), M_TEMP, M_WAITOK);
@@ -805,17 +781,7 @@ cat_rename (
 		result = BTInsertRecord(fcb, to_iterator, &btdata, datasize);
 		if (result) {
 			/* Try and restore original before leaving */
-		    // XXXdbg
-		    #if 1
-		       {
-		       	int err;
-			err = BTInsertRecord(fcb, from_iterator, &btdata, datasize);
-			if (err)
-				panic("cat_create: could not undo (BTInsert = %d)", err);
-		       }
-		    #else
 			(void) BTInsertRecord(fcb, from_iterator, &btdata, datasize);
-		    #endif
 			goto exit;
 		}
 		sourcegone = 1;
@@ -828,17 +794,7 @@ cat_rename (
 		result = BTDeleteRecord(fcb, from_iterator);
 		if (result) {
 			/* Try and delete new record before leaving */
-		  // XXXdbg
-		  #if 1
-		     {
-		     	int err;
-			err = BTDeleteRecord(fcb, to_iterator);
-			if (err)
-				panic("cat_create: could not undo (BTDelete = %d)", err);
-		     }			
-		  #else
 			(void) BTDeleteRecord(fcb, to_iterator);
-		  #endif
 			goto exit;
 		}
 	}
@@ -878,8 +834,8 @@ cat_rename (
 			FREE(pluskey, M_TEMP);
 		}
 	}
-exit:
 	(void) BTFlushPath(fcb);
+exit:
 	if (from_iterator)
 		FREE(from_iterator, M_TEMP);
 	if (to_iterator)
@@ -918,6 +874,7 @@ cat_delete(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	 * A directory must be empty
 	 * A file must be zero length (no blocks)
 	 */
+
 	if (descp->cd_cnid < kHFSFirstUserCatalogNodeID ||
 	    descp->cd_parentcnid == kRootParID)
 		return (EINVAL);
@@ -942,11 +899,6 @@ cat_delete(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	if (result)
 		goto exit;
 
-	// XXXdbg - preflight all btree operations to make sure there's enough space
-	result = BTCheckFreeSpace(fcb);
-	if (result)
-		goto exit;
-
 	/* Delete record */
 	result = BTDeleteRecord(fcb, iterator);
 	if (result)
@@ -958,8 +910,8 @@ cat_delete(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 
 	TrashCatalogIterator(vcb, descp->cd_parentcnid);
 
-exit:
 	(void) BTFlushPath(fcb);
+exit:
 	FREE(iterator, M_TEMP);
 
 	return MacToVFSError(result);
@@ -1021,8 +973,9 @@ cat_update(struct hfsmount *hfsmp, struct cat_desc *descp, struct cat_attr *attr
 	/* Update the node hint. */
 	descp->cd_hint = iterator->hint.nodeNum;
 
-exit:
 	(void) BTFlushPath(fcb);
+
+exit:
 	FREE(iterator, M_TEMP);
 
 	return MacToVFSError(result);
@@ -1289,21 +1242,12 @@ catrec_readattr(const CatalogKey *key, const CatalogRecord *rec,
 		return (0);	/* stop */
 	}
 
-	/* Hide the private meta data directory and journal files */
-	if (parentcnid == kRootDirID) {
-		if ((rec->recordType == kHFSPlusFolderRecord) &&
-		    (rec->hfsPlusFolder.folderID == hfsmp->hfs_private_metadata_dir)) {
-			return (1);	/* continue */
-		}
-		if (hfsmp->jnl &&
-		    (rec->recordType == kHFSPlusFileRecord) &&
-		    ((rec->hfsPlusFile.fileID == hfsmp->hfs_jnlfileid) ||
-		     (rec->hfsPlusFile.fileID == hfsmp->hfs_jnlinfoblkid))) {
-
-			return (1);	/* continue */
-		}
+	/* Hide the private meta data directory. */
+	if (parentcnid == kRootDirID  &&
+	    rec->recordType == kHFSPlusFolderRecord &&
+	    rec->hfsPlusFolder.folderID == hfsmp->hfs_private_metadata_dir) {
+		return (1);	/* continue */
 	}
-
 
 	cep = &list->entry[list->realentries++];
 
@@ -1464,8 +1408,6 @@ exit:
 struct read_state {
 	u_int32_t	cbs_parentID;
 	u_int32_t	cbs_hiddenDirID;
-	u_int32_t	cbs_hiddenJournalID;
-	u_int32_t	cbs_hiddenInfoBlkID;
 	off_t		cbs_lastoffset;
 	struct uio *	cbs_uio;
 	ExtendedVCB *	cbs_vcb;
@@ -1575,15 +1517,6 @@ lastitem:
 	    catent.d_type == DT_DIR)
 		goto lastitem;
 
-	/* Hide the journal files */
-	if ((curID == kRootDirID) &&
-	    (catent.d_type == DT_REG) &&
-	    ((catent.d_fileno == state->cbs_hiddenJournalID) ||
-	     (catent.d_fileno == state->cbs_hiddenInfoBlkID))) {
-
-		return (1);	/* skip and continue */
-	}
-
 	state->cbs_lastoffset = state->cbs_uio->uio_offset;
 
 	/* if this entry won't fit then we're done */
@@ -1632,11 +1565,6 @@ cat_getdirentries(struct hfsmount *hfsmp, struct cat_desc *descp,
 		goto cleanup;
 
 	state.cbs_hiddenDirID = hfsmp->hfs_private_metadata_dir;
-	if (hfsmp->jnl) {
-		state.cbs_hiddenJournalID = hfsmp->hfs_jnlfileid;
-		state.cbs_hiddenInfoBlkID = hfsmp->hfs_jnlinfoblkid;
-	}
-
 	state.cbs_lastoffset = cip->currentOffset;
 	state.cbs_vcb = vcb;
 	state.cbs_uio = uio;
@@ -2275,11 +2203,7 @@ getcnid(const CatalogRecord *crp)
 	case kHFSPlusFileRecord:
 		cnid = crp->hfsPlusFile.fileID;
 		break;
-	default:
-		panic("hfs: getcnid: unknown recordType (crp @ 0x%x)\n", crp);
-		break;
 	}
-
 	return (cnid);
 }
 
@@ -2301,11 +2225,7 @@ getparentcnid(const CatalogRecord *recp)
 	case kHFSPlusFolderThreadRecord:
 		cnid = recp->hfsPlusThread.parentID;
 		break;
-	default:
-		panic("hfs: getparentcnid: unknown recordType (crp @ 0x%x)\n", recp);
-		break;
 	}
-
 	return (cnid);
 }
 

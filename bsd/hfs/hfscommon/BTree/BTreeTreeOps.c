@@ -395,17 +395,13 @@ OSStatus	InsertLevel (BTreeControlBlockPtr		 btreePtr,
 	PanicIf ((level == 1) && (((NodeDescPtr)targetNode->buffer)->kind != kBTLeafNode), "\P InsertLevel: non-leaf at level 1! ");
 #endif
 	leftNode.buffer = nil;
-	leftNode.blockHeader = nil;
 	targetNodeNum = treePathTable [level].node;
 
 	insertParent = false;
 	updateParent = false;
 
-	// XXXdbg
-	ModifyBlockStart(btreePtr->fileRefNum, targetNode);
-
 	////// process first insert //////
-
+	
 	err = InsertNode (btreePtr, primaryKey, targetNode, targetNodeNum, index,
 					  &newNodeNum, &newIndex, &leftNode, &updateParent, &insertParent, &newRoot );
 	M_ExitOnError (err);
@@ -450,9 +446,6 @@ OSStatus	InsertLevel (BTreeControlBlockPtr		 btreePtr,
 		UInt8 *				recPtr;
 		UInt16				recSize;
 		
-		parentNode.buffer = nil;
-		parentNode.blockHeader = nil;
-
 		secondaryKey = nil;
 		
 		PanicIf ( (level == btreePtr->treeDepth), "\p InsertLevel: unfinished insert!?");
@@ -475,9 +468,6 @@ OSStatus	InsertLevel (BTreeControlBlockPtr		 btreePtr,
 	
 		if ( updateParent )
 		{
-			// XXXdbg
-			ModifyBlockStart(btreePtr->fileRefNum, &parentNode);
-
 			//€€ debug: check if ptr == targetNodeNum
 			GetRecordByIndex (btreePtr, parentNode.buffer, index, &keyPtr, &recPtr, &recSize);
 			PanicIf( (*(UInt32 *) recPtr) != targetNodeNum, "\p InsertLevel: parent ptr doesn't match target node!");
@@ -604,8 +594,6 @@ static OSErr	InsertNode	(BTreeControlBlockPtr	 btreePtr,
 		{
 			err = GetNode (btreePtr, leftNodeNum, leftNode);	// will be released by caller or a split below
 			M_ExitOnError (err);
-			// XXXdbg
-			ModifyBlockStart(btreePtr->fileRefNum, leftNode);
 		}
 
 		PanicIf ( ((NodeDescPtr) leftNode->buffer)->fLink != node, "\p InsertNode, RotateLeft: invalid sibling link!" );
@@ -654,6 +642,7 @@ static OSErr	InsertNode	(BTreeControlBlockPtr	 btreePtr,
 	return noErr;
 
 ErrorExit:
+
 	(void) ReleaseNode (btreePtr, leftNode);
 	return err;
 	
@@ -689,20 +678,13 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 	Boolean				deleteRequired;
 	Boolean				updateRequired;
 
-	// XXXdbg - initialize these to null in case we get an
-	//          error and try to exit before it's initialized
-	parentNode.buffer      = nil;	
-	parentNode.blockHeader = nil;
-	
+
 	deleteRequired = false;
 	updateRequired = false;
 
 	targetNodeNum = treePathTable[level].node;
 	targetNodePtr = targetNode->buffer;
 	PanicIf (targetNodePtr == nil, "\pDeleteTree: targetNode has nil buffer!");
-
-	// XXXdbg
-	ModifyBlockStart(btreePtr->fileRefNum, targetNode);
 
 	DeleteRecord (btreePtr, targetNodePtr, index);
 		
@@ -715,9 +697,6 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 
 		deleteRequired = true;
 		
-		siblingNode.buffer = nil;
-		siblingNode.blockHeader = nil;
-
 		////////////////// Get Siblings & Update Links //////////////////////////
 		
 		siblingNodeNum = targetNodePtr->bLink;				// Left Sibling Node
@@ -725,10 +704,6 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 		{
 			err = GetNode (btreePtr, siblingNodeNum, &siblingNode);
 			M_ExitOnError (err);
-
-			// XXXdbg
-			ModifyBlockStart(btreePtr->fileRefNum, &siblingNode);
-
 			((NodeDescPtr)siblingNode.buffer)->fLink = targetNodePtr->fLink;
 			err = UpdateNode (btreePtr, &siblingNode, 0, kLockTransaction);
 			M_ExitOnError (err);
@@ -743,10 +718,6 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 		{
 			err = GetNode (btreePtr, siblingNodeNum, &siblingNode);
 			M_ExitOnError (err);
-
-			// XXXdbg
-			ModifyBlockStart(btreePtr->fileRefNum, &siblingNode);
-
 			((NodeDescPtr)siblingNode.buffer)->bLink = targetNodePtr->bLink;
 			err = UpdateNode (btreePtr, &siblingNode, 0, kLockTransaction);
 			M_ExitOnError (err);
@@ -762,7 +733,6 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 		
 		err = UpdateNode (btreePtr, targetNode, 0, kLockTransaction);
 		M_ExitOnError (err);
-
 		err = FreeNode (btreePtr, targetNodeNum);
 		M_ExitOnError (err);
 	}
@@ -806,9 +776,6 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 			 UInt16		recSize;
 			 UInt32		insertNode;
 			 
-			 // XXXdbg
-			 ModifyBlockStart(btreePtr->fileRefNum, &parentNode);
-
 			//€€ debug: check if ptr == targetNodeNum
 			GetRecordByIndex (btreePtr, parentNode.buffer, index, &keyPtr, &recPtr, &recSize);
 			PanicIf( (*(UInt32 *) recPtr) != targetNodeNum, "\p DeleteTree: parent ptr doesn't match targetNodeNum!!");
@@ -838,7 +805,7 @@ OSStatus	DeleteTree			(BTreeControlBlockPtr		 btreePtr,
 	return	noErr;
 
 ErrorExit:
-
+	
 	(void) ReleaseNode (btreePtr, targetNode);
 	(void) ReleaseNode (btreePtr, &parentNode);
 
@@ -859,9 +826,6 @@ static OSStatus	CollapseTree	(BTreeControlBlockPtr		btreePtr,
 	
 	originalRoot	= btreePtr->rootNode;
 	
-	// XXXdbg
-	ModifyBlockStart(btreePtr->fileRefNum, blockPtr);
-
 	while (true)
 	{
 		if ( ((NodeDescPtr)blockPtr->buffer)->numRecords > 1)
@@ -884,9 +848,6 @@ static OSStatus	CollapseTree	(BTreeControlBlockPtr		btreePtr,
 		//// Get New Root Node
 		err = GetNode (btreePtr, btreePtr->rootNode, blockPtr);
 		M_ExitOnError (err);
-
-		// XXXdbg
-		ModifyBlockStart(btreePtr->fileRefNum, blockPtr);
 	}
 	
 	if (btreePtr->rootNode != originalRoot)
@@ -1149,9 +1110,6 @@ static OSStatus	SplitLeft		(BTreeControlBlockPtr		 btreePtr,
 
 	if ( left != nil )
 	{
-		// XXXdbg
-		ModifyBlockStart(btreePtr->fileRefNum, leftNode);
-
 		left->fLink	= newNodeNum;
 		err = UpdateNode (btreePtr, leftNode, 0, kLockTransaction);
 		M_ExitOnError (err);
@@ -1163,9 +1121,6 @@ static OSStatus	SplitLeft		(BTreeControlBlockPtr		 btreePtr,
 	err = GetNewNode (btreePtr, newNodeNum, leftNode);
 	M_ExitOnError (err);
 	
-	// XXXdbg
-	ModifyBlockStart(btreePtr->fileRefNum, leftNode);
-
 	left		= leftNode->buffer;
 	left->fLink	= rightNodeNum;
 	
@@ -1190,9 +1145,8 @@ static OSStatus	SplitLeft		(BTreeControlBlockPtr		 btreePtr,
 
 	err = RotateLeft (btreePtr, left, right, index, keyPtr, recPtr, recSize,
 					  insertIndex, insertNodeNum, &recordFit, recsRotated);
-	
 	M_ExitOnError (err);
-
+	
 	return noErr;
 	
 ErrorExit:
@@ -1248,9 +1202,6 @@ static OSStatus	AddNewRootNode	(BTreeControlBlockPtr	 btreePtr,
 	Boolean				didItFit;
 	UInt16				keyLength;	
 	
-	rootNode.buffer = nil;
-	rootNode.blockHeader = nil;
-
 	PanicIf (leftNode == nil, "\pAddNewRootNode: leftNode == nil");
 	PanicIf (rightNode == nil, "\pAddNewRootNode: rightNode == nil");
 	
@@ -1263,9 +1214,6 @@ static OSStatus	AddNewRootNode	(BTreeControlBlockPtr	 btreePtr,
 	err = GetNewNode (btreePtr, rootNum, &rootNode);
 	M_ExitOnError (err);
 		
-	// XXXdbg
-	ModifyBlockStart(btreePtr->fileRefNum, &rootNode);
-
 	((NodeDescPtr)rootNode.buffer)->kind = kBTIndexNode;
 	((NodeDescPtr)rootNode.buffer)->height	= ++btreePtr->treeDepth;
 	
