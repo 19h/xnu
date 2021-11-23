@@ -1401,11 +1401,8 @@ dontblock:
 					*mp = (struct mbuf *)0;
 				} else {
 				        m->m_nextpkt = 0;
-				        if (ml != 0) 
-                                            ml->m_next = m;
-                                        ml = m;
-					so->so_rcv.sb_mb = m = m->m_next;
-                                        ml->m_next = 0;
+				        ml = m;
+					m = m->m_next;
 				}
 				if (m)
 					m->m_nextpkt = nextrecord;
@@ -1450,6 +1447,8 @@ dontblock:
 				break;
 
 			if (ml) {
+			        so->so_rcv.sb_mb = ml->m_next;
+			        ml->m_next = (struct mbuf *)0;
 				m_freem_list(free_list);
 			}
 			error = sbwait(&so->so_rcv);
@@ -1468,6 +1467,8 @@ dontblock:
 		}
 	}
 	if (ml) {
+	        so->so_rcv.sb_mb = ml->m_next;
+	        ml->m_next = (struct mbuf *)0;
 	        m_freem_list(free_list);
 	}
 
