@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 1999-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * Copyright (c) 1991, 1993, 1994
@@ -548,7 +554,7 @@ hfs_reload_callback(struct vnode *vp, void *cargs)
 	/*
 	 * Re-read cnode data for all active vnodes (non-metadata files).
 	 */
-	if (!VNODE_IS_RSRC(vp)) {
+	if (!vnode_issystem(vp) && !VNODE_IS_RSRC(vp)) {
 	        struct cat_fork *datafork;
 		struct cat_desc desc;
 
@@ -591,7 +597,6 @@ hfs_reload(struct mount *mountp, kauth_cred_t cred, struct proc *p)
 	struct filefork *forkp;
     	struct cat_desc cndesc;
 	struct hfs_reload_cargs args;
-	int lockflags;
 
     	hfsmp = VFSTOHFS(mountp);
 	vcb = HFSTOVCB(hfsmp);
@@ -617,9 +622,7 @@ hfs_reload(struct mount *mountp, kauth_cred_t cred, struct proc *p)
 	 * the vnode will be in an 'unbusy' state (VNODE_WAIT) and 
 	 * properly referenced and unreferenced around the callback
 	 */
-	lockflags = hfs_systemfile_lock(hfsmp, SFL_CATALOG, HFS_EXCLUSIVE_LOCK);
 	vnode_iterate(mountp, VNODE_RELOAD | VNODE_WAIT, hfs_reload_callback, (void *)&args);
-	hfs_systemfile_unlock(hfsmp, lockflags);
 
 	if (args.error)
 	        return (args.error);
@@ -860,6 +863,7 @@ hfs_mountfs(struct vnode *devvp, struct mount *mp, struct hfs_mount_args *args,
 	lck_mtx_init(&hfsmp->hfs_mutex, hfs_mutex_group, hfs_lock_attr);
 	lck_mtx_init(&hfsmp->hfc_mutex, hfs_mutex_group, hfs_lock_attr);
 	lck_rw_init(&hfsmp->hfs_global_lock, hfs_rwlock_group, hfs_lock_attr);
+	lck_rw_init(&hfsmp->hfs_insync, hfs_rwlock_group, hfs_lock_attr);
 
 	vfs_setfsprivate(mp, hfsmp);
 	hfsmp->hfs_mp = mp;			/* Make VFSTOHFS work */
@@ -1655,6 +1659,10 @@ hfs_sync(struct mount *mp, int waitfor, vfs_context_t context)
 	if (hfsmp->hfs_flags & HFS_READ_ONLY)
 		return (EROFS);
 
+	/* skip over frozen volumes */
+	if (!lck_rw_try_lock_shared(&hfsmp->hfs_insync))
+		return 0;
+
 	args.cred = vfs_context_proc(context);
 	args.waitfor = waitfor;
 	args.p = p;
@@ -1734,7 +1742,8 @@ hfs_sync(struct mount *mp, int waitfor, vfs_context_t context)
 	if (hfsmp->jnl) {
 	    journal_flush(hfsmp->jnl);
 	}
-	
+
+	lck_rw_unlock_shared(&hfsmp->hfs_insync);	
 	return (allerror);
 }
 
@@ -2157,6 +2166,7 @@ hfs_vget(struct hfsmount *hfsmp, cnid_t cnid, struct vnode **vpp, int skiplock)
 	struct cat_attr cnattr;
 	struct cat_fork cnfork;
 	struct componentname cn;
+	u_int32_t linkref = 0;
 	int error;
 	
 	/* Check for cnids that should't be exported. */
@@ -2209,18 +2219,19 @@ hfs_vget(struct hfsmount *hfsmp, cnid_t cnid, struct vnode **vpp, int skiplock)
 			return (error);
 		}
 
-		/* Hide open files that have been deleted */
-		if ((hfsmp->hfs_privdir_desc.cd_cnid != 0) &&
-		    (cndesc.cd_parentcnid == hfsmp->hfs_privdir_desc.cd_cnid)) {
-		    // XXXdbg - if this is a hardlink, we could call
-		    //          hfs_chash_snoop() to see if there is
-		    //          already a cnode and vnode present for
-		    //          this fileid.  however I'd rather not
-		    //          risk it at this point in Tiger.
-			cat_releasedesc(&cndesc);
-			error = ENOENT;
-			*vpp = NULL;
-			return (error);
+		/*
+		 * If we just looked up a raw hardlink inode,
+		 * then finish initializing it.
+		 */
+		if ((cndesc.cd_parentcnid == hfsmp->hfs_privdir_desc.cd_cnid) &&
+		    (bcmp(cndesc.cd_nameptr, HFS_INODE_PREFIX, HFS_INODE_PREFIX_LEN) == 0)) {
+			linkref = strtoul((const char*)&cndesc.cd_nameptr[HFS_INODE_PREFIX_LEN], NULL, 10);
+			cnattr.ca_rdev = linkref;
+
+			// patch up the parentcnid
+			if (cnattr.ca_attrblks != 0) {
+			    cndesc.cd_parentcnid = cnattr.ca_attrblks;
+			}
 		}
 	}
 
@@ -2240,6 +2251,10 @@ hfs_vget(struct hfsmount *hfsmp, cnid_t cnid, struct vnode **vpp, int skiplock)
 
 	/* XXX should we supply the parent as well... ? */
 	error = hfs_getnewvnode(hfsmp, NULLVP, &cn, &cndesc, 0, &cnattr, &cnfork, &vp);
+	if (error == 0 && linkref != 0) {
+		VTOC(vp)->c_flag |= C_HARDLINK;
+	}
+
 	FREE_ZONE(cn.cn_pnbuf, cn.cn_pnlen, M_NAMEI);
 
 	cat_releasedesc(&cndesc);
@@ -3271,7 +3286,6 @@ hfs_reclaimspace(struct hfsmount *hfsmp, u_long startblk)
 		if (VTOF(vp)->ff_blocks > 0) {
 			error = hfs_relocate(vp, hfsmp->hfs_metazone_end + 1, kauth_cred_get(), current_proc());
 		}
-		hfs_unlock(VTOC(vp));
 		if (error) 
 			break;
 
@@ -3280,17 +3294,17 @@ hfs_reclaimspace(struct hfsmount *hfsmp, u_long startblk)
 			error = hfs_vgetrsrc(hfsmp, vp, &rvp, current_proc());
 			if (error)
 				break;
-			hfs_lock(VTOC(rvp), HFS_EXCLUSIVE_LOCK);
 			error = hfs_relocate(rvp, hfsmp->hfs_metazone_end + 1, kauth_cred_get(), current_proc());
-			hfs_unlock(VTOC(rvp));
 			vnode_put(rvp);
 			if (error)
 				break;
 		}
+		hfs_unlock(VTOC(vp));
 		vnode_put(vp);
 		vp = NULL;
 	}
 	if (vp) {
+		hfs_unlock(VTOC(vp));
 		vnode_put(vp);
 		vp = NULL;
 	}

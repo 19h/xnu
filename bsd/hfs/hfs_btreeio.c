@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 #include <sys/param.h>
@@ -85,36 +91,57 @@ OSStatus GetBTreeBlock(FileReference vp, UInt32 blockNum, GetBlockOptions option
     if (retval == E_NONE) {
         block->blockHeader = bp;
         block->buffer = (char *)buf_dataptr(bp);
+    	block->blockNum = buf_lblkno(bp);
         block->blockReadFromDisk = (buf_fromcache(bp) == 0);	/* not found in cache ==> came from disk */
 
 		// XXXdbg 
 		block->isModified = 0;
 
-#if BYTE_ORDER == LITTLE_ENDIAN
-        /* Endian swap B-Tree node (only if it's a valid block) */
+        /* Check and endian swap B-Tree node (only if it's a valid block) */
         if (!(options & kGetEmptyBlock)) {
             /* This happens when we first open the b-tree, we might not have all the node data on hand */
             if ((((BTNodeDescriptor *)block->buffer)->kind == kBTHeaderNode) &&
                 (((BTHeaderRec *)((char *)block->buffer + 14))->nodeSize != buf_count(bp)) &&
                 (SWAP_BE16 (((BTHeaderRec *)((char *)block->buffer + 14))->nodeSize) != buf_count(bp))) {
 
-                /* Don't swap the descriptors at all, we don't care (this block will be invalidated) */
-                SWAP_BT_NODE (block, ISHFSPLUS(VTOVCB(vp)), VTOC(vp)->c_fileid, 3);
+                /*
+                 * Don't swap the node descriptor, record offsets, or other records.
+                 * This record will be invalidated and re-read with the correct node
+                 * size once the B-tree control block is set up with the node size
+                 * from the header record.
+                 */
+                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeHeaderRecordOnly);
 
-            /* The node needs swapping */
+			} else if (block->blockReadFromDisk) {
+            	/*
+            	 * The node was just read from disk, so always swap/check it.
+            	 * This is necessary on big endian since the test below won't trigger.
+            	 */
+                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeBigToHost);
             } else if (*((UInt16 *)((char *)block->buffer + (block->blockSize - sizeof (UInt16)))) == 0x0e00) {
-                SWAP_BT_NODE (block, ISHFSPLUS(VTOVCB(vp)), VTOC(vp)->c_fileid, 0);
-#if 0
-            /* The node is not already in native byte order, hence corrupt */
-            } else if (*((UInt16 *)((char *)block->buffer + (block->blockSize - sizeof (UInt16)))) != 0x000e) {
-                panic ("%s Corrupt B-Tree node detected!\n", "GetBTreeBlock:");
-#endif
+				/*
+				 * The node was left in the cache in non-native order, so swap it.
+				 * This only happens on little endian, after the node is written
+				 * back to disk.
+				 */
+                retval = hfs_swap_BTNode (block, vp, kSwapBTNodeBigToHost);
             }
+            
+    		/*
+    		 * If we got an error, then the node is only partially swapped.
+    		 * We mark the buffer invalid so that the next attempt to get the
+    		 * node will read it and attempt to swap again, and will notice
+    		 * the error again.  If we didn't do this, the next attempt to get
+    		 * the node might use the partially swapped node as-is.
+    		 */
+            if (retval)
+				buf_markinvalid(bp);
         }
-#endif
-    } else {
+    }
+    
+    if (retval) {
     	if (bp)
-   		buf_brelse(bp);
+			buf_brelse(bp);
         block->blockHeader = NULL;
         block->buffer = NULL;
     }
@@ -146,20 +173,22 @@ void ModifyBlockStart(FileReference vp, BlockDescPtr blockPtr)
 static int
 btree_journal_modify_block_end(struct hfsmount *hfsmp, struct buf *bp)
 {
-#if BYTE_ORDER == LITTLE_ENDIAN
+	int retval;
     struct vnode *vp = buf_vnode(bp);
     BlockDescriptor block;
 				    
     /* Prepare the block pointer */
     block.blockHeader = bp;
     block.buffer = (char *)buf_dataptr(bp);
+    block.blockNum = buf_lblkno(bp);
     /* not found in cache ==> came from disk */
     block.blockReadFromDisk = (buf_fromcache(bp) == 0);
     block.blockSize = buf_count(bp);
 
     // XXXdbg have to swap the data before it goes in the journal
-    SWAP_BT_NODE (&block, ISHFSPLUS (VTOVCB(vp)), VTOC(vp)->c_fileid, 1);
-#endif
+    retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig);
+    if (retval)
+    	panic("btree_journal_modify_block_end: about to write corrupt node!\n");
 
     return journal_modify_block_end(hfsmp->jnl, bp);
 }

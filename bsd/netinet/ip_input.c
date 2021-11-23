@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * Copyright (c) 1982, 1986, 1988, 1993
@@ -685,8 +691,10 @@ iphack:
 	if (fr_checkp) {
 		struct	mbuf	*m1 = m;
 
-		if (fr_checkp(ip, hlen, m->m_pkthdr.rcvif, 0, &m1) || !m1)
+		if (fr_checkp(ip, hlen, m->m_pkthdr.rcvif, 0, &m1) || !m1) {
+			lck_mtx_unlock(ip_mutex);
 			return;
+		}
 		ip = mtod(m = m1, struct ip *);
 	}
 	if (fw_enable && IPFW_LOADED) {
@@ -700,22 +708,24 @@ iphack:
 #endif	/* IPFIREWALL_FORWARD */
 
 		args.m = m;
+		lck_mtx_unlock(ip_mutex);
+
 		i = ip_fw_chk_ptr(&args);
 		m = args.m;
 
 		if ( (i & IP_FW_PORT_DENY_FLAG) || m == NULL) { /* drop */
 			if (m)
-              m_freem(m);
-			lck_mtx_unlock(ip_mutex);
+				m_freem(m);
 			return;
 		}
 		ip = mtod(m, struct ip *); /* just in case m changed */
-		if (i == 0 && args.next_hop == NULL)	/* common case */
+		if (i == 0 && args.next_hop == NULL) {	/* common case */
+			lck_mtx_lock(ip_mutex);
 			goto pass;
+		}
 #if DUMMYNET
                 if (DUMMYNET_LOADED && (i & IP_FW_PORT_DYNT_FLAG) != 0) {
 			/* Send packet to the appropriate pipe */
-			lck_mtx_unlock(ip_mutex);
 			ip_dn_io_ptr(m, i&0xffff, DN_TO_IP_IN, &args);
 			return;
 		}
@@ -723,19 +733,21 @@ iphack:
 #if IPDIVERT
 		if (i != 0 && (i & IP_FW_PORT_DYNT_FLAG) == 0) {
 			/* Divert or tee packet */
+			lck_mtx_lock(ip_mutex);
 			div_info = i;
 			goto ours;
 		}
 #endif
 #if IPFIREWALL_FORWARD
-		if (i == 0 && args.next_hop != NULL)
+		if (i == 0 && args.next_hop != NULL) {
+			lck_mtx_lock(ip_mutex);
 			goto pass;
+		}
 #endif
 		/*
 		 * if we get here, the packet must be dropped
 		 */
 		m_freem(m);
-		lck_mtx_unlock(ip_mutex);
 		return;
 	}
 pass:
@@ -2271,8 +2283,12 @@ ip_savecontrol(
 		ifnet_head_lock_shared();
 		if (((ifp = m->m_pkthdr.rcvif)) 
 		&& ( ifp->if_index && (ifp->if_index <= if_index))) {
-			sdp = (struct sockaddr_dl *)(ifnet_addrs
-					[ifp->if_index - 1]->ifa_addr);
+			struct ifaddr *ifa = ifnet_addrs[ifp->if_index - 1];
+			
+			if (!ifa || !ifa->ifa_addr)
+				goto makedummy;
+			
+			sdp = (struct sockaddr_dl *)ifa->ifa_addr;
 			/*
 			 * Change our mind and don't try copy.
 			 */

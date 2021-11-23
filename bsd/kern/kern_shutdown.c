@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *	File:	bsd/kern/kern_shutdown.c
@@ -60,6 +66,7 @@
 #include <bsm/audit_kernel.h>
 
 int	waittime = -1;
+static void proc_shutdown();
 
 void
 boot(paniced, howto, command)
@@ -73,7 +80,6 @@ boot(paniced, howto, command)
 	int funnel_state;
 	struct proc  *launchd_proc;
 
-	static void proc_shutdown();
     extern void md_prepare_for_shutdown(int paniced, int howto, char * command);
 
 	funnel_state = thread_funnel_set(kernel_flock, TRUE);
@@ -207,8 +213,10 @@ sigterm_loop:
 			}
 		        if (p->p_sigcatch & sigmask(SIGTERM)) {
 					p->p_shutdownstate = 1;
-			        psignal(p, SIGTERM);
-
+					if (proc_refinternal(p, 1) == p) {
+			        	psignal(p, SIGTERM);
+						proc_dropinternal(p, 1);
+					}
 				goto sigterm_loop;
 		}
 	}
@@ -258,7 +266,10 @@ sigkill_loop:
 			if ((delayterm == 0) && ((p->p_lflag& P_LDELAYTERM) == P_LDELAYTERM)) {
 				continue;
 			}
-			psignal(p, SIGKILL);
+			if (proc_refinternal(p, 1) == p) {
+				psignal(p, SIGKILL);
+				proc_dropinternal(p, 1);
+			}
 			p->p_shutdownstate = 2;
 			goto sigkill_loop;
 		}
@@ -282,11 +293,12 @@ sigkill_loop:
 	 */
 	p = allproc.lh_first;
 	while (p) {
-	        if ((p->p_flag&P_SYSTEM) || (!delayterm && ((p->p_lflag& P_LDELAYTERM))) 
+	        if ((p->p_shutdownstate == 3) || (p->p_flag&P_SYSTEM) || (!delayterm && ((p->p_lflag& P_LDELAYTERM))) 
 				|| (p->p_pptr->p_pid == 0) || (p == self)) {
 		        p = p->p_list.le_next;
 		}
 		else {
+			p->p_shutdownstate = 3;
 		        /*
 			 * NOTE: following code ignores sig_lock and plays
 			 * with exit_thread correctly.  This is OK unless we
@@ -300,7 +312,10 @@ sigkill_loop:
 			} else {
 				p->exit_thread = current_thread();
 				printf(".");
-				exit1(p, 1, (int *)NULL);
+				if (proc_refinternal(p, 1) == p) {
+					exit1(p, 1, (int *)NULL);
+					proc_dropinternal(p, 1);
+				}
 			}
 			p = allproc.lh_first;
 		}

@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 1995-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 //
 // This file implements a simple write-ahead journaling layer.  
@@ -1507,6 +1513,110 @@ journal_open(struct vnode *jvp,
     return NULL;    
 }
 
+
+int
+journal_is_clean(struct vnode *jvp,
+		 off_t         offset,
+		 off_t         journal_size,
+		 struct vnode *fsvp,
+                 size_t        min_fs_block_size)
+{
+    journal jnl;
+    int     phys_blksz, ret;
+    int     orig_checksum, checksum;
+    struct vfs_context context;
+
+    context.vc_proc = current_proc();
+    context.vc_ucred = FSCRED;
+
+    /* Get the real physical block size. */
+    if (VNOP_IOCTL(jvp, DKIOCGETBLOCKSIZE, (caddr_t)&phys_blksz, 0, &context)) {
+	printf("jnl: is_clean: failed to get device block size.\n");
+	return EINVAL;
+    }
+
+    if (phys_blksz > min_fs_block_size) {
+	printf("jnl: is_clean: error: phys blksize %d bigger than min fs blksize %d\n",
+	       phys_blksz, min_fs_block_size);
+	return EINVAL;
+    }
+
+    if ((journal_size % phys_blksz) != 0) {
+	printf("jnl: is_clean: journal size 0x%llx is not an even multiple of block size 0x%x\n",
+	       journal_size, phys_blksz);
+	return EINVAL;
+    }
+
+    memset(&jnl, 0, sizeof(jnl));
+
+    if (kmem_alloc(kernel_map, (vm_offset_t *)&jnl.header_buf, phys_blksz)) {
+	printf("jnl: is_clean: could not allocate space for header buffer (%d bytes)\n", phys_blksz);
+	return ENOMEM;
+    }
+
+    jnl.jhdr = (journal_header *)jnl.header_buf;
+    memset(jnl.jhdr, 0, sizeof(journal_header)+4);
+
+    jnl.jdev        = jvp;
+    jnl.jdev_offset = offset;
+    jnl.fsdev       = fsvp;
+
+    // we have to set this up here so that do_journal_io() will work
+    jnl.jhdr->jhdr_size = phys_blksz;
+
+    if (read_journal_header(&jnl, jnl.jhdr, phys_blksz) != phys_blksz) {
+	printf("jnl: is_clean: could not read %d bytes for the journal header.\n",
+	       phys_blksz);
+	ret = EINVAL;
+	goto get_out;
+    }
+
+    orig_checksum = jnl.jhdr->checksum;
+    jnl.jhdr->checksum = 0;
+
+    if (jnl.jhdr->magic == SWAP32(JOURNAL_HEADER_MAGIC)) {
+	// do this before the swap since it's done byte-at-a-time
+	orig_checksum = SWAP32(orig_checksum);
+	checksum = calc_checksum((char *)jnl.jhdr, sizeof(struct journal_header));
+	swap_journal_header(&jnl);
+	jnl.flags |= JOURNAL_NEED_SWAP;
+    } else {
+	checksum = calc_checksum((char *)jnl.jhdr, sizeof(struct journal_header));
+    }
+
+    if (jnl.jhdr->magic != JOURNAL_HEADER_MAGIC && jnl.jhdr->magic != OLD_JOURNAL_HEADER_MAGIC) {
+	printf("jnl: is_clean: journal magic is bad (0x%x != 0x%x)\n",
+	       jnl.jhdr->magic, JOURNAL_HEADER_MAGIC);
+	ret = EINVAL;
+	goto get_out;
+    }
+
+    if (orig_checksum != checksum) {
+	printf("jnl: is_clean: journal checksum is bad (0x%x != 0x%x)\n", orig_checksum, checksum);
+	ret = EINVAL;
+	goto get_out;
+    }
+
+    //
+    // if the start and end are equal then the journal is clean.
+    // otherwise it's not clean and therefore an error.
+    //
+    if (jnl.jhdr->start == jnl.jhdr->end) {
+	ret = 0;
+    } else {
+	ret = EINVAL;
+    }
+
+  get_out:
+    kmem_free(kernel_map, (vm_offset_t)jnl.header_buf, phys_blksz);
+    
+    return ret;    
+
+
+}
+
+
+
 void
 journal_close(journal *jnl)
 {
@@ -1800,6 +1910,8 @@ journal_start_transaction(journal *jnl)
 
     // journal replay code checksum check depends on this.
     memset(tr->tbuffer, 0, BLHDR_CHECKSUM_SIZE);
+    // Fill up the rest of the block with unimportant bytes (0x5a 'Z' chosen for visibility)
+    memset(tr->tbuffer + BLHDR_CHECKSUM_SIZE, 0x5a, jnl->jhdr->blhdr_size - BLHDR_CHECKSUM_SIZE);
 
     tr->blhdr = (block_list_header *)tr->tbuffer;
     tr->blhdr->max_blocks = (jnl->jhdr->blhdr_size / sizeof(block_info)) - 1;
@@ -2034,6 +2146,8 @@ journal_modify_block_end(journal *jnl, struct buf *bp)
 
 		// journal replay code checksum check depends on this.
 		memset(nblhdr, 0, BLHDR_CHECKSUM_SIZE);
+		// Fill up the rest of the block with unimportant bytes
+		memset(nblhdr + BLHDR_CHECKSUM_SIZE, 0x5a, jnl->jhdr->blhdr_size - BLHDR_CHECKSUM_SIZE);
 
 		// initialize the new guy
 		nblhdr->max_blocks = (jnl->jhdr->blhdr_size / sizeof(block_info)) - 1;

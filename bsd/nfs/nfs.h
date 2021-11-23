@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /* Copyright (c) 1995 NeXT Computer, Inc. All Rights Reserved */
 /*
@@ -457,6 +463,7 @@ struct user_nfs_export_args {
 #define NXA_DELETE		0x0001	/* delete the specified export(s) */
 #define NXA_ADD			0x0002	/* add the specified export(s) */
 #define NXA_REPLACE		0x0003	/* delete and add the specified export(s) */
+#define NXA_DELETE_ALL		0x0004	/* delete all exports */
 
 /* export option flags */
 #define NX_READONLY		0x0001	/* exported read-only */
@@ -464,6 +471,7 @@ struct user_nfs_export_args {
 #define NX_MAPROOT		0x0004	/* map root access to anon credential */
 #define NX_MAPALL		0x0008	/* map all access to anon credential */
 #define NX_KERB			0x0010	/* exported with Kerberos uid mapping */
+#define NX_32BITCLIENTS		0x0020	/* restrict directory cookies to 32 bits */
 
 #ifdef KERNEL
 struct nfs_exportfs;
@@ -745,6 +753,7 @@ struct nfssvc_sock {
 	int		ns_reclen;
 	int		ns_numuids;
 	u_long		ns_sref;
+	time_t		ns_timestamp;		/* socket timestamp */
 	lck_mtx_t	ns_wgmutex;		/* mutex for write gather fields */
 	u_quad_t	ns_wgtime;		/* next Write deadline (usec) */
 	LIST_HEAD(, nfsrv_descript) ns_tq;	/* Write gather lists */
@@ -762,7 +771,7 @@ struct nfssvc_sock {
 #define	SLP_LASTFRAG	0x20 /* on last fragment of RPC record */
 #define SLP_ALLFLAGS	0xff
 
-extern TAILQ_HEAD(nfssvc_sockhead, nfssvc_sock) nfssvc_sockhead;
+extern TAILQ_HEAD(nfssvc_sockhead, nfssvc_sock) nfssvc_sockhead, nfssvc_deadsockhead;
 
 /* locks for nfssvc_sock's */
 extern lck_grp_attr_t *nfs_slp_group_attr;
@@ -891,7 +900,7 @@ void	nfs_sndunlock(struct nfsreq *);
 int	nfs_vinvalbuf(vnode_t, int, struct ucred *, proc_t, int);
 int	nfs_buf_page_inval(vnode_t vp, off_t offset);
 int	nfs_readrpc(vnode_t, struct uio *, struct ucred *, proc_t);
-int	nfs_writerpc(vnode_t, struct uio *, struct ucred *, proc_t, int *, int *);
+int	nfs_writerpc(vnode_t, struct uio *, struct ucred *, proc_t, int *, uint64_t *);
 int	nfs_readdirrpc(vnode_t, struct uio *, struct ucred *, proc_t);
 int	nfs_readdirplusrpc(vnode_t, struct uio *, struct ucred *, proc_t);
 int	nfs_asyncio(struct nfsbuf *, struct ucred *);
@@ -951,7 +960,6 @@ int	nfs_commit(vnode_t vp, u_quad_t offset, u_int32_t count,
 			struct ucred *cred, proc_t procp);
 int	nfs_flushcommits(vnode_t, proc_t, int);
 int	nfs_flush(vnode_t,int,struct ucred *,proc_t,int);
-void	nfs_clearcommit(mount_t);
 int	nfsrv_errmap(struct nfsrv_descript *, int);
 void	nfsrvw_sort(gid_t *, int);
 void	nfsrv_setcred(struct ucred *, struct ucred *);
@@ -1019,6 +1027,7 @@ int	nfsrv_setattr(struct nfsrv_descript *nfsd,
 			   struct nfssvc_sock *slp,
 			   proc_t procp, mbuf_t *mrq);
 void	nfsrv_slpderef(struct nfssvc_sock *slp);
+void	nfsrv_slpfree(struct nfssvc_sock *slp);
 int	nfsrv_statfs(struct nfsrv_descript *nfsd, 
 			  struct nfssvc_sock *slp,
 			  proc_t procp, mbuf_t *mrq);

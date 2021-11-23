@@ -238,7 +238,6 @@ SYSCTL_INT(_net_inet_ip_fw, OID_AUTO, dyn_keepalive, CTLFLAG_RW,
 #endif /* SYSCTL_NODE */
 
 
-extern lck_mtx_t *ip_mutex;
 static ip_fw_chk_t	ipfw_chk;
 
 /* firewall lock */
@@ -1305,18 +1304,15 @@ send_reject(struct ip_fw_args *args, int code, int offset, int ip_len)
 			ip->ip_len = ntohs(ip->ip_len);
 			ip->ip_off = ntohs(ip->ip_off);
 		}
-		lck_mtx_unlock(ip_mutex);
+                args->m->m_flags |= M_SKIP_FIREWALL;
 		icmp_error(args->m, ICMP_UNREACH, code, 0L, 0);
-		lck_mtx_lock(ip_mutex);
 	} else if (offset == 0 && args->f_id.proto == IPPROTO_TCP) {
 		struct tcphdr *const tcp =
 		    L3HDR(struct tcphdr, mtod(args->m, struct ip *));
 		if ( (tcp->th_flags & TH_RST) == 0) {
-			lck_mtx_unlock(ip_mutex);
 			send_pkt(&(args->f_id), ntohl(tcp->th_seq),
 				ntohl(tcp->th_ack),
 				tcp->th_flags | TH_RST);
-			lck_mtx_lock(ip_mutex);
 		}
 		m_freem(args->m);
 	} else
@@ -3116,20 +3112,21 @@ ipfw_ctl(struct sockopt *sopt)
 		/*
 		 * IP_FW_DEL is used for deleting single rules or sets,
 		 * and (ab)used to atomically manipulate sets. 
-		 * rule->set_masks is used to distinguish between the two:
-		 *    rule->set_masks[0] == 0
-		 *	delete single rule or set of rules,
-		 *	or reassign rules (or sets) to a different set.
-		 *    rule->set_masks[0] != 0
-		 *	atomic disable/enable sets.
-		 *	rule->set_masks[0] contains sets to be disabled,
-		 *	rule->set_masks[1] contains sets to be enabled.
+		 * rule->rulenum != 0 indicates single rule delete
+		 * rule->set_masks used to manipulate sets
+		 * rule->set_masks[0] contains info on sets to be 
+		 *	disabled, swapped, or moved
+		 * rule->set_masks[1] contains sets to be enabled.
 		 */
+		 
 		/* there is only a simple rule passed in
 		 * (no cmds), so use a temp struct to copy
 		 */
-		struct ip_fw	temp_rule = { 0 };
+		struct ip_fw	temp_rule;
+		u_int32_t	arg;
+		u_int8_t	cmd;
 		
+		bzero(&temp_rule, sizeof(struct ip_fw));
 		if (api_version != IP_FW_CURRENT_API_VERSION) {
 			error = ipfw_convert_to_latest(sopt, &temp_rule, api_version);
 		}
@@ -3144,21 +3141,31 @@ ipfw_ctl(struct sockopt *sopt)
 			 */
 			lck_mtx_lock(ipfw_mutex);
 			
-			if (temp_rule.set_masks[0] != 0) {
-				/* set manipulation */
-				set_disable =
-					(set_disable | temp_rule.set_masks[0]) & ~temp_rule.set_masks[1] &
-					~(1<<RESVD_SET); /* set RESVD_SET always enabled */
-			}
-			else {
+			arg = temp_rule.set_masks[0];
+			cmd = (arg >> 24) & 0xff;
+			
+			if (temp_rule.rulenum) {
 				/* single rule */
 				error = del_entry(&layer3_chain, temp_rule.rulenum);
 #if DEBUG_INACTIVE_RULES
 				print_chain(&layer3_chain);
 #endif
-
 			}
-			
+			else if (cmd) {
+				/* set reassignment - see comment above del_entry() for details */
+				error = del_entry(&layer3_chain, temp_rule.set_masks[0]);
+#if DEBUG_INACTIVE_RULES
+				print_chain(&layer3_chain);
+#endif
+			}
+			else if (temp_rule.set_masks[0] != 0 ||
+				temp_rule.set_masks[1] != 0) {
+				/* set enable/disable */
+				set_disable =
+					(set_disable | temp_rule.set_masks[0]) & ~temp_rule.set_masks[1] &
+					~(1<<RESVD_SET); /* set RESVD_SET always enabled */
+			}
+						
 			lck_mtx_unlock(ipfw_mutex);
 		}
 		break;

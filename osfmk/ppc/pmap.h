@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -250,6 +256,7 @@ extern pmapTransTab *pmapTrans;			/* Space to pmap translate table */
 #define PHYS_MEM_WINDOW_VADDR	0x0000000100000000ULL
 #define IO_MEM_WINDOW_VADDR		0x0000000080000000ULL
 #define IO_MEM_WINDOW_SIZE		0x0000000080000000ULL
+#define pmapSmallBlock 65536
 
 #define pmap_kernel()			(kernel_pmap)
 #define	pmap_resident_count(pmap)	((pmap)->stats.resident_count)
@@ -277,6 +284,7 @@ extern pmapTransTab *pmapTrans;			/* Space to pmap translate table */
  */
 extern vm_offset_t phystokv(vm_offset_t pa);					/* Get kernel virtual address from physical */
 extern vm_offset_t kvtophys(vm_offset_t va);					/* Get physical address from kernel virtual */
+extern vm_map_offset_t kvtophys64(vm_map_offset_t va);				/* Get 64-bit physical address from kernel virtual */
 extern vm_offset_t	pmap_map(vm_offset_t va,
 				 vm_offset_t spa,
 				 vm_offset_t epa,
@@ -302,8 +310,8 @@ extern void invalidate_icache(vm_offset_t va, unsigned length, boolean_t phys);
 extern void invalidate_icache64(addr64_t va, unsigned length, boolean_t phys);
 extern void pmap_sync_page_data_phys(ppnum_t pa);
 extern void pmap_sync_page_attributes_phys(ppnum_t pa);
-extern void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, vm_size_t size, vm_prot_t prot, int attr, unsigned int flags);
-extern int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, vm_size_t size, vm_prot_t prot, int attr, unsigned int flags);
+extern void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot_t prot, int attr, unsigned int flags);
+extern int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot_t prot, int attr, unsigned int flags);
 
 extern kern_return_t pmap_nest(pmap_t grand, pmap_t subord, addr64_t vstart, addr64_t nstart, uint64_t size);
 extern kern_return_t pmap_unnest(pmap_t grand, addr64_t vaddr);

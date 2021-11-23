@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *	This file is used to maintain the virtual to real mappings for a PowerPC machine.
@@ -272,7 +278,7 @@ addr64_t mapping_remove(pmap_t pmap, addr64_t va) {		/* Remove a single mapping 
  *			perm					Mapping is permanent
  *			cache inhibited			Cache inhibited (used if use attribute or block set )
  *			guarded					Guarded access (used if use attribute or block set )
- *		size						size of block (not used if not block)
+ *		size						size of block in pages - 1 (not used if not block)
  *		prot						VM protection bits
  *		attr						Cachability/Guardedness    
  *
@@ -337,6 +343,12 @@ addr64_t mapping_make(pmap_t pmap, addr64_t va, ppnum_t pa, unsigned int flags, 
 		 
 		pattr = flags & (mmFlgCInhib | mmFlgGuarded);			/* Use requested attributes */
 		mflags |= mpBlock;										/* Show that this is a block */
+	
+		if(size > pmapSmallBlock) {								/* Is it one? */
+			if(size & 0x00001FFF) return mapRtBadSz;			/* Fail if bigger than 256MB and not a 32MB multiple */
+			size = size >> 13;									/* Convert to 32MB chunks */
+			mflags = mflags | mpBSu;							/* Show 32MB basic size unit */
+		}
 	}
 	
 	wimg = 0x2;													/* Set basic PPC wimg to 0b0010 - Coherent */
@@ -348,7 +360,7 @@ addr64_t mapping_make(pmap_t pmap, addr64_t va, ppnum_t pa, unsigned int flags, 
 	if(flags & mmFlgPerm) mflags |= mpPerm;						/* Set permanent mapping */
 	
 	size = size - 1;											/* Change size to offset */
-	if(size > 0xFFFF) return 1;									/* Leave if size is too big */
+	if(size > 0xFFFF) return mapRtBadSz;						/* Leave if size is too big */
 	
 	nlists = mapSetLists(pmap);									/* Set number of lists this will be on */
 	
@@ -371,7 +383,7 @@ addr64_t mapping_make(pmap_t pmap, addr64_t va, ppnum_t pa, unsigned int flags, 
 		
 		switch (rc) {
 			case mapRtOK:
-				return 0;										/* Mapping added successfully */
+				return mapRtOK;									/* Mapping added successfully */
 				
 			case mapRtRemove:									/* Remove in progress */
 				(void)mapping_remove(pmap, colladdr);			/* Lend a helping hand to another CPU doing block removal */
@@ -379,12 +391,12 @@ addr64_t mapping_make(pmap_t pmap, addr64_t va, ppnum_t pa, unsigned int flags, 
 				
 			case mapRtMapDup:									/* Identical mapping already present */
 				mapping_free(mp);								/* Free duplicate mapping */
-				return 0;										/* Return success */
+				return mapRtOK;										/* Return success */
 				
 			case mapRtSmash:									/* Mapping already present but does not match new mapping */
 				mapping_free(mp);								/* Free duplicate mapping */
-				return (colladdr | 1);							/* Return colliding address, with some dirt added to avoid
-																    confusion if effective address is 0 */
+				return (colladdr | mapRtSmash);					/* Return colliding address, with some dirt added to avoid
+																   confusion if effective address is 0 */
 			default:
 				panic("mapping_make: hw_add_map failed - collision addr = %016llX, code = %02X, pmap = %08X, va = %016llX, mapping = %08X\n",
 					colladdr, rc, pmap, va, mp);				/* Die dead */
@@ -1521,6 +1533,19 @@ vm_offset_t kvtophys(vm_offset_t va) {
 }
 
 /*
+ *	kvtophys64(addr)
+ *
+ *	Convert a kernel virtual address to a 64-bit physical address
+ */
+vm_map_offset_t kvtophys64(vm_map_offset_t va) {
+	ppnum_t pa = pmap_find_phys(kernel_pmap, (addr64_t)va);
+
+	if (!pa)
+		return (vm_map_offset_t)0;
+	return (((vm_map_offset_t)pa) << 12) | (va & 0xfff);
+}
+
+/*
  *		void ignore_zero_fault(boolean_t) - Sets up to ignore or honor any fault on 
  *		page 0 access for the current thread.
  *
@@ -1739,6 +1764,23 @@ void mapping_phys_unused(ppnum_t pa) {
 	
 }
 	
+void mapping_hibernate_flush(void)
+{
+    int bank;
+    unsigned int page;
+    struct phys_entry * entry;
+
+    for (bank = 0; bank < pmap_mem_regions_count; bank++)
+    {
+	entry = (struct phys_entry *) pmap_mem_regions[bank].mrPhysTab;
+	for (page = pmap_mem_regions[bank].mrStart; page <= pmap_mem_regions[bank].mrEnd; page++)
+	{
+	    hw_walk_phys(entry, hwpNoop, hwpNoop, hwpNoop, 0, hwpPurgePTE);
+	    entry++;
+	}
+    }
+}
+
 
 
 

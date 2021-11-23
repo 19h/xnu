@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2004-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -44,6 +50,8 @@
 #include <machine/machine_routines.h>
 #include <ppc/exception.h>
 #include <ppc/proc_reg.h>
+#include <ppc/pms.h>
+#include <ppc/rtclock.h>
 
 #include <IOKit/IOPlatformExpert.h>
 
@@ -52,8 +60,6 @@
 int		sysclk_config(void);
 
 int		sysclk_init(void);
-
-void treqs(uint32_t dec);
 
 kern_return_t	sysclk_gettime(
 	mach_timespec_t			*cur_time);
@@ -140,20 +146,11 @@ static void		nanotime_to_absolutetime(
 					uint32_t		nanosecs,
 					uint64_t		*result);
 
-static int		deadline_to_decrementer(
-					uint64_t		deadline,
-					uint64_t		now);
-
 static void		rtclock_alarm_expire(
 					timer_call_param_t		p0,
 					timer_call_param_t		p1);
 
 /* global data declarations */
-
-#define DECREMENTER_MAX		0x7FFFFFFFUL
-#define DECREMENTER_MIN		0xAUL
-
-natural_t		rtclock_decrementer_min;
 
 decl_simple_lock_data(static,rtclock_lock)
 
@@ -234,28 +231,16 @@ sysclk_config(void)
 int
 sysclk_init(void)
 {
-	uint64_t				abstime, nexttick;
-	int						decr1, decr2;
-	struct rtclock_timer	*mytimer;
+	uint64_t				abstime;
 	struct per_proc_info	*pp;
 
-	decr1 = decr2 = DECREMENTER_MAX;
-
 	pp = getPerProc();
-	mytimer = &pp->rtclock_timer;
 
 	abstime = mach_absolute_time();
-	nexttick = abstime + rtclock_tick_interval;
-	pp->rtclock_tick_deadline = nexttick;
-	decr1 = deadline_to_decrementer(nexttick, abstime);
-
-	if (mytimer->is_set)
-		decr2 = deadline_to_decrementer(mytimer->deadline, abstime);
-
-	if (decr1 > decr2)
-		decr1 = decr2;
-
-	treqs(decr1);
+	pp->rtclock_tick_deadline = abstime + rtclock_tick_interval;	/* Get the time we need to pop */
+	pp->rtcPop = pp->rtclock_tick_deadline;	/* Set the rtc pop time the same for now */
+	
+	(void)setTimerReq();			/* Start the timers going */
 
 	return (1);
 }
@@ -596,6 +581,43 @@ clock_set_calendar_microtime(
     commpage_set_timestamp(0,0,0,0);
 
 	/*
+	 *	Cancel any adjustment in progress.
+	 */
+	if (rtclock_calend.adjdelta < 0) {
+		uint64_t	now, t64;
+		uint32_t	delta, t32;
+
+		delta = -rtclock_calend.adjdelta;
+
+		sys = rtclock_calend.epoch;
+		microsys = rtclock_calend.microepoch;
+
+		now = mach_absolute_time();
+
+		if (now > rtclock_calend.epoch1)
+			t64 = now - rtclock_calend.epoch1;
+		else
+			t64 = 0;
+
+		t32 = (t64 * USEC_PER_SEC) / rtclock_sec_divisor;
+
+		if (t32 > delta)
+			TIME_ADD(sys, 0, microsys, (t32 - delta), USEC_PER_SEC);
+
+		rtclock_calend.epoch = sys;
+		rtclock_calend.microepoch = microsys;
+
+		sys = t64 = now / rtclock_sec_divisor;
+		now -= (t64 * rtclock_sec_divisor);
+		microsys = (now * USEC_PER_SEC) / rtclock_sec_divisor;
+
+		TIME_SUB(rtclock_calend.epoch, sys, rtclock_calend.microepoch, microsys, USEC_PER_SEC);
+	}
+
+	rtclock_calend.epoch1 = 0;
+	rtclock_calend.adjdelta = rtclock_calend.adjtotal = 0;
+
+	/*
 	 *	Calculate the new calendar epoch based on
 	 *	the new value and the system clock.
 	 */
@@ -612,12 +634,6 @@ clock_set_calendar_microtime(
 	 */
 	rtclock_calend.epoch = secs;
 	rtclock_calend.microepoch = microsecs;
-
-	/*
-	 *	Cancel any adjustment in progress.
-	 */
-	rtclock_calend.epoch1 = 0;
-	rtclock_calend.adjdelta = rtclock_calend.adjtotal = 0;
 
 	simple_unlock(&rtclock_lock);
 
@@ -877,9 +893,9 @@ void
 clock_set_timer_deadline(
 	uint64_t				deadline)
 {
-	uint64_t				abstime;
 	int						decr;
-	struct rtclock_timer	*mytimer;
+	uint64_t				abstime;
+	rtclock_timer_t			*mytimer;
 	struct per_proc_info	*pp;
 	spl_t					s;
 
@@ -887,21 +903,15 @@ clock_set_timer_deadline(
 	pp = getPerProc();
 	mytimer = &pp->rtclock_timer;
 	mytimer->deadline = deadline;
-	mytimer->is_set = TRUE;
-	if (!mytimer->has_expired) {
-		abstime = mach_absolute_time();
-		if (	mytimer->deadline < pp->rtclock_tick_deadline			) {
-			decr = deadline_to_decrementer(mytimer->deadline, abstime);
-			if (	rtclock_decrementer_min != 0				&&
-					rtclock_decrementer_min < (natural_t)decr		)
-				decr = rtclock_decrementer_min;
 
-			treqs(decr);
+	if (!mytimer->has_expired && (deadline < pp->rtclock_tick_deadline)) {		/* Has the timer already expired or is less that set? */
+		pp->rtcPop = deadline;			/* Yes, set the new rtc pop time */
+		decr = setTimerReq();			/* Start the timers going */
 
-			KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1)
-										| DBG_FUNC_NONE, decr, 2, 0, 0, 0);
-		}
+		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1)
+									| DBG_FUNC_NONE, decr, 2, 0, 0, 0);
 	}
+
 	splx(s);
 }
 
@@ -917,64 +927,67 @@ clock_set_timer_func(
 	UNLOCK_RTC(s);
 }
 
-void
-rtclock_intr(
-	int					device,
-	struct savearea		*ssp,
-	spl_t				old);
-
 /*
  * Real-time clock device interrupt.
  */
 void
-rtclock_intr(
-	__unused int			device,
-	struct savearea			*ssp,
-	__unused spl_t			old_spl)
-{
+rtclock_intr(struct savearea *ssp) {
+	
 	uint64_t				abstime;
-	int						decr1, decr2;
-	struct rtclock_timer	*mytimer;
+	int						decr;
+	rtclock_timer_t			*mytimer;
 	struct per_proc_info	*pp;
 
-	decr1 = decr2 = DECREMENTER_MAX;
-
 	pp = getPerProc();
-
-	abstime = mach_absolute_time();
-	if (	pp->rtclock_tick_deadline <= abstime		) {
-		clock_deadline_for_periodic_event(rtclock_tick_interval, abstime,
-										  		&pp->rtclock_tick_deadline);
-		hertz_tick(USER_MODE(ssp->save_srr1), ssp->save_srr0);
-	}
-
 	mytimer = &pp->rtclock_timer;
 
 	abstime = mach_absolute_time();
-	if (	mytimer->is_set					&&
-			mytimer->deadline <= abstime		) {
-		mytimer->has_expired = TRUE; mytimer->is_set = FALSE;
-		(*rtclock_timer_expire)(abstime);
+	if (pp->rtclock_tick_deadline <= abstime) {	/* Have we passed the pop time? */
+		clock_deadline_for_periodic_event(rtclock_tick_interval, abstime,
+										  		&pp->rtclock_tick_deadline);
+		hertz_tick(USER_MODE(ssp->save_srr1), ssp->save_srr0);
+		abstime = mach_absolute_time();			/* Refresh the current time since we went away */
+	}
+
+	if (mytimer->deadline <= abstime) {			/* Have we expired the deadline? */
+		mytimer->has_expired = TRUE;			/* Remember that we popped */
+		mytimer->deadline = EndOfAllTime;		/* Set timer request to the end of all time in case we have no more events */
+		(*rtclock_timer_expire)(abstime);		/* Process pop */
 		mytimer->has_expired = FALSE;
 	}
 
-	abstime = mach_absolute_time();
-	decr1 = deadline_to_decrementer(pp->rtclock_tick_deadline, abstime);
-
-	if (mytimer->is_set)
-		decr2 = deadline_to_decrementer(mytimer->deadline, abstime);
-
-	if (decr1 > decr2)
-		decr1 = decr2;
-
-	if (	rtclock_decrementer_min != 0					&&
-			rtclock_decrementer_min < (natural_t)decr1		)
-		decr1 = rtclock_decrementer_min;
-
-	treqs(decr1);
+	pp->rtcPop = (pp->rtclock_tick_deadline < mytimer->deadline) ?	/* Get shortest pop */
+		pp->rtclock_tick_deadline :				/* It was the periodic timer */
+		mytimer->deadline;						/* Actually, an event request */
+	
+	decr = setTimerReq();						/* Request the timer pop */
 
 	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1)
-						  | DBG_FUNC_NONE, decr1, 3, 0, 0, 0);
+						  | DBG_FUNC_NONE, decr, 3, 0, 0, 0);
+}
+
+/*
+ *	Request an interruption at a specific time 
+ *
+ *	Sets the decrementer to pop at the right time based on the timebase.
+ *	The value is chosen by comparing the rtc request with the power management.
+ *	request.  We may add other values at a future time.
+ *
+ */
+ 
+int setTimerReq(void) {
+
+	struct per_proc_info *pp;
+	int decr;
+	uint64_t nexttime;
+	
+	pp = getPerProc();							/* Get per_proc */
+
+	nexttime = pp->rtcPop;						/* Assume main timer */
+
+	decr = setPop((pp->pms.pmsPop < nexttime) ? pp->pms.pmsPop : nexttime);	/* Schedule timer pop */
+
+	return decr;								/* Pass back what we actually set */
 }
 
 static void
@@ -987,22 +1000,6 @@ rtclock_alarm_expire(
 	(void) sysclk_gettime(&timestamp);
 
 	clock_alarm_intr(SYSTEM_CLOCK, &timestamp);
-}
-
-static int
-deadline_to_decrementer(
-	uint64_t		deadline,
-	uint64_t		now)
-{
-	uint64_t		delt;
-
-	if (deadline <= now)
-		return DECREMENTER_MIN;
-	else {
-		delt = deadline - now;
-		return (delt >= (DECREMENTER_MAX + 1))? DECREMENTER_MAX:
-				((delt >= (DECREMENTER_MIN + 1))? (delt - 1): DECREMENTER_MIN);
-	}
 }
 
 static void
@@ -1110,23 +1107,3 @@ machine_delay_until(
 	} while (now < deadline);
 }
 
-/*
- *	Request a decrementer pop
- *
- */
-
-void treqs(uint32_t dec) {
-
-
-	struct per_proc_info *pp;
-	uint64_t nowtime, newtime;
-	
-	nowtime = mach_absolute_time();						/* What time is it? */
-	pp = getPerProc();									/* Get our processor block */
-	newtime = nowtime + (uint64_t)dec;					/* Get requested pop time */
-	pp->rtcPop = newtime;								/* Copy it */
-	
-	mtdec((uint32_t)(newtime - nowtime));				/* Set decrementer */
-	return;
-
-}

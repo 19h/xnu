@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -434,7 +440,7 @@ noassist:	cmplwi	r15,0x7000						; Do we have a fast path trap?
 ;			and the savearea/pcb as the first parameter.
 ;			It is up to the callee to enable interruptions if
 ;			they should be.  We are in a state here where
-;			both interrupts and preemption is ok, but because we could
+;			both interrupts and preemption are ok, but because we could
 ;			be calling diagnostic code we will not enable.
 ;			
 ;			Also, the callee is responsible for finding any parameters
@@ -504,11 +510,11 @@ LEXT(ppcscret)
  */
 	
 ksystrace:	
-			mr		r4,r30						; Pass in saved state
+			mr		r4,r30							; Pass in saved state
 			bl      EXT(syscall_trace)
 			
-			cmplw	r31,r29						; Is this syscall in the table?	
-			add		r31,r27,r28					; Point right to the syscall table entry
+			cmplw	r31,r29							; Is this syscall in the table?	
+			add		r31,r27,r28						; Point right to the syscall table entry
 
 			bge-	.L_call_server_syscall_exception	; The syscall number is invalid
 	
@@ -520,20 +526,20 @@ ksystrace:
 
 .L_ksystrace_munge:
 			cmplwi  r0,0							; do we have a munger to call?
-			mtctr	r0							; Set the function call address
-			addi	r3,r30,saver3						; Pointer to args from save area
-			addi	r4,r1,FM_ARG0+ARG_SIZE				; Pointer for munged args
+			mtctr	r0								; Set the function call address
+			addi	r3,r30,saver3					; Pointer to args from save area
+			addi	r4,r1,FM_ARG0+ARG_SIZE			; Pointer for munged args
 			beq--	.L_ksystrace_trapcall			; just make the trap call
-			bctrl								; Call the munge function
+			bctrl									; Call the munge function
 
 .L_ksystrace_trapcall:		
-			lwz	r0,MACH_TRAP_FUNCTION(r31)			; Pick up the function address
-			mtctr	r0							; Set the function call address
-			addi	r3,r1,FM_ARG0+ARG_SIZE				; Pointer to munged args
+			lwz		r0,MACH_TRAP_FUNCTION(r31)		; Pick up the function address
+			mtctr	r0								; Set the function call address
+			addi	r3,r1,FM_ARG0+ARG_SIZE			; Pointer to munged args
 			bctrl
 
-			mr		r4,r30						; Pass in the savearea
-			bl		EXT(syscall_trace_end)		; Trace the exit of the system call	
+			mr		r4,r30							; Pass in the savearea
+			bl		EXT(syscall_trace_end)			; Trace the exit of the system call	
 			b		.L_mach_return
 
 	
@@ -553,27 +559,27 @@ ksystrace:
 ; Call a function that can print out our syscall info 
 ; Note that we don t care about any volatiles yet
 ;
-			lwz		r10,ACT_TASK(r13)			; Get our task 
+			lwz		r10,ACT_TASK(r13)				; Get our task 
 			lwz		r0,saver0+4(r30)
-			lis		r8,hi16(EXT(kdebug_enable))	; Get top of kdebug_enable 
+			lis		r8,hi16(EXT(kdebug_enable))		; Get top of kdebug_enable 
 			lis		r28,hi16(EXT(mach_trap_table))	; Get address of table
 			ori		r8,r8,lo16(EXT(kdebug_enable))	; Get bottom of kdebug_enable 
-			lwz		r8,0(r8)					; Get kdebug_enable 
+			lwz		r8,0(r8)						; Get kdebug_enable 
 
-			lwz		r7,TASK_SYSCALLS_MACH(r10)	; Get the current count
-			neg		r31,r0						; Make this positive
-			mr 		r3,r31						; save it
-			slwi	r27,r3,4					; multiply by 16
-			slwi	r3,r3,2						; and the original by 4
+			lwz		r7,TASK_SYSCALLS_MACH(r10)		; Get the current count
+			neg		r31,r0							; Make this positive
+			mr 		r3,r31							; save it
+			slwi	r27,r3,4						; multiply by 16
+			slwi	r3,r3,2							; and the original by 4
 			ori		r28,r28,lo16(EXT(mach_trap_table))	; Get address of table
-			add		r27,r27,r3					; for a total of 20x (5 words/entry)
-			addi	r7,r7,1						; Bump TASK_SYSCALLS_MACH count
-			cmplwi	r8,0						; Is kdebug_enable non-zero
-			stw		r7,TASK_SYSCALLS_MACH(r10)	; Save count
-			bne--	ksystrace					; yes, tracing enabled
+			add		r27,r27,r3						; for a total of 20x (5 words/entry)
+			addi	r7,r7,1							; Bump TASK_SYSCALLS_MACH count
+			cmplwi	r8,0							; Is kdebug_enable non-zero
+			stw		r7,TASK_SYSCALLS_MACH(r10)		; Save count
+			bne--	ksystrace						; yes, tracing enabled
 			
-			cmplwi	r31,MACH_TRAP_TABLE_COUNT	; Is this syscall in the table?	
-			add		r31,r27,r28					; Point right to the syscall table entry
+			cmplwi	r31,MACH_TRAP_TABLE_COUNT		; Is this syscall in the table?	
+			add		r31,r27,r28						; Point right to the syscall table entry
 
 			bge--	.L_call_server_syscall_exception	; The syscall number is invalid
 
@@ -586,15 +592,15 @@ ksystrace:
 .L_kernel_syscall_munge:
 			cmplwi	r0,0							; test for null munger
 			mtctr	r0								; Set the function call address
-			addi	r3,r30,saver3						; Pointer to args from save area
-			addi	r4,r1,FM_ARG0+ARG_SIZE				; Pointer for munged args
-			beq--	.L_kernel_syscall_trapcall		;   null munger - skip to trap call
-			bctrl								; Call the munge function
+			addi	r3,r30,saver3					; Pointer to args from save area
+			addi	r4,r1,FM_ARG0+ARG_SIZE			; Pointer for munged args
+			beq--	.L_kernel_syscall_trapcall		; null munger - skip to trap call
+			bctrl									; Call the munge function
 
 .L_kernel_syscall_trapcall:		
-			lwz	r0,MACH_TRAP_FUNCTION(r31)			; Pick up the function address
-			mtctr	r0							; Set the function call address
-			addi	r3,r1,FM_ARG0+ARG_SIZE				; Pointer to munged args
+			lwz		r0,MACH_TRAP_FUNCTION(r31)		; Pick up the function address
+			mtctr	r0								; Set the function call address
+			addi	r3,r1,FM_ARG0+ARG_SIZE			; Pointer to munged args
 
 #if FPFLOOD
 			stfd	f31,emfp31(r25)					; (TEST/DEBUG)
@@ -611,12 +617,12 @@ ksystrace:
  */
 
 .L_mach_return:
-			srawi  r0,r3,31						; properly extend the return code
-			cmpi	cr0,r3,KERN_INVALID_ARGUMENT		; deal with invalid system calls
-			mr		r31,r16						; Move the current thread pointer
-			stw	r0, saver3(r30)					; stash the high part of the return code
-			stw	r3,saver3+4(r30)					; Stash the low part of the return code
-			beq-	cr0,.L_mach_invalid_ret				; otherwise fall through into the normal return path
+			srawi  r0,r3,31							; properly extend the return code
+			cmpi	cr0,r3,KERN_INVALID_ARGUMENT	; deal with invalid system calls
+			mr		r31,r16							; Move the current thread pointer
+			stw		r0, saver3(r30)					; stash the high part of the return code
+			stw		r3,saver3+4(r30)				; Stash the low part of the return code
+			beq--	cr0,.L_mach_invalid_ret			; otherwise fall through into the normal return path
 .L_mach_invalid_arg:		
 
 
@@ -681,12 +687,12 @@ scrnotkern:
  * we want to pass the error code back to the caller
  */
 			lwz		r0,saver0+4(r30)				; reload the original syscall number
-			neg		r28,r0						; Make this positive
-			mr		r4,r28						; save a copy
-			slwi		r27,r4,4						; multiply by 16
-			slwi		r4,r4,2						; and another 4
+			neg		r28,r0							; Make this positive
+			mr		r4,r28							; save a copy
+			slwi	r27,r4,4						; multiply by 16
+			slwi	r4,r4,2							; and another 4
 			lis		r28,hi16(EXT(mach_trap_table))	; Get address of table
-			add		r27,r27,r4					; for a total of 20x (5 words/entry)
+			add		r27,r27,r4						; for a total of 20x (5 words/entry)
 			ori		r28,r28,lo16(EXT(mach_trap_table))	; Get address of table
 			add		r28,r27,r28						; Point right to the syscall table entry
 			lwz		r27,MACH_TRAP_FUNCTION(r28)		; Pick up the function address
@@ -957,7 +963,7 @@ ihbootnover:										; (TEST/DEBUG)
 			mr		r4,r30
 			lwz		r5,savedsisr(r30)				; Get the DSISR
 			lwz		r6,savedar+4(r30)				; Get the DAR 
-
+			
 #if FPFLOOD
 			stfd	f31,emfp31(r25)					; (TEST/DEBUG)
 #endif
@@ -982,7 +988,7 @@ LEXT(ihandler_ret)									; Marks our return point from debugger entry
 			lwz		r10,ACT_PER_PROC(r8)			; Get the per_proc block 
 		
 			lwz		r7,SAVflags(r3)					; Pick up the flags
-			lwz		r9,SAVprev+4(r3)					; Get previous save area
+			lwz		r9,SAVprev+4(r3)				; Get previous save area
 			cmplwi	cr1,r8,0						; Are we still initializing?
 			lwz		r12,savesrr1+4(r3)				; Get the MSR we will load on return 
 			andis.	r11,r7,hi16(SAVrststk)			; Is this the first on the stack?

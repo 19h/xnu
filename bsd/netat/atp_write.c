@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *	Copyright (c) 1996-1998 Apple Computer, Inc.
@@ -65,7 +71,7 @@ static int loop_cnt; /* for debugging loops */
   } \
 }
 
-static void atp_pack_bdsp(struct atp_trans *, struct atpBDS *);
+static int atp_pack_bdsp(struct atp_trans *, struct atpBDS *);
 static int atp_unpack_bdsp(struct atp_state *, gbuf_t *, struct atp_rcb *, 
 			   int, int);
 void atp_trp_clock(), asp_clock(), asp_clock_locked(), atp_trp_clock_locked();;
@@ -604,7 +610,7 @@ nothing_to_send:
 } /* atp_send_replies */
 
 
-static void
+static int
 atp_pack_bdsp(trp, bdsp)
      register struct atp_trans *trp;
      register struct atpBDS *bdsp;
@@ -612,12 +618,13 @@ atp_pack_bdsp(trp, bdsp)
 	register gbuf_t *m = NULL;
 	register int i, datsize = 0;
 	struct atpBDS *bdsbase = bdsp;
+	int error = 0;
 
 	dPrintf(D_M_ATP, D_L_INFO, ("atp_pack_bdsp: socket=%d\n",
 		trp->tr_queue->atp_socket_no));
 
 	for (i = 0; i < ATP_TRESP_MAX; i++, bdsp++) {
-	  	short bufsize = UAS_VALUE(bdsp->bdsBuffSz);
+	  	unsigned short bufsize = UAS_VALUE(bdsp->bdsBuffSz);
 		long bufaddr = UAL_VALUE(bdsp->bdsBuffAddr);
 
 	        if ((m = trp->tr_rcv[i]) == NULL)
@@ -639,13 +646,15 @@ atp_pack_bdsp(trp, bdsp)
 			register char *buf = (char *)bufaddr;
 
 			while (m) {
-			  	short len = (short)(gbuf_len(m));
+			  	unsigned short len = (unsigned short)(gbuf_len(m));
 				if (len) {
 				  	if (len > bufsize)
 						len = bufsize;
-					copyout((caddr_t)gbuf_rptr(m), 
+					if ((error = copyout((caddr_t)gbuf_rptr(m), 
 						CAST_USER_ADDR_T(&buf[tmp]),
-						len);
+						len)) != 0) {
+						return error;
+					}
 					bufsize -= len;
 					tmp += len;
 				}
@@ -664,6 +673,8 @@ atp_pack_bdsp(trp, bdsp)
 
 	dPrintf(D_M_ATP, D_L_INFO, ("             : size=%d\n",
 		datsize));
+	
+	return 0;
 } /* atp_pack_bdsp */
 
 
@@ -1461,6 +1472,13 @@ _ATPsndreq(fd, buf, len, nowait, err, proc)
 		return -1;
 	}
 
+	if (len < atpBDSsize + sizeof(struct atp_set_default) + TOTAL_ATP_HDR_SIZE ||
+		len > atpBDSsize + sizeof(struct atp_set_default) + TOTAL_ATP_HDR_SIZE + 
+		ATP_DATA_SIZE) {
+		file_drop(fd);
+		*err = EINVAL;
+		return -1;
+	}
 
 	while ((mioc = gbuf_alloc(sizeof(ioc_t), PRI_MED)) == 0) {
 		struct timespec ts;
@@ -1635,12 +1653,20 @@ _ATPsndreq(fd, buf, len, nowait, err, proc)
 	/*
 	 * copy out the recv data
 	 */
-	atp_pack_bdsp(trp, (struct atpBDS *)bds);
+	if ((*err = atp_pack_bdsp(trp, (struct atpBDS *)bds)) != 0) {
+		atp_free(trp);
+		file_drop(fd);
+		return -1;
+	}
 
 	/*
 	 * copyout the result info
 	 */
-	copyout((caddr_t)bds, CAST_USER_ADDR_T(buf), atpBDSsize);
+	if ((*err = copyout((caddr_t)bds, CAST_USER_ADDR_T(buf), atpBDSsize)) != 0) {
+		atp_free(trp);
+		file_drop(fd);
+		return -1;
+	}
 
 	atp_free(trp);
 	file_drop(fd);
@@ -1694,6 +1720,11 @@ _ATPsndrsp(fd, respbuff, resplen, datalen, err, proc)
 	/*
 	 * allocate buffer and copy in the response info
 	 */
+	if (resplen < 0 || resplen > TOTAL_ATP_HDR_SIZE + sizeof(struct atpBDS)*ATP_TRESP_MAX) {
+		file_drop(fd);
+		*err = EINVAL;
+		return -1;
+	}
 	if ((m = gbuf_alloc_wait(resplen, TRUE)) == 0) {
 	        *err = ENOMEM;
 		file_drop(fd);
@@ -1723,6 +1754,12 @@ _ATPsndrsp(fd, respbuff, resplen, datalen, err, proc)
 	}
 	
 	for (size = 0, count = 0; count < bds_cnt; count++) {
+		if (UAS_VALUE(bdsp[count].bdsBuffSz) > ATP_DATA_SIZE) {
+			gbuf_freem(m);
+			*err = EINVAL;
+			file_drop(fd);
+			return -1;
+		}
 		size += UAS_VALUE(bdsp[count].bdsBuffSz);
 	}
 	if (size > datalen) {				
@@ -1807,6 +1844,12 @@ _ATPgetreq(fd, buf, buflen, err, proc)
 		return -1;
 	}
 
+	if (buflen < DDP_X_HDR_SIZE + ATP_HDR_SIZE) {
+		file_drop(fd);
+		*err = EINVAL;
+		return -1;
+	}
+
 	ATDISABLE(s, atp->atp_lock);
 	if ((rcbp = atp->atp_attached.head) != NULL) {
 	    /*
@@ -1885,13 +1928,21 @@ _ATPgetrsp(fd, bdsp, err, proc)
 	    	ATENABLE(s, atp->atp_lock);
 			if ((*err = copyin(CAST_USER_ADDR_T(bdsp),
 					(caddr_t)bds, sizeof(bds))) != 0) {
+				atp_free(trp);
 				file_drop(fd);
 				return -1;
 			}
-			atp_pack_bdsp(trp, (struct atpBDS *)bds);
+			if ((*err = atp_pack_bdsp(trp, (struct atpBDS *)bds)) != 0) {
+				atp_free(trp);
+				file_drop(fd);
+				return -1;
+			}
 			tid = (int)trp->tr_tid;
 			atp_free(trp);
-			copyout((caddr_t)bds, CAST_USER_ADDR_T(bdsp), sizeof(bds));
+			if ((*err = copyout((caddr_t)bds, CAST_USER_ADDR_T(bdsp), sizeof(bds))) != 0) {
+				file_drop(fd);
+				return -1;
+			}
 			file_drop(fd);
 			return tid;
 

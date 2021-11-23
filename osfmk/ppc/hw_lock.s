@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 #include <mach_assert.h>
@@ -1080,7 +1086,7 @@ mlckslow1:
 			bl		lockDisa						; Go get a lock on the mutex's interlock lock
 			mr.		r4,r3							; Did we get it?
 			lwz		r3,FM_ARG0(r1)					; Restore the lock address
-			bne+	mlGotInt						; We got it just fine...
+			bne++	mlGotInt						; We got it just fine...
 			mr		r4,r11							; Saved lock addr
 			lis		r3,hi16(mutex_failed1)			; Get the failed mutex message
 			ori		r3,r3,lo16(mutex_failed1)		; Get the failed mutex message
@@ -1297,9 +1303,9 @@ L_mutex_try_slow:
 			bne-	mtFail							; Someone's got it already...
 
 			bl		lockDisa						; Go get a lock on the mutex's interlock lock
-			mr.		r4,r3							; Did we get it? */
+			mr.		r4,r3							; Did we get it?
 			lwz		r3,FM_ARG0(r1)					; Restore the lock address
-			bne+	mtGotInt						; We got it just fine...
+			bne++	mtGotInt						; We got it just fine...
 			mr		r4,r11							; Saved lock addr
 			lis		r3,hi16(mutex_failed2)			; Get the failed mutex message
 			ori		r3,r3,lo16(mutex_failed2)		; Get the failed mutex message
@@ -1490,7 +1496,7 @@ L_mutex_unlock_slow:
 			bl		lockDisa						; Go get a lock on the mutex's interlock lock
 			mr.		r4,r3							; Did we get it?
 			lwz		r3,FM_ARG0(r1)					; Restore the lock address
-			bne+	muGotInt						; We got it just fine...
+			bne++	muGotInt						; We got it just fine...
 			mr		r4,r11							; Saved lock addr
 			lis		r3,hi16(mutex_failed3)			; Get the failed mutex message
 			ori		r3,r3,lo16(mutex_failed3)		; Get the failed mutex message
