@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -128,10 +125,18 @@ struct	pkthdr {
 	/* variables for ip and tcp reassembly */
 	void	*header;		/* pointer to packet header */
         /* variables for hardware checksum */
+#ifdef KERNEL_PRIVATE
+    	/* Note: csum_flags is used for hardware checksum and VLAN */
+#endif KERNEL_PRIVATE
         int     csum_flags;             /* flags regarding checksum */       
         int     csum_data;              /* data field used by csum routines */
 	struct mbuf *aux;		/* extra data buffer; ipsec/others */
+#ifdef KERNEL_PRIVATE
+	u_short	vlan_tag;		/* VLAN tag, host byte order */
+	u_short reserved_1;		/* for future use */
+#else KERNEL_PRIVATE
 	void	*reserved1;		/* for future use */
+#endif KERNEL_PRIVATE
 	void	*reserved2;		/* for future use */
 };
 
@@ -209,6 +214,16 @@ struct mbuf {
  
 #define CSUM_DELAY_DATA         (CSUM_TCP | CSUM_UDP)
 #define CSUM_DELAY_IP           (CSUM_IP)       /* XXX add ipv6 here too? */
+#ifdef KERNEL_PRIVATE
+/*
+ * Note: see also IF_HWASSIST_CSUM defined in <net/if_var.h>
+ */
+/* bottom 16 bits reserved for hardware checksum */
+#define CSUM_CHECKSUM_MASK	0xffff
+
+/* VLAN tag present */
+#define CSUM_VLAN_TAG_VALID	0x10000		/* vlan_tag field is valid */
+#endif KERNEL_PRIVATE
 
 
 /* mbuf types */

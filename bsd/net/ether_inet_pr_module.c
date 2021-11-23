@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -106,6 +103,7 @@ static u_char	etherbroadcastaddr[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 
 
 
+extern void * kdp_get_interface();
 
 /*
  * Process a received Ethernet packet;
@@ -227,7 +225,7 @@ inet_ether_pre_output(ifp, m0, dst_netaddr, route, type, edst, dl_tag )
     register struct rtentry *rt;
     register struct ether_header *eh;
     int off, len = m->m_pkthdr.len;
-    int hlen;	/* link layer header lenght */
+    int hlen;	/* link layer header length */
     struct arpcom *ac = IFP2AC(ifp);
 
 
@@ -366,12 +364,13 @@ ether_inet_prmod_ioctl(dl_tag, ifp, command, data)
 		ifp->if_init(ifp->if_softc);	/* before arpwhohas */
 
 	    arp_ifinit(IFP2AC(ifp), ifa);
-
 	    /*
 	     * Register new IP and MAC addresses with the kernel debugger
-	     * for the en0 interface.
+	     * if the interface is the same as was registered by IOKernelDebugger. If
+		 * no interface was registered, fall back and just match against en0 interface.
 	     */
-	    if (ifp->if_unit == 0)
+	    if ((kdp_get_interface() != 0 && kdp_get_interface() == ifp->if_private)
+		 || (kdp_get_interface() == 0 && ifp->if_unit == 0))
 		kdp_set_ip_and_mac_addresses(&(IA_SIN(ifa)->sin_addr), &(IFP2AC(ifp)->ac_enaddr));
 
 	    break;

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -151,11 +148,16 @@ SYSCTL_INT(_net_inet_ip, IPCTL_KEEPFAITH, keepfaith, CTLFLAG_RW,
 	&ip_keepfaith,	0,
 	"Enable packet capture for FAITH IPv4->IPv6 translater daemon");
 
-static int	ip_nfragpackets = 0;
-static int	ip_maxfragpackets;	/* initialized in ip_init() */
+static int	nipq = 0;	/* total # of reass queues */
+static int	maxnipq = 0;
 SYSCTL_INT(_net_inet_ip, OID_AUTO, maxfragpackets, CTLFLAG_RW,
-	&ip_maxfragpackets, 0,
+	&maxnipq, 0,
 	"Maximum number of IPv4 fragment reassembly queue entries");
+
+static int    maxfragsperpacket;
+SYSCTL_INT(_net_inet_ip, OID_AUTO, maxfragsperpacket, CTLFLAG_RW,
+	&maxfragsperpacket, 0,
+	"Maximum number of IPv4 fragments allowed per packet");
 
 /*
  * XXX - Setting ip_checkinterface mostly implements the receive side of
@@ -201,8 +203,6 @@ SYSCTL_STRUCT(_net_inet_ip, IPCTL_STATS, stats, CTLFLAG_RD,
 	(((((x) & 0xF) | ((((x) >> 8) & 0xF) << 4)) ^ (y)) & IPREASS_HMASK)
 
 static struct ipq ipq[IPREASS_NHASH];
-static int    nipq = 0;         /* total # of reass queues */
-static int    maxnipq;
 const  int    ipintrq_present = 1;
 
 #if IPCTL_DEFMTU
@@ -317,8 +317,8 @@ ip_init()
 		for (i = 0; i < IPREASS_NHASH; i++)
 		    ipq[i].next = ipq[i].prev = &ipq[i];
 
-		maxnipq = nmbclusters / 4;
-		ip_maxfragpackets = nmbclusters / 4;
+	maxnipq = nmbclusters / 32;
+	maxfragsperpacket = 16;
 
 #if RANDOM_IP_ID
 		ip_id = time_second & 0xffff;
@@ -435,9 +435,7 @@ ip_input(struct mbuf *m)
 	if ((ntohl(ip->ip_dst.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET ||
 	    (ntohl(ip->ip_src.s_addr) >> IN_CLASSA_NSHIFT) == IN_LOOPBACKNET) {
 		if ((m->m_pkthdr.rcvif->if_flags & IFF_LOOPBACK) == 0) {
-#ifndef __APPLE__
 			ipstat.ips_badaddr++;
-#endif
 			goto bad;
 		}
 	}
@@ -453,7 +451,8 @@ ip_input(struct mbuf *m)
 				goto bad;
 		}
 	}
-	if ((m->m_pkthdr.rcvif->if_hwassist == 0) || (apple_hwcksum_rx == 0) ||
+	if ((IF_HWASSIST_CSUM_FLAGS(m->m_pkthdr.rcvif->if_hwassist) == 0) 
+	    || (apple_hwcksum_rx == 0) ||
 	   ((m->m_pkthdr.csum_flags & CSUM_TCP_SUM16) && ip->ip_p != IPPROTO_TCP))
 		m->m_pkthdr.csum_flags = 0; /* invalidate HW generated checksum flags */
 
@@ -774,21 +773,13 @@ ours:
 	 */
 	if (ip->ip_off & (IP_MF | IP_OFFMASK | IP_RF)) {
 
-#if 0	/*
-	 * Reassembly should be able to treat a mbuf cluster, for later
-	 * operation of contiguous protocol headers on the cluster. (KAME)
-	 */
-		if (m->m_flags & M_EXT) {		/* XXX */
-			if ((m = m_pullup(m, hlen)) == 0) {
-				ipstat.ips_toosmall++;
-#if IPFIREWALL_FORWARD
-				ip_fw_fwd_addr = NULL;
-#endif
-				return;
+		/* If maxnipq is 0, never accept fragments. */
+		if (maxnipq == 0) {
+                	ipstat.ips_fragments++;
+			ipstat.ips_fragdropped++;
+			goto bad;
 			}
-			ip = mtod(m, struct ip *);
-		}
-#endif
+
 		sum = IPREASS_HASH(ip->ip_src.s_addr, ip->ip_id);
 		/*
 		 * Look for queue of fragments
@@ -803,8 +794,12 @@ ours:
 
 		fp = 0;
 
-		/* check if there's a place for the new queue */
-		if (nipq > maxnipq) {
+		/*
+		 * Enforce upper bound on number of fragmented packets
+		 * for which we attempt reassembly;
+		 * If maxnipq is -1, accept all fragments without limitation.
+		 */
+		if ((nipq > maxnipq) && (maxnipq > 0)) {
 		    /*
 		     * drop something from the tail of the current queue
 		     * before proceeding further
@@ -812,22 +807,24 @@ ours:
 		    if (ipq[sum].prev == &ipq[sum]) {   /* gak */
 			for (i = 0; i < IPREASS_NHASH; i++) {
 			    if (ipq[i].prev != &ipq[i]) {
+					ipstat.ips_fragtimeout +=
+						ipq[i].prev->ipq_nfrags;
 				ip_freef(ipq[i].prev);
 				break;
 			    }
 			}
-		    } else
+		    } else {
+				ipstat.ips_fragtimeout += ipq[sum].prev->ipq_nfrags;
 			ip_freef(ipq[sum].prev);
+		}
 		}
 found:
 		/*
 		 * Adjust ip_len to not reflect header,
-		 * set ip_mff if more fragments are expected,
 		 * convert offset of this to bytes.
 		 */
 		ip->ip_len -= hlen;
-		mff = (ip->ip_off & IP_MF) != 0;
-		if (mff) {
+		if (ip->ip_off & IP_MF) {
 		        /*
 		         * Make sure that fragments have a data length
 			 * that's a non-zero multiple of 8 bytes.
@@ -837,18 +834,15 @@ found:
 				goto bad;
 			}
 			m->m_flags |= M_FRAG;
-		} else {
-			/* Clear the flag in case packet comes from loopback */
+		} else
 			m->m_flags &= ~M_FRAG;
-		}
 		ip->ip_off <<= 3;
 
 		/*
-		 * If datagram marked as having more fragments
-		 * or if this is not the first fragment,
-		 * attempt reassembly; if it succeeds, proceed.
+		 * Attempt reassembly; if it succeeds, proceed.
+		 * ip_reass() will return a different mbuf, and update
+		 * the divert info in divert_info and args.divert_rule.
 		 */
-		if (mff || ip->ip_off) {
 			ipstat.ips_fragments++;
 			m->m_pkthdr.header = ip;
 #if IPDIVERT
@@ -881,9 +875,6 @@ found:
 			}
 #endif
 		} else
-			if (fp)
-				ip_freef(fp);
-	} else
 		ip->ip_len -= hlen;
 
 #if IPDIVERT
@@ -1025,20 +1016,12 @@ ip_reass(m, fp, where)
 	 * If first fragment to arrive, create a reassembly queue.
 	 */
 	if (fp == 0) {
-		/*
-		 * Enforce upper bound on number of fragmented packets
-		 * for which we attempt reassembly;
-		 * If maxfrag is 0, never accept fragments.
-		 * If maxfrag is -1, accept all fragments without limitation.
-		 */
-		if ((ip_maxfragpackets >= 0) && (ip_nfragpackets >= ip_maxfragpackets))
-			goto dropfrag;
-		ip_nfragpackets++;
 		if ((t = m_get(M_DONTWAIT, MT_FTABLE)) == NULL)
 			goto dropfrag;
 		fp = mtod(t, struct ipq *);
 		insque((void*)fp, (void*)where);
 		nipq++;
+		fp->ipq_nfrags = 1;
 		fp->ipq_ttl = IPFRAGTTL;
 		fp->ipq_p = ip->ip_p;
 		fp->ipq_id = ip->ip_id;
@@ -1055,6 +1038,8 @@ ip_reass(m, fp, where)
 		fp->ipq_div_cookie = 0;
 #endif
 		goto inserted;
+	} else {
+		fp->ipq_nfrags++;
 	}
 
 #define GETIP(m)	((struct ip*)((m)->m_pkthdr.header))
@@ -1109,6 +1094,8 @@ ip_reass(m, fp, where)
 		}
 		nq = q->m_nextpkt;
 		m->m_nextpkt = nq;
+		ipstat.ips_fragdropped++;
+		fp->ipq_nfrags--;
 		m_freem(q);
 	}
 
@@ -1117,30 +1104,49 @@ inserted:
 #if IPDIVERT
 	/*
 	 * Transfer firewall instructions to the fragment structure.
-	 * Any fragment diverting causes the whole packet to divert.
+	 * Only trust info in the fragment at offset 0.
 	 */
+	if (ip->ip_off == 0) {
 #ifdef IPDIVERT_44
 	fp->ipq_div_info = *divinfo;
 #else
 	fp->ipq_divert = *divinfo;
 #endif
 	fp->ipq_div_cookie = *divcookie;
+	}
 	*divinfo = 0;
 	*divcookie = 0;
 #endif
 
 	/*
-	 * Check for complete reassembly.
+	 * Check for complete reassembly and perform frag per packet
+	 * limiting.
+	 *
+	 * Frag limiting is performed here so that the nth frag has
+	 * a chance to complete the packet before we drop the packet.
+	 * As a result, n+1 frags are actually allowed per packet, but
+	 * only n will ever be stored. (n = maxfragsperpacket.)
+	 *
 	 */
 	next = 0;
 	for (p = NULL, q = fp->ipq_frags; q; p = q, q = q->m_nextpkt) {
-		if (GETIP(q)->ip_off != next)
+		if (GETIP(q)->ip_off != next) {
+			if (fp->ipq_nfrags > maxfragsperpacket) {
+				ipstat.ips_fragdropped += fp->ipq_nfrags;
+				ip_freef(fp);
+			}
 			return (0);
+		}
 		next += GETIP(q)->ip_len;
 	}
 	/* Make sure the last packet didn't have the IP_MF flag */
-	if (p->m_flags & M_FRAG)
+	if (p->m_flags & M_FRAG) {
+		if (fp->ipq_nfrags > maxfragsperpacket) {
+			ipstat.ips_fragdropped += fp->ipq_nfrags;
+			ip_freef(fp);
+		}
 		return (0);
+	}
 
 	/*
 	 * Reassembly is complete.  Make sure the packet is a sane size.
@@ -1149,6 +1155,7 @@ inserted:
 	ip = GETIP(q);
 	if (next + (IP_VHL_HL(ip->ip_vhl) << 2) > IP_MAXPACKET) {
 		ipstat.ips_toolong++;
+		ipstat.ips_fragdropped += fp->ipq_nfrags;
 		ip_freef(fp);
 		return (0);
 	}
@@ -1165,12 +1172,8 @@ inserted:
 	for (q = nq; q != NULL; q = nq) {
 		nq = q->m_nextpkt;
 		q->m_nextpkt = NULL;
-		if (q->m_pkthdr.csum_flags & CSUM_TCP_SUM16) 
-	    		m->m_pkthdr.csum_flags = 0;
-		else {
 			m->m_pkthdr.csum_flags &= q->m_pkthdr.csum_flags;
 			m->m_pkthdr.csum_data += q->m_pkthdr.csum_data;
-		}
 		m_cat(m, q);
 	}
 
@@ -1198,7 +1201,6 @@ inserted:
 	remque((void*)fp);
 	nipq--;
 	(void) m_free(dtom(fp));
-	ip_nfragpackets--;
 	m->m_len += (IP_VHL_HL(ip->ip_vhl) << 2);
 	m->m_data -= (IP_VHL_HL(ip->ip_vhl) << 2);
 	/* some debugging cruft by sklower, below, will go away soon */
@@ -1216,6 +1218,8 @@ dropfrag:
 	*divcookie = 0;
 #endif
 	ipstat.ips_fragdropped++;
+	if (fp != 0)
+		fp->ipq_nfrags--;
 	m_freem(m);
 	return (0);
 
@@ -1239,7 +1243,6 @@ ip_freef(fp)
 	}
 	remque((void*)fp);
 	(void) m_free(dtom(fp));
-	ip_nfragpackets--;
 	nipq--;
 }
 
@@ -1263,7 +1266,7 @@ ip_slowtimo()
 			--fp->ipq_ttl;
 			fp = fp->next;
 			if (fp->prev->ipq_ttl == 0) {
-				ipstat.ips_fragtimeout++;
+				ipstat.ips_fragtimeout += fp->prev->ipq_nfrags;
 				ip_freef(fp->prev);
 			}
 		}
@@ -1273,11 +1276,12 @@ ip_slowtimo()
 	 * (due to the limit being lowered), drain off
 	 * enough to get down to the new limit.
 	 */
+	if (maxnipq >= 0 && nipq > maxnipq) {
 	for (i = 0; i < IPREASS_NHASH; i++) {
-		if (ip_maxfragpackets >= 0) {
-			while ((ip_nfragpackets > ip_maxfragpackets) &&
+			while (nipq > maxnipq &&
 				(ipq[i].next != &ipq[i])) {
-				ipstat.ips_fragdropped++;
+				ipstat.ips_fragdropped +=
+				    ipq[i].next->ipq_nfrags;
 				ip_freef(ipq[i].next);
 			}
 		}
@@ -1296,7 +1300,7 @@ ip_drain()
 
 	for (i = 0; i < IPREASS_NHASH; i++) {
 		while (ipq[i].next != &ipq[i]) {
-			ipstat.ips_fragdropped++;
+			ipstat.ips_fragdropped += ipq[i].next->ipq_nfrags;
 			ip_freef(ipq[i].next);
 		}
 	}
