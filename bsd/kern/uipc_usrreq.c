@@ -88,7 +88,11 @@
 struct	zone *unp_zone;
 static	unp_gen_t unp_gencnt;
 static	u_int unp_count;
-static	lck_mtx_t 		*unp_mutex;
+
+static	lck_attr_t 		*unp_mtx_attr;
+static	lck_grp_t 		*unp_mtx_grp;
+static	lck_grp_attr_t 		*unp_mtx_grp_attr;
+static	lck_rw_t 		*unp_list_mtx;
 
 extern lck_mtx_t * uipc_lock;
 static	struct unp_head unp_shead, unp_dhead;
@@ -303,8 +307,13 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		goto release;
 	}
 
-	if (control && (error = unp_internalize(control, p)))
-		goto release;
+	if (control) {
+		socket_unlock(so, 0); /* release global lock to avoid deadlock (4436174) */ 
+		error = unp_internalize(control, p);
+		socket_lock(so, 0);
+		if (error)
+			goto release;
+	}
 
 	switch (so->so_type) {
 	case SOCK_DGRAM: 
@@ -559,7 +568,7 @@ unp_attach(struct socket *so)
 	if (unp == NULL)
 		return (ENOBUFS);
 	bzero(unp, sizeof *unp);
-	lck_mtx_lock(unp_mutex);
+	lck_rw_lock_exclusive(unp_list_mtx);
 	LIST_INIT(&unp->unp_refs);
 	unp->unp_socket = so;
 	unp->unp_gencnt = ++unp_gencnt;
@@ -567,16 +576,17 @@ unp_attach(struct socket *so)
 	LIST_INSERT_HEAD(so->so_type == SOCK_DGRAM ? &unp_dhead
 			 : &unp_shead, unp, unp_link);
 	so->so_pcb = (caddr_t)unp;
-	lck_mtx_unlock(unp_mutex);
+	lck_rw_done(unp_list_mtx);
 	return (0);
 }
 
 static void
 unp_detach(struct unpcb *unp)
 {
-	lck_mtx_assert(unp_mutex, LCK_MTX_ASSERT_OWNED);
+	lck_rw_lock_exclusive(unp_list_mtx);
 	LIST_REMOVE(unp, unp_link);
 	unp->unp_gencnt = ++unp_gencnt;
+	lck_rw_done(unp_list_mtx);
 	--unp_count;
 	if (unp->unp_vnode) {
 		struct vnode *tvp = unp->unp_vnode;
@@ -698,6 +708,7 @@ unp_connect(
 
 	context.vc_proc = p;
 	context.vc_ucred = p->p_ucred;	/* XXX kauth_cred_get() ??? proxy */
+	so2 = so3 = NULL;
 
 	len = nam->sa_len - offsetof(struct sockaddr_un, sun_path);
 	if (len <= 0)
@@ -721,7 +732,7 @@ unp_connect(
 	if (error)
 		goto bad;
 	so2 = vp->v_socket;
-	if (so2 == 0) {
+	if (so2 == 0 || so2->so_pcb == NULL ) {
 		error = ECONNREFUSED;
 		goto bad;
 	}
@@ -786,8 +797,10 @@ unp_connect(
 	}
 	error = unp_connect2(so, so2);
 bad:
-	if (so2 != NULL)
-		so2->so_usecount--; /* release count on socket */
+	 
+	if (so2 != NULL) 
+			so2->so_usecount--;	/* release count on socket */
+	
 	vnode_put(vp);
 	return (error);
 }
@@ -843,12 +856,13 @@ unp_disconnect(struct unpcb *unp)
 
 	if (unp2 == 0)
 		return;
-	lck_mtx_assert(unp_mutex, LCK_MTX_ASSERT_OWNED);
 	unp->unp_conn = 0;
 	switch (unp->unp_socket->so_type) {
 
 	case SOCK_DGRAM:
+		lck_rw_lock_exclusive(unp_list_mtx);
 		LIST_REMOVE(unp, unp_reflink);
+		lck_rw_done(unp_list_mtx);
 		unp->unp_socket->so_state &= ~SS_ISCONNECTED;
 		break;
 
@@ -878,7 +892,7 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	struct xunpgen xug;
 	struct unp_head *head;
 
-	lck_mtx_lock(unp_mutex);
+	lck_rw_lock_shared(unp_list_mtx);
 	head = ((intptr_t)arg1 == SOCK_DGRAM ? &unp_dhead : &unp_shead);
 
 	/*
@@ -889,12 +903,12 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		n = unp_count;
 		req->oldidx = 2 * (sizeof xug)
 			+ (n + n/8) * sizeof(struct xunpcb);
-		lck_mtx_unlock(unp_mutex);
+		lck_rw_done(unp_list_mtx);
 		return 0;
 	}
 
 	if (req->newptr != USER_ADDR_NULL) {
-		lck_mtx_unlock(unp_mutex);
+		lck_rw_done(unp_list_mtx);
 		return EPERM;
 	}
 
@@ -904,13 +918,14 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	gencnt = unp_gencnt;
 	n = unp_count;
 
+	bzero(&xug, sizeof(xug));
 	xug.xug_len = sizeof xug;
 	xug.xug_count = n;
 	xug.xug_gen = gencnt;
 	xug.xug_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xug, sizeof xug);
 	if (error) {
-		lck_mtx_unlock(unp_mutex);
+		lck_rw_done(unp_list_mtx);
 		return error;
 	}
 
@@ -918,13 +933,13 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 	 * We are done if there is no pcb
 	 */
 	if (n == 0)  {
-	    lck_mtx_unlock(unp_mutex);
+	    lck_rw_done(unp_list_mtx);
 	    return 0;
 	}
 
 	MALLOC(unp_list, struct unpcb **, n * sizeof *unp_list, M_TEMP, M_WAITOK);
 	if (unp_list == 0) {
-		lck_mtx_unlock(unp_mutex);
+		lck_rw_done(unp_list_mtx);
 		return ENOMEM;
 	}
 	
@@ -940,6 +955,8 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		unp = unp_list[i];
 		if (unp->unp_gencnt <= gencnt) {
 			struct xunpcb xu;
+
+			bzero(&xu, sizeof(xu));
 			xu.xu_len = sizeof xu;
 			xu.xu_unpp = (struct  unpcb_compat *)unp;
 			/*
@@ -966,13 +983,15 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		 * while we were processing this request, and it
 		 * might be necessary to retry.
 		 */
+		bzero(&xug, sizeof(xug));
+		xug.xug_len = sizeof xug;
 		xug.xug_gen = unp_gencnt;
 		xug.xug_sogen = so_gencnt;
 		xug.xug_count = unp_count;
 		error = SYSCTL_OUT(req, &xug, sizeof xug);
 	}
 	FREE(unp_list, M_TEMP);
-	lck_mtx_unlock(unp_mutex);
+	lck_rw_done(unp_list_mtx);
 	return error;
 }
 
@@ -1075,7 +1094,18 @@ unp_init(void)
 	LIST_INIT(&unp_dhead);
 	LIST_INIT(&unp_shead);
 	
-	unp_mutex = localdomain.dom_mtx;
+	/*
+	 * allocate lock group attribute and group for udp pcb mutexes
+	 */
+	unp_mtx_grp_attr = lck_grp_attr_alloc_init();
+
+	unp_mtx_grp = lck_grp_alloc_init("unp_list", unp_mtx_grp_attr);
+		
+	unp_mtx_attr = lck_attr_alloc_init();
+
+	if ((unp_list_mtx = lck_rw_alloc_init(unp_mtx_grp, unp_mtx_attr)) == NULL)
+		return;	/* pretty much dead if this fails... */
+
 }
 
 #ifndef MIN

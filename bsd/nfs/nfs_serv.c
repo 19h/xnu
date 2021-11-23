@@ -147,7 +147,7 @@ nfsrv3_access(nfsd, slp, procp, mrq)
 	mbuf_t mrep = nfsd->nd_mrep, md = nfsd->nd_md;
 	mbuf_t nam = nfsd->nd_nam;
 	caddr_t dpos = nfsd->nd_dpos;
-	vnode_t vp, dvp;
+	vnode_t vp;
 	struct nfs_filehandle nfh;
 	u_long *tl;
 	long t1;
@@ -213,10 +213,7 @@ nfsrv3_access(nfsd, slp, procp, mrq)
 			    KAUTH_VNODE_DELETE_CHILD;
 		} else {
 			testaction =
-			    KAUTH_VNODE_WRITE_DATA |
-			    KAUTH_VNODE_WRITE_ATTRIBUTES |
-			    KAUTH_VNODE_WRITE_EXTATTRIBUTES |
-			    KAUTH_VNODE_WRITE_SECURITY;
+                           KAUTH_VNODE_WRITE_DATA;
 		}
 		if (nfsrv_authorize(vp, NULL, testaction, &context, nxo, 0))
 			nfsmode &= ~NFSV3ACCESS_MODIFY;
@@ -234,18 +231,17 @@ nfsrv3_access(nfsd, slp, procp, mrq)
 		if (nfsrv_authorize(vp, NULL, testaction, &context, nxo, 0))
 			nfsmode &= ~NFSV3ACCESS_EXTEND;
 	}
-	dvp = NULLVP;
+
 	/*
-	 * For hard links, this answer may be wrong if the vnode
+	 * Note concerning NFSV3ACCESS_DELETE:
+	 * For hard links, the answer may be wrong if the vnode
 	 * has multiple parents with different permissions.
+	 * Also, some clients (e.g. MacOSX 10.3) may incorrectly
+	 * interpret the missing/cleared DELETE bit.
+	 * So we'll just leave the DELETE bit alone.  At worst,
+	 * we're telling the client it might be able to do
+	 * something it really can't.
 	 */
-	if ((nfsmode & NFSV3ACCESS_DELETE) &&
-	    (((dvp = vnode_getparent(vp)) == NULL) ||
-	     nfsrv_authorize(vp, dvp, KAUTH_VNODE_DELETE, &context, nxo, 0))) {
-		nfsmode &= ~NFSV3ACCESS_DELETE;
-	}
-	if (dvp != NULLVP)
-	        vnode_put(dvp);
 
 	if ((nfsmode & NFSV3ACCESS_EXECUTE) &&
 	    (vnode_isdir(vp) ||
@@ -781,7 +777,7 @@ nfsrv_read(nfsd, slp, procp, mrq)
 	int i;
 	caddr_t bpos;
 	int error = 0, count, len, left, siz, tlen, getret;
-	int v3 = (nfsd->nd_flag & ND_NFSV3), reqlen;
+	int v3 = (nfsd->nd_flag & ND_NFSV3), reqlen, maxlen;
 	char *cp2;
 	mbuf_t mb, mb2, mreq;
 	mbuf_t m2;
@@ -804,7 +800,12 @@ nfsrv_read(nfsd, slp, procp, mrq)
 		nfsm_dissect(tl, u_long *, NFSX_UNSIGNED);
 		off = (off_t)fxdr_unsigned(u_long, *tl);
 	}
-	nfsm_srvstrsiz(reqlen, NFS_SRVMAXDATA(nfsd));
+	nfsm_dissect(tl, u_long *, NFSX_UNSIGNED);
+	reqlen = fxdr_unsigned(u_long, *tl);
+	maxlen = NFS_SRVMAXDATA(nfsd);
+	if (reqlen > maxlen)
+		reqlen = maxlen;
+
 	if ((error = nfsrv_fhtovp(&nfh, nam, TRUE, &vp, &nx, &nxo))) {
 		nfsm_reply(2 * NFSX_UNSIGNED);
 		nfsm_srvpostop_attr(1, NULL);
@@ -1164,11 +1165,7 @@ nfsrv_write(nfsd, slp, procp, mrq)
 			*tl++ = txdr_unsigned(stable);
 		else
 			*tl++ = txdr_unsigned(NFSV3WRITE_FILESYNC);
-		/*
-		 * Actually, there is no need to txdr these fields,
-		 * but it may make the values more human readable,
-		 * for debugging purposes.
-		 */
+		/* write verifier */
 		*tl++ = txdr_unsigned(boottime_sec());
 		*tl = txdr_unsigned(0);
 	} else {
@@ -1468,11 +1465,7 @@ loop1:
 			    nfsm_build(tl, u_long *, 4 * NFSX_UNSIGNED);
 			    *tl++ = txdr_unsigned(nfsd->nd_len);
 			    *tl++ = txdr_unsigned(swp->nd_stable);
-			    /*
-			     * Actually, there is no need to txdr these fields,
-			     * but it may make the values more human readable,
-			     * for debugging purposes.
-			     */
+			    /* write verifier */
 			    *tl++ = txdr_unsigned(boottime_sec());
 			    *tl = txdr_unsigned(0);
 			} else {
@@ -1852,6 +1845,7 @@ nfsrv_create(nfsd, slp, procp, mrq)
 			if (!error) {
 			        if (nd.ni_cnd.cn_flags & ISSYMLINK)
 				        error = EINVAL;
+				vp = nd.ni_vp;
 			}
 			if (error)
 				nfsm_reply(0);
@@ -2996,6 +2990,8 @@ nfsrv_symlink(nfsd, slp, procp, mrq)
 			VATTR_SET(vap, va_gid, kauth_cred_getgid(nfsd->nd_cr));
 	}
 	VATTR_SET(vap, va_type, VLNK);
+	VATTR_CLEAR_ACTIVE(vap, va_data_size);
+	VATTR_CLEAR_ACTIVE(vap, va_access_time);
 
 	/* authorize before creating */
 	error = nfsrv_authorize(dvp, NULL, KAUTH_VNODE_ADD_FILE, &context, nxo, 0);
@@ -3485,6 +3481,8 @@ nfsrv_readdir(nfsd, slp, procp, mrq)
 	}
 	context.vc_proc = procp;
 	context.vc_ucred = nfsd->nd_cr;
+	if (!v3 || (nxo->nxo_flags & NX_32BITCLIENTS))
+		vnopflag |= VNODE_READDIR_SEEKOFF32;
 	if (v3) {
 		nfsm_srv_vattr_init(&at, v3);
 		error = getret = vnode_getattr(vp, &at, &context);
@@ -3654,6 +3652,8 @@ again:
 			/* Finish off the record with the cookie */
 			nfsm_clget;
 			if (v3) {
+				if (vnopflag & VNODE_READDIR_SEEKOFF32)
+					dp->d_seekoff &= 0x00000000ffffffffULL;
 				txdr_hyper(&dp->d_seekoff, &tquad);
 				*tl = tquad.nfsuquad[0];
 				bp += NFSX_UNSIGNED;
@@ -3719,6 +3719,7 @@ nfsrv_readdirplus(nfsd, slp, procp, mrq)
 	vnode_t vp, nvp;
 	struct flrep fl;
 	struct nfs_filehandle dnfh, *nfhp = (struct nfs_filehandle *)&fl.fl_fhsize;
+	u_long fhsize;
 	struct nfs_export *nx;
 	struct nfs_export_options *nxo;
 	uio_t auio;
@@ -3761,6 +3762,8 @@ nfsrv_readdirplus(nfsd, slp, procp, mrq)
 	}
 	context.vc_proc = procp;
 	context.vc_ucred = nfsd->nd_cr;
+	if (nxo->nxo_flags & NX_32BITCLIENTS)
+		vnopflag |= VNODE_READDIR_SEEKOFF32;
 	nfsm_srv_vattr_init(&at, 1);
 	error = getret = vnode_getattr(vp, &at, &context);
 	if (!error && toff && verf && verf != at.va_filerev)
@@ -3928,9 +3931,12 @@ again:
 			 */
 			fp = (struct nfs_fattr *)&fl.fl_fattr;
 			nfsm_srvfillattr(vap, fp);
-			fl.fl_fhsize = txdr_unsigned(nfhp->nfh_len);
+			fhsize = nfhp->nfh_len;
+			fl.fl_fhsize = txdr_unsigned(fhsize);
 			fl.fl_fhok = nfs_true;
 			fl.fl_postopok = nfs_true;
+			if (vnopflag & VNODE_READDIR_SEEKOFF32)
+				dp->d_seekoff &= 0x00000000ffffffffULL;
 			txdr_hyper(&dp->d_seekoff, &fl.fl_off);
 
 			nfsm_clget;
@@ -3971,7 +3977,7 @@ again:
 			/*
 			 * Now copy the flrep structure out.
 			 */
-			xfer = sizeof(struct flrep) - sizeof(fl.fl_nfh) + fl.fl_fhsize;
+			xfer = sizeof(struct flrep) - sizeof(fl.fl_nfh) + fhsize;
 			cp = (caddr_t)&fl;
 			while (xfer > 0) {
 				nfsm_clget;

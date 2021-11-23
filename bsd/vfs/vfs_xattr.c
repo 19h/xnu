@@ -37,7 +37,7 @@
 
 #include <sys/xattr.h>
 
-#include <architecture/byte_order.h>
+#include <libkern/OSByteOrder.h>
 #include <vm/vm_kern.h>
 
 /*
@@ -473,9 +473,9 @@ typedef struct attr_info {
 	((u_int8_t *)ATTR_NEXT(ae) <= ((ai).rawdata + (ai).rawsize))
 
 
-#define SWAP16(x)  NXSwapBigShortToHost((x))
-#define SWAP32(x)  NXSwapBigIntToHost((x))
-#define SWAP64(x)  NXSwapBigLongLongToHost((x))
+#define SWAP16(x)  OSSwapBigToHostInt16((x))
+#define SWAP32(x)  OSSwapBigToHostInt32((x))
+#define SWAP64(x)  OSSwapBigToHostInt64((x))
 
 
 static u_int32_t emptyfinfo[8] = {0};
@@ -1331,8 +1331,9 @@ lookup:
 
 	if (fileflags & O_CREAT) {
 		nd.ni_cnd.cn_nameiop = CREATE;
-		nd.ni_cnd.cn_flags |= LOCKPARENT;
-
+		if (dvp != vp) {
+			nd.ni_cnd.cn_flags |= LOCKPARENT;
+		}
 		if ( (error = namei(&nd))) {
 		        nd.ni_dvp = NULLVP;
 			error = ENOATTR;
@@ -1378,8 +1379,9 @@ lookup:
 			        xvp = nd.ni_vp;
 		}
 		nameidone(&nd);
-		vnode_put(dvp);  /* drop iocount from LOCKPARENT request above */
-		
+		if (dvp != vp) {
+			vnode_put(dvp);  /* drop iocount from LOCKPARENT request above */
+		}
 		if (error)
 		        goto out;
 	} else {
@@ -1780,11 +1782,13 @@ write_xattrinfo(attr_info_t *ainfop)
 	uio_addiov(auio, (uintptr_t)ainfop->filehdr, ainfop->iosize);
 
 	swap_adhdr(ainfop->filehdr);
+	if (ainfop->attrhdr != NULL)
 	swap_attrhdr(ainfop->attrhdr);
 
 	error = VNOP_WRITE(ainfop->filevp, auio, 0, ainfop->context);
 
 	swap_adhdr(ainfop->filehdr);
+	if (ainfop->attrhdr != NULL)
 	swap_attrhdr(ainfop->attrhdr);
 	return (error);
 }

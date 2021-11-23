@@ -348,13 +348,10 @@ ip_init()
 		ipf_init();
 
 		ip_mutex_grp_attr  = lck_grp_attr_alloc_init();
-		lck_grp_attr_setdefault(ip_mutex_grp_attr);
 
 		ip_mutex_grp = lck_grp_alloc_init("ip", ip_mutex_grp_attr);
 
 		ip_mutex_attr = lck_attr_alloc_init();
-
-		lck_attr_setdefault(ip_mutex_attr);
 
 		if ((ip_mutex = lck_mtx_alloc_init(ip_mutex_grp, ip_mutex_attr)) == NULL) {
 			printf("ip_init: can't alloc ip_mutex\n");
@@ -685,8 +682,10 @@ iphack:
 	if (fr_checkp) {
 		struct	mbuf	*m1 = m;
 
-		if (fr_checkp(ip, hlen, m->m_pkthdr.rcvif, 0, &m1) || !m1)
+		if (fr_checkp(ip, hlen, m->m_pkthdr.rcvif, 0, &m1) || !m1) {
+			lck_mtx_unlock(ip_mutex);
 			return;
+		}
 		ip = mtod(m = m1, struct ip *);
 	}
 	if (fw_enable && IPFW_LOADED) {
@@ -700,22 +699,24 @@ iphack:
 #endif	/* IPFIREWALL_FORWARD */
 
 		args.m = m;
+		lck_mtx_unlock(ip_mutex);
+
 		i = ip_fw_chk_ptr(&args);
 		m = args.m;
 
 		if ( (i & IP_FW_PORT_DENY_FLAG) || m == NULL) { /* drop */
 			if (m)
-              m_freem(m);
-			lck_mtx_unlock(ip_mutex);
+				m_freem(m);
 			return;
 		}
 		ip = mtod(m, struct ip *); /* just in case m changed */
-		if (i == 0 && args.next_hop == NULL)	/* common case */
+		if (i == 0 && args.next_hop == NULL) {	/* common case */
+			lck_mtx_lock(ip_mutex);
 			goto pass;
+		}
 #if DUMMYNET
                 if (DUMMYNET_LOADED && (i & IP_FW_PORT_DYNT_FLAG) != 0) {
 			/* Send packet to the appropriate pipe */
-			lck_mtx_unlock(ip_mutex);
 			ip_dn_io_ptr(m, i&0xffff, DN_TO_IP_IN, &args);
 			return;
 		}
@@ -723,19 +724,21 @@ iphack:
 #if IPDIVERT
 		if (i != 0 && (i & IP_FW_PORT_DYNT_FLAG) == 0) {
 			/* Divert or tee packet */
+			lck_mtx_lock(ip_mutex);
 			div_info = i;
 			goto ours;
 		}
 #endif
 #if IPFIREWALL_FORWARD
-		if (i == 0 && args.next_hop != NULL)
+		if (i == 0 && args.next_hop != NULL) {
+			lck_mtx_lock(ip_mutex);
 			goto pass;
+		}
 #endif
 		/*
 		 * if we get here, the packet must be dropped
 		 */
 		m_freem(m);
-		lck_mtx_unlock(ip_mutex);
 		return;
 	}
 pass:
@@ -1678,7 +1681,7 @@ nosourcerouting:
 			 * locate outgoing interface; if we're the destination,
 			 * use the incoming interface (should be same).
 			 */
-			if ((ia = (INA)ifa_ifwithaddr((SA)&ipaddr)) != 0) {
+			if ((ia = (INA)ifa_ifwithaddr((SA)&ipaddr)) == 0) {
 				if ((ia = ip_rtaddr(ipaddr.sin_addr, ipforward_rt)) == 0) {
 					type = ICMP_UNREACH;
 					code = ICMP_UNREACH_HOST;
@@ -2271,8 +2274,12 @@ ip_savecontrol(
 		ifnet_head_lock_shared();
 		if (((ifp = m->m_pkthdr.rcvif)) 
 		&& ( ifp->if_index && (ifp->if_index <= if_index))) {
-			sdp = (struct sockaddr_dl *)(ifnet_addrs
-					[ifp->if_index - 1]->ifa_addr);
+			struct ifaddr *ifa = ifnet_addrs[ifp->if_index - 1];
+			
+			if (!ifa || !ifa->ifa_addr)
+				goto makedummy;
+			
+			sdp = (struct sockaddr_dl *)ifa->ifa_addr;
 			/*
 			 * Change our mind and don't try copy.
 			 */

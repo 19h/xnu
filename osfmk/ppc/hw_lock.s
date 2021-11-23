@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -32,6 +32,7 @@
 #define	WAIT_FLAG		0x02
 #define	WANT_UPGRADE	0x04
 #define	WANT_EXCL		0x08
+#define	PRIV_EXCL		0x8000
 
 #define TH_FN_OWNED		0x01
 
@@ -1080,7 +1081,7 @@ mlckslow1:
 			bl		lockDisa						; Go get a lock on the mutex's interlock lock
 			mr.		r4,r3							; Did we get it?
 			lwz		r3,FM_ARG0(r1)					; Restore the lock address
-			bne+	mlGotInt						; We got it just fine...
+			bne++	mlGotInt						; We got it just fine...
 			mr		r4,r11							; Saved lock addr
 			lis		r3,hi16(mutex_failed1)			; Get the failed mutex message
 			ori		r3,r3,lo16(mutex_failed1)		; Get the failed mutex message
@@ -1297,9 +1298,9 @@ L_mutex_try_slow:
 			bne-	mtFail							; Someone's got it already...
 
 			bl		lockDisa						; Go get a lock on the mutex's interlock lock
-			mr.		r4,r3							; Did we get it? */
+			mr.		r4,r3							; Did we get it?
 			lwz		r3,FM_ARG0(r1)					; Restore the lock address
-			bne+	mtGotInt						; We got it just fine...
+			bne++	mtGotInt						; We got it just fine...
 			mr		r4,r11							; Saved lock addr
 			lis		r3,hi16(mutex_failed2)			; Get the failed mutex message
 			ori		r3,r3,lo16(mutex_failed2)		; Get the failed mutex message
@@ -1490,7 +1491,7 @@ L_mutex_unlock_slow:
 			bl		lockDisa						; Go get a lock on the mutex's interlock lock
 			mr.		r4,r3							; Did we get it?
 			lwz		r3,FM_ARG0(r1)					; Restore the lock address
-			bne+	muGotInt						; We got it just fine...
+			bne++	muGotInt						; We got it just fine...
 			mr		r4,r11							; Saved lock addr
 			lis		r3,hi16(mutex_failed3)			; Get the failed mutex message
 			ori		r3,r3,lo16(mutex_failed3)		; Get the failed mutex message
@@ -2004,8 +2005,10 @@ LEXT(lck_rw_lock_exclusive)
 			.globl	EXT(lock_write)
 LEXT(lock_write)
 #endif
+			lis		r7,0xFFFF
+			ori		r7,r7,(WANT_EXCL|WANT_UPGRADE|ILK_LOCKED)
 rwleloop:	lwarx	r5,RW_DATA,r3					; Grab the lock value
-			rlwinm.	r7,r5,30,1,31					; Can we have it?
+			and.	r8,r5,r7						; Can we have it?
 			ori		r6,r5,WANT_EXCL					; Mark Exclusive
 			bne--	rwlespin						; Branch if cannot be held
 			stwcx.	r6,RW_DATA,r3					; Update lock word
@@ -2038,14 +2041,21 @@ LEXT(lock_read)
 #endif
 rwlsloop:	lwarx	r5,RW_DATA,r3					; Grab the lock value
 			andi.	r7,r5,WANT_EXCL|WANT_UPGRADE|ILK_LOCKED	; Can we have it?
+			bne--	rwlsopt							; Branch if cannot be held
+rwlsloopres:
 			addis	r6,r5,1							; Increment read cnt
-			bne--	rwlsspin						; Branch if cannot be held
 			stwcx.	r6,RW_DATA,r3					; Update lock word
 			bne--	rwlsloop
 			.globl  EXT(rwlsPatch_isync)
 LEXT(rwlsPatch_isync)
 			isync
 			blr
+rwlsopt:
+			andi.	r7,r5,PRIV_EXCL|ILK_LOCKED		; Can we have it?
+			bne--	rwlsspin						; Branch if cannot be held
+			lis		r7,0xFFFF						; Get read cnt mask
+			and.	r8,r5,r7						; Is it shared
+			bne		rwlsloopres						; Branch if can be held
 rwlsspin:
 			li		r4,lgKillResv					; Killing field
 			stwcx.	r4,0,r4							; Kill it
@@ -2192,8 +2202,9 @@ rwtlsloop:	lwarx	r5,RW_DATA,r3					; Grab the lock value
 			andi.	r7,r5,ILK_LOCKED				; Test interlock flag
 			bne--	rwtlsspin						; Branch if interlocked
 			andi.	r7,r5,WANT_EXCL|WANT_UPGRADE	; So, can we have it?
+			bne--	rwtlsopt						; Branch if held exclusive
+rwtlsloopres:
 			addis	r6,r5,1							; Increment read cnt
-			bne--	rwtlsfail						; Branch if held exclusive
 			stwcx.	r6,RW_DATA,r3					; Update lock word
 			bne--	rwtlsloop
 			.globl  EXT(rwtlsPatch_isync)
@@ -2201,6 +2212,12 @@ LEXT(rwtlsPatch_isync)
 			isync
 			li		r3,1							; Return TRUE
 			blr
+rwtlsopt:
+			andi.	r7,r5,PRIV_EXCL					; Can we have it?
+			bne--	rwtlsfail						; Branch if cannot be held
+			lis		r7,0xFFFF						; Get read cnt mask
+			and.	r8,r5,r7						; Is it shared
+			bne		rwtlsloopres					; Branch if can be held
 rwtlsfail:
 			li		r3,0							; Return FALSE
 			blr

@@ -199,12 +199,10 @@ udp_init()
 	 * allocate lock group attribute and group for udp pcb mutexes
 	 */
 	pcbinfo->mtx_grp_attr = lck_grp_attr_alloc_init();
-	lck_grp_attr_setdefault(pcbinfo->mtx_grp_attr);
 
 	pcbinfo->mtx_grp = lck_grp_alloc_init("udppcb", pcbinfo->mtx_grp_attr);
 		
 	pcbinfo->mtx_attr = lck_attr_alloc_init();
-	lck_attr_setdefault(pcbinfo->mtx_attr);
 
 	if ((pcbinfo->mtx = lck_rw_alloc_init(pcbinfo->mtx_grp, pcbinfo->mtx_attr)) == NULL)
 		return;	/* pretty much dead if this fails... */
@@ -809,6 +807,7 @@ udp_pcblist SYSCTL_HANDLER_ARGS
 	gencnt = udbinfo.ipi_gencnt;
 	n = udbinfo.ipi_count;
 
+	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof xig;
 	xig.xig_count = n;
 	xig.xig_gen = gencnt;
@@ -844,6 +843,8 @@ udp_pcblist SYSCTL_HANDLER_ARGS
 		inp = inp_list[i];
 		if (inp->inp_gencnt <= gencnt && inp->inp_state != INPCB_STATE_DEAD) {
 			struct xinpcb xi;
+
+			bzero(&xi, sizeof(xi));
 			xi.xi_len = sizeof xi;
 			/* XXX should avoid extra copy */
 			inpcb_to_compat(inp, &xi.xi_inp);
@@ -860,6 +861,8 @@ udp_pcblist SYSCTL_HANDLER_ARGS
 		 * while we were processing this request, and it
 		 * might be necessary to retry.
 		 */
+		bzero(&xig, sizeof(xig));
+		xig.xig_len = sizeof xig;
 		xig.xig_gen = udbinfo.ipi_gencnt;
 		xig.xig_sogen = so_gencnt;
 		xig.xig_count = udbinfo.ipi_count;
@@ -1217,27 +1220,22 @@ udp_lock(so, refcount, debug)
 	int refcount, debug;
 {
 	int lr_saved;
-#ifdef __ppc__
-	if (debug == 0) {
-		__asm__ volatile("mflr %0" : "=r" (lr_saved));
-	}
+	if (debug == 0) 
+		lr_saved = (unsigned int) __builtin_return_address(0);
 	else lr_saved = debug;
-#endif
 
 	if (so->so_pcb) {
 		lck_mtx_assert(((struct inpcb *)so->so_pcb)->inpcb_mtx, LCK_MTX_ASSERT_NOTOWNED);
 		lck_mtx_lock(((struct inpcb *)so->so_pcb)->inpcb_mtx);
 	}
-	else {
+	else 
 		panic("udp_lock: so=%x NO PCB! lr=%x\n", so, lr_saved);
-		lck_mtx_assert(so->so_proto->pr_domain->dom_mtx, LCK_MTX_ASSERT_NOTOWNED);
-		lck_mtx_lock(so->so_proto->pr_domain->dom_mtx);
-	}
 
 	if (refcount) 
 		so->so_usecount++;
 
-	so->reserved3= lr_saved;
+	so->lock_lr[so->next_lock_lr] = (void *)lr_saved;
+	so->next_lock_lr = (so->next_lock_lr+1) % SO_LCKDBG_MAX;
 	return (0);
 }
 
@@ -1250,12 +1248,11 @@ udp_unlock(so, refcount, debug)
 	int lr_saved;
 	struct inpcb *inp = sotoinpcb(so);
     	struct inpcbinfo *pcbinfo	= &udbinfo;
-#ifdef __ppc__
-	if (debug == 0) {
-		__asm__ volatile("mflr %0" : "=r" (lr_saved));
-	}
+
+	if (debug == 0) 
+		lr_saved = (unsigned int) __builtin_return_address(0);
 	else lr_saved = debug;
-#endif
+
 	if (refcount) {
 		so->so_usecount--;
 #if 0
@@ -1268,18 +1265,16 @@ udp_unlock(so, refcount, debug)
 		}
 #endif
 	}
-	if (so->so_pcb == NULL) {
+	if (so->so_pcb == NULL) 
 		panic("udp_unlock: so=%x NO PCB! lr=%x\n", so, lr_saved);
-		lck_mtx_assert(so->so_proto->pr_domain->dom_mtx, LCK_MTX_ASSERT_OWNED);
-		lck_mtx_unlock(so->so_proto->pr_domain->dom_mtx);
-	}
 	else {
 		lck_mtx_assert(((struct inpcb *)so->so_pcb)->inpcb_mtx, LCK_MTX_ASSERT_OWNED);
+		so->unlock_lr[so->next_unlock_lr] = (void *)lr_saved;
+		so->next_unlock_lr = (so->next_unlock_lr+1) % SO_LCKDBG_MAX;
 		lck_mtx_unlock(((struct inpcb *)so->so_pcb)->inpcb_mtx);
 	}
 
 
-	so->reserved4 = lr_saved;
 	return (0);
 }
 

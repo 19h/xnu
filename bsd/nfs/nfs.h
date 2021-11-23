@@ -94,6 +94,7 @@
 #ifndef NFS_MAXDIRATTRTIMO
 #define	NFS_MAXDIRATTRTIMO 60
 #endif
+#define	NFS_IOSIZE	(256 * 1024)	/* suggested I/O size */
 #define	NFS_WSIZE	16384		/* Def. write data size <= 16K */
 #define	NFS_RSIZE	16384		/* Def. read data size <= 16K */
 #define	NFS_DGRAM_WSIZE	8192		/* UDP Def. write data size <= 8K */
@@ -215,17 +216,13 @@ struct nfs_args3 {
  * grow when we're dealing with a 64-bit process.
  * WARNING - keep in sync with nfs_args
  */
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=natural
-#endif
-
 struct user_nfs_args {
 	int		version;	/* args structure version number */
-	user_addr_t	addr;		/* file server address */
+	user_addr_t	addr __attribute((aligned(8)));		/* file server address */
 	int		addrlen;	/* length of address */
 	int		sotype;		/* Socket type */
 	int		proto;		/* and Protocol */
-	user_addr_t	fh;		/* File handle to be mounted */
+	user_addr_t	fh __attribute((aligned(8)));		/* File handle to be mounted */
 	int		fhsize;		/* Size, in bytes, of fh */
 	int		flags;		/* flags */
 	int		wsize;		/* write size in bytes */
@@ -237,7 +234,7 @@ struct user_nfs_args {
 	int		readahead;	/* # of blocks to readahead */
 	int		leaseterm;	/* obsolete: Term (sec) of lease */
 	int		deadthresh;	/* obsolete: Retrans threshold */
-	user_addr_t	hostname;	/* server's name */
+	user_addr_t	hostname __attribute((aligned(8)));	/* server's name */
 	/* NFS_ARGSVERSION 3 ends here */
 	int		acregmin;	/* reg file min attr cache timeout */
 	int		acregmax;	/* reg file max attr cache timeout */
@@ -246,11 +243,11 @@ struct user_nfs_args {
 };
 struct user_nfs_args3 {
 	int		version;	/* args structure version number */
-	user_addr_t	addr;		/* file server address */
+	user_addr_t	addr __attribute((aligned(8)));		/* file server address */
 	int		addrlen;	/* length of address */
 	int		sotype;		/* Socket type */
 	int		proto;		/* and Protocol */
-	user_addr_t	fh;		/* File handle to be mounted */
+	user_addr_t	fh __attribute((aligned(8)));		/* File handle to be mounted */
 	int		fhsize;		/* Size, in bytes, of fh */
 	int		flags;		/* flags */
 	int		wsize;		/* write size in bytes */
@@ -262,12 +259,8 @@ struct user_nfs_args3 {
 	int		readahead;	/* # of blocks to readahead */
 	int		leaseterm;	/* obsolete: Term (sec) of lease */
 	int		deadthresh;	/* obsolete: Retrans threshold */
-	user_addr_t	hostname;	/* server's name */
+	user_addr_t	hostname __attribute((aligned(8)));	/* server's name */
 };
-
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=reset
-#endif
 
 #endif // KERNEL
 
@@ -340,19 +333,11 @@ struct nfsd_args {
  * grow when we're dealing with a 64-bit process.
  * WARNING - keep in sync with nfsd_args
  */
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=natural
-#endif
-
 struct user_nfsd_args {
 	int	        sock;		/* Socket to serve */
-	user_addr_t	name;		/* Client addr for connection based sockets */
+	user_addr_t	name __attribute((aligned(8)));		/* Client addr for connection based sockets */
 	int	        namelen;	/* Length of name */
 };
-
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=reset
-#endif
 
 #endif // KERNEL
 
@@ -433,10 +418,6 @@ struct nfs_export_args {
 #ifdef KERNEL
 /* LP64 version of export_args */
 
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=natural
-#endif
-
 struct user_nfs_export_args {
 	uint32_t		nxa_fsid;	/* export FS ID */
 	uint32_t		nxa_expid;	/* export ID */
@@ -447,16 +428,13 @@ struct user_nfs_export_args {
 	user_addr_t		nxa_nets;	/* array of net args */
 };
 
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=reset
-#endif
-
 #endif /* KERNEL */
 
 /* nfs export arg flags */
 #define NXA_DELETE		0x0001	/* delete the specified export(s) */
 #define NXA_ADD			0x0002	/* add the specified export(s) */
 #define NXA_REPLACE		0x0003	/* delete and add the specified export(s) */
+#define NXA_DELETE_ALL		0x0004	/* delete all exports */
 
 /* export option flags */
 #define NX_READONLY		0x0001	/* exported read-only */
@@ -464,6 +442,7 @@ struct user_nfs_export_args {
 #define NX_MAPROOT		0x0004	/* map root access to anon credential */
 #define NX_MAPALL		0x0008	/* map all access to anon credential */
 #define NX_KERB			0x0010	/* exported with Kerberos uid mapping */
+#define NX_32BITCLIENTS		0x0020	/* restrict directory cookies to 32 bits */
 
 #ifdef KERNEL
 struct nfs_exportfs;
@@ -745,6 +724,7 @@ struct nfssvc_sock {
 	int		ns_reclen;
 	int		ns_numuids;
 	u_long		ns_sref;
+	time_t		ns_timestamp;		/* socket timestamp */
 	lck_mtx_t	ns_wgmutex;		/* mutex for write gather fields */
 	u_quad_t	ns_wgtime;		/* next Write deadline (usec) */
 	LIST_HEAD(, nfsrv_descript) ns_tq;	/* Write gather lists */
@@ -762,7 +742,7 @@ struct nfssvc_sock {
 #define	SLP_LASTFRAG	0x20 /* on last fragment of RPC record */
 #define SLP_ALLFLAGS	0xff
 
-extern TAILQ_HEAD(nfssvc_sockhead, nfssvc_sock) nfssvc_sockhead;
+extern TAILQ_HEAD(nfssvc_sockhead, nfssvc_sock) nfssvc_sockhead, nfssvc_deadsockhead;
 
 /* locks for nfssvc_sock's */
 extern lck_grp_attr_t *nfs_slp_group_attr;
@@ -1019,6 +999,7 @@ int	nfsrv_setattr(struct nfsrv_descript *nfsd,
 			   struct nfssvc_sock *slp,
 			   proc_t procp, mbuf_t *mrq);
 void	nfsrv_slpderef(struct nfssvc_sock *slp);
+void	nfsrv_slpfree(struct nfssvc_sock *slp);
 int	nfsrv_statfs(struct nfsrv_descript *nfsd, 
 			  struct nfssvc_sock *slp,
 			  proc_t procp, mbuf_t *mrq);

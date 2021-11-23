@@ -196,13 +196,4 @@ extern struct sem_undo	*semu;		/* undo structure pool */
  */
 void	semexit(struct proc *p);
 
-/*
- * Parameters to the semconfig system call
- */
-typedef enum {
-	SEM_CONFIG_FREEZE,	/* Freeze the semaphore facility. */
-	SEM_CONFIG_THAW		/* Thaw the semaphore facility. */
-} semconfig_ctl_t;
-
-
 #endif /* !_SYS_SEM__INTERNALH_ */

@@ -28,6 +28,7 @@ _buf_bwrite
 _buf_callback
 _buf_clear
 _buf_clearflags
+_buf_clone
 _buf_count
 _buf_dataptr
 _buf_device
@@ -123,7 +124,6 @@ _err_bwrite
 _err_close
 _err_copyfile
 _err_create
-_err_devblocksize
 _err_exchange
 _err_fsync
 _err_getattr
@@ -407,7 +407,6 @@ _nop_bwrite
 _nop_close
 _nop_copyfile
 _nop_create
-_nop_devblocksize
 _nop_exchange
 _nop_fsync
 _nop_getattr
@@ -595,6 +594,7 @@ _ubc_page_op
 _ubc_range_op
 _ubc_setcred
 _ubc_setsize
+_ubc_setthreadcred
 _ubc_sync_range
 _ubc_upl_abort
 _ubc_upl_abort_range

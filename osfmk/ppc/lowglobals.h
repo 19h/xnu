@@ -60,7 +60,9 @@ typedef struct lowglo {
 	uint64_t		lgPMWvaddr;				/* 5020 physical memory window virtual address */
 	uint64_t		lgUMWvaddr;				/* 5028 user memory window virtual address */
 	unsigned int	lgVMMforcedFeats;		/* 5030 VMM boot-args forced feature flags */
-	unsigned int	lgRsv034[19];			/* 5034 reserved */
+	unsigned int	lgMaxDec;				/* 5034 Maximum decrementer we can set */
+	unsigned int	lgPmsCtlp;				/* 5038 Pointer to power management stepper control */
+	unsigned int	lgRsv03C[17];			/* 503C reserved */
 	traceWork		lgTrcWork;				/* 5080 Tracing control block - trcWork */
 	unsigned int	lgRsv0A0[24];			/* 50A0 reserved */
 	struct Saveanchor	lgSaveanchor;		/* 5100 Savearea anchor - saveanchor */
@@ -78,8 +80,12 @@ typedef struct lowglo {
 	unsigned int	lgRsv380[32];			/* 5380 - 5400 reserved  */
 
 	unsigned int	lgRsv400[32];			/* 5400 - 5480 reserved  */
-
-	uint32_t		lgRsv480[704];			/* 5480 reserved - push to 1 page */
+	uint32_t		lgKmodptr;		/* 0x5480 Pointer to kmod, debugging aid */
+	uint32_t		lgTransOff;		/* 0x5484 Pointer to kdp_trans_off, debugging aid */
+	uint32_t		lgReadIO;		/* 0x5488 Pointer to kdp_read_io, debugging aid */
+	uint32_t		lgDevSlot1;		/* 0x548C For developer use */
+	uint32_t		lgDevSlot2;		/* 0x5490 For developer use */
+	uint32_t		lgRsv494[731];		/* 0x5494 reserved - push to 1 page */
 
 } lowglo;
 

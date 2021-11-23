@@ -221,6 +221,71 @@ proc_self()
 	return(current_proc());
 }
 
+proc_t
+proc_findref(int pid)
+{
+	boolean_t funnel_state;
+	proc_t p;
+
+	funnel_state = thread_funnel_set(kernel_flock,TRUE);
+	p = pfind(pid);
+	
+	if (p != proc_refinternal(p, 1))
+		p = PROC_NULL;
+		
+	thread_funnel_set(kernel_flock, funnel_state);
+	return(p);
+}
+
+void
+proc_dropref(proc_t p)
+{
+
+	proc_dropinternal(p, 0);
+}
+
+
+proc_t
+proc_refinternal(proc_t p, int funneled)
+{
+
+	proc_t p1 = p;
+	boolean_t funnel_state = TRUE; 	/* need to init just to avoid warnings and build failure */
+
+	if (funneled == 0)
+		funnel_state = thread_funnel_set(kernel_flock,TRUE);
+	
+	if ((p != PROC_NULL) &&(p->p_stat != SZOMB) && ((p->p_lflag & (P_LREFDRAINWAIT | P_LREFDRAIN | P_LREFDEAD)) == 0))
+		p->p_internalref++;
+	else 
+		p1 = PROC_NULL;
+
+	if (funneled == 0)
+		thread_funnel_set(kernel_flock,funnel_state);
+	return(p1);
+}
+
+void
+proc_dropinternal(proc_t p, int funneled)
+{
+	boolean_t funnel_state = TRUE; /* need to init just to avoid warnings and build failure */
+
+	if (funneled == 0)
+		funnel_state = thread_funnel_set(kernel_flock,TRUE);
+
+	if (p->p_internalref > 0) {
+		p->p_internalref--;
+		if ((p->p_internalref == 0) && ((p->p_lflag & P_LREFDRAINWAIT) == P_LREFDRAINWAIT)) {
+			p->p_lflag &= ~P_LREFDRAINWAIT;
+			wakeup(&p->p_internalref);
+		}
+	} else
+		printf("proc_dropreg -ve ref\n");
+
+	if (funneled == 0)
+		thread_funnel_set(kernel_flock,funnel_state);
+}
+
 
 int
 proc_pid(proc_t p)
@@ -529,17 +594,14 @@ pgdelete(pgrp)
 	register struct pgrp *pgrp;
 {
 	struct tty * ttyp;
-	int removettypgrp = 0;
 
 	ttyp = pgrp->pg_session->s_ttyp;
-	if (pgrp->pg_session->s_ttyp != NULL && 
-	    pgrp->pg_session->s_ttyp->t_pgrp == pgrp) {
+	if (ttyp != NULL && pgrp->pg_session->s_ttyp->t_pgrp == pgrp) {
 		pgrp->pg_session->s_ttyp->t_pgrp = NULL;
-		removettypgrp = 1;
 	}
 	LIST_REMOVE(pgrp, pg_hash);
 	if (--pgrp->pg_session->s_count == 0) {
-		if (removettypgrp && (ttyp == &cons) && (ttyp->t_session == pgrp->pg_session))
+		if (ttyp != NULL && (ttyp->t_session == pgrp->pg_session))
 			ttyp->t_session = 0;
 		FREE_ZONE(pgrp->pg_session, sizeof(struct session), M_SESSION);
 	}
@@ -654,7 +716,7 @@ pgrpdump(void)
 int
 proc_is_classic(struct proc *p)
 {
-    return (p->p_flag & P_CLASSIC) ? 1 : 0;
+    return (p->p_flag & P_TRANSLATED) ? 1 : 0;
 }
 
 /* XXX Why does this function exist?  Need to kill it off... */

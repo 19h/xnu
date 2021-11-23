@@ -96,7 +96,6 @@
 
 #include <vm/vm_pageout.h>
 
-#include <architecture/byte_order.h>
 #include <libkern/OSAtomic.h>
 
 
@@ -190,6 +189,7 @@ mount(struct proc *p, register struct mount_args *uap, __unused register_t *retv
 	int mntalloc = 0;
 	mode_t accessmode;
 	boolean_t is_64bit;
+	boolean_t is_rwlock_locked = FALSE;
 
 	AUDIT_ARG(fflags, uap->flags);
 
@@ -227,13 +227,13 @@ mount(struct proc *p, register struct mount_args *uap, __unused register_t *retv
 		}
 		mount_unlock(mp);
 		lck_rw_lock_exclusive(&mp->mnt_rwlock);
+		is_rwlock_locked = TRUE;
 		/*
 		 * We only allow the filesystem to be reloaded if it
 		 * is currently mounted read-only.
 		 */
 		if ((uap->flags & MNT_RELOAD) &&
 		    ((mp->mnt_flag & MNT_RDONLY) == 0)) {
-			lck_rw_done(&mp->mnt_rwlock);
 			error = ENOTSUP;
 			goto out1;
 		}
@@ -243,7 +243,6 @@ mount(struct proc *p, register struct mount_args *uap, __unused register_t *retv
 		 */
 		if (mp->mnt_vfsstat.f_owner != kauth_cred_getuid(context.vc_ucred) &&
 		    (error = suser(context.vc_ucred, &p->p_acflag))) {
-			lck_rw_done(&mp->mnt_rwlock);
 			goto out1;
 		}
 		/*
@@ -333,6 +332,7 @@ mount(struct proc *p, register struct mount_args *uap, __unused register_t *retv
 	TAILQ_INIT(&mp->mnt_newvnodes);
 	mount_lock_init(mp);
 	lck_rw_lock_exclusive(&mp->mnt_rwlock);
+	is_rwlock_locked = TRUE;
 	mp->mnt_op = vfsp->vfc_vfsops;
 	mp->mnt_vtable = vfsp;
 	mount_list_lock();
@@ -471,6 +471,7 @@ update:
 			mp->mnt_flag = flag;
 		vfs_event_signal(NULL, VQ_UPDATE, (intptr_t)NULL);
 		lck_rw_done(&mp->mnt_rwlock);
+		is_rwlock_locked = FALSE;
 		if (!error)
 			enablequotas(mp,&context);
 		goto out2;
@@ -490,6 +491,7 @@ update:
 		vfs_event_signal(NULL, VQ_MOUNT, (intptr_t)NULL);
 		checkdirs(vp, &context);
 		lck_rw_done(&mp->mnt_rwlock);
+		is_rwlock_locked = FALSE;
 		mount_list_add(mp);
 		/* 
 		 * there is no cleanup code here so I have made it void 
@@ -523,6 +525,7 @@ update:
 			vnode_rele(device_vnode);
 		}
 		lck_rw_done(&mp->mnt_rwlock);
+		is_rwlock_locked = FALSE;
 		mount_lock_destroy(mp);
 		FREE_ZONE((caddr_t)mp, sizeof (struct mount), M_MOUNT);
 	}
@@ -544,6 +547,10 @@ out2:
 	if (devpath && devvp)
 	        vnode_put(devvp);
 out1:
+	/* Release mnt_rwlock only when it was taken */
+	if (is_rwlock_locked == TRUE) {
+		lck_rw_done(&mp->mnt_rwlock);
+	}
 	if (mntalloc)
 		FREE_ZONE((caddr_t)mp, sizeof (struct mount), M_MOUNT);
 	vnode_put(vp);
@@ -1514,6 +1521,30 @@ bad:
 
 }
 
+/*
+ * An open system call using an extended argument list compared to the regular
+ * system call 'open'.
+ *
+ * Parameters:	p			Process requesting the open
+ *		uap			User argument descriptor (see below)
+ *		retval			Pointer to an area to receive the
+ *					return calue from the system call
+ *
+ * Indirect:	uap->path		Path to open (same as 'open')
+ *		uap->flags		Flags to open (same as 'open'
+ *		uap->uid		UID to set, if creating
+ *		uap->gid		GID to set, if creating
+ *		uap->mode		File mode, if creating (same as 'open')
+ *		uap->xsecurity		ACL to set, if creating
+ *
+ * Returns:	0			Success
+ *		!0			errno value
+ *
+ * Notes:	The kauth_filesec_t in 'va', if any, is in host byte order.
+ *
+ * XXX:		We should enummerate the possible errno values here, and where
+ *		in the code they originated.
+ */
 int
 open_extended(struct proc *p, struct open_extended_args *uap, register_t *retval)
 {
@@ -1715,6 +1746,29 @@ out:
 	return error;
 }
 
+
+/*
+ * A mkfifo system call using an extended argument list compared to the regular
+ * system call 'mkfifo'.
+ *
+ * Parameters:	p			Process requesting the open
+ *		uap			User argument descriptor (see below)
+ *		retval			(Ignored)
+ *
+ * Indirect:	uap->path		Path to fifo (same as 'mkfifo')
+ *		uap->uid		UID to set
+ *		uap->gid		GID to set
+ *		uap->mode		File mode to set (same as 'mkfifo')
+ *		uap->xsecurity		ACL to set, if creating
+ *
+ * Returns:	0			Success
+ *		!0			errno value
+ *
+ * Notes:	The kauth_filesec_t in 'va', if any, is in host byte order.
+ *
+ * XXX:		We should enummerate the possible errno values here, and where
+ *		in the code they originated.
+ */
 int
 mkfifo_extended(struct proc *p, struct mkfifo_extended_args *uap, __unused register_t *retval)
 {
@@ -2807,6 +2861,28 @@ chmod1(vfs_context_t ctx, user_addr_t path, struct vnode_attr *vap)
 	return(error);
 }
 
+/*
+ * A chmod system call using an extended argument list compared to the regular
+ * system call 'mkfifo'.
+ *
+ * Parameters:	p			Process requesting the open
+ *		uap			User argument descriptor (see below)
+ *		retval			(ignored)
+ *
+ * Indirect:	uap->path		Path to object (same as 'chmod')
+ *		uap->uid		UID to set
+ *		uap->gid		GID to set
+ *		uap->mode		File mode to set (same as 'chmod')
+ *		uap->xsecurity		ACL to set (or delete)
+ *
+ * Returns:	0			Success
+ *		!0			errno value
+ *
+ * Notes:	The kauth_filesec_t in 'va', if any, is in host byte order.
+ *
+ * XXX:		We should enummerate the possible errno values here, and where
+ *		in the code they originated.
+ */
 int
 chmod_extended(struct proc *p, struct chmod_extended_args *uap, __unused register_t *retval)
 {
@@ -4693,7 +4769,8 @@ searchfs (struct proc *p, register struct searchfs_args *uap, __unused register_
         searchblock.returnbuffer = CAST_USER_ADDR_T(tmp_searchblock.returnbuffer);
         searchblock.returnbuffersize = tmp_searchblock.returnbuffersize;
         searchblock.maxmatches = tmp_searchblock.maxmatches;
-        searchblock.timelimit = tmp_searchblock.timelimit;
+        searchblock.timelimit.tv_sec = tmp_searchblock.timelimit.tv_sec;
+        searchblock.timelimit.tv_usec = tmp_searchblock.timelimit.tv_usec;
         searchblock.searchparams1 = CAST_USER_ADDR_T(tmp_searchblock.searchparams1);
         searchblock.sizeofsearchparams1 = tmp_searchblock.sizeofsearchparams1;
         searchblock.searchparams2 = CAST_USER_ADDR_T(tmp_searchblock.searchparams2);
@@ -5425,6 +5502,8 @@ munge_statfs(struct mount *mp, struct vfsstatfs *sfsp,
  */
 void munge_stat(struct stat *sbp, struct user_stat *usbp)
 {
+        bzero(usbp, sizeof(struct user_stat));
+
 	usbp->st_dev = sbp->st_dev;
 	usbp->st_ino = sbp->st_ino;
 	usbp->st_mode = sbp->st_mode;

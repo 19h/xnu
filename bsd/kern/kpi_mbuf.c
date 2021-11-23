@@ -462,12 +462,26 @@ extern void in_delayed_cksum_offset(struct mbuf *m, int ip_offset);
 void
 mbuf_outbound_finalize(mbuf_t mbuf, u_long protocol_family, size_t protocol_offset)
 {
-	if ((mbuf->m_pkthdr.csum_flags & (CSUM_DELAY_DATA | CSUM_DELAY_IP)) == 0)
+	if ((mbuf->m_pkthdr.csum_flags &
+		 (CSUM_DELAY_DATA | CSUM_DELAY_IP | CSUM_TCP_SUM16)) == 0)
 		return;
 	
 	/* Generate the packet in software, client needs it */
 	switch (protocol_family) {
 		case PF_INET:
+			if (mbuf->m_pkthdr.csum_flags & CSUM_TCP_SUM16) {
+				/*
+				 * If you're wondering where this lovely code comes
+				 * from, we're trying to undo what happens in ip_output.
+				 * Look for CSUM_TCP_SUM16 in ip_output.
+				 */
+				u_int16_t	first, second;
+				mbuf->m_pkthdr.csum_flags &= ~CSUM_TCP_SUM16;
+				mbuf->m_pkthdr.csum_flags |= CSUM_TCP;
+				first = mbuf->m_pkthdr.csum_data >> 16;
+				second = mbuf->m_pkthdr.csum_data & 0xffff;
+				mbuf->m_pkthdr.csum_data = first - second;
+			}
 			if (mbuf->m_pkthdr.csum_flags & CSUM_DELAY_DATA) {
 				in_delayed_cksum_offset(mbuf, protocol_offset);
 			}
@@ -658,12 +672,10 @@ mbuf_tag_id_find_internal(
 		lck_mtx_t		*new_lock = NULL;
 		
 		grp_attrib = lck_grp_attr_alloc_init();
-		lck_grp_attr_setdefault(grp_attrib);
 		lck_group = lck_grp_alloc_init("mbuf_tag_allocate_id", grp_attrib);
 		lck_grp_attr_free(grp_attrib);
 		lck_attrb = lck_attr_alloc_init();
-		lck_attr_setdefault(lck_attrb);
-		lck_attr_setdebug(lck_attrb);
+
 		new_lock = lck_mtx_alloc_init(lck_group, lck_attrb);
 		if (!OSCompareAndSwap((UInt32)0, (UInt32)new_lock, (UInt32*)&mtag_id_lock)) {
 			/*

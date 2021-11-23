@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -38,6 +38,7 @@
 #include <kern/assert.h>
 #include <kern/cpu_number.h>
 #include <kern/thread.h>
+#include <console/serial_protos.h>
 
 #include <ppc/proc_reg.h>
 #include <ppc/Firmware.h>
@@ -59,10 +60,11 @@ unsigned int hash_table_size;			/* Hash table size */
 int         hash_table_shift;           /* "ht_shift" boot arg, used to scale hash_table_size */
 vm_offset_t taproot_addr;				/* (BRINGUP) */
 unsigned int taproot_size;				/* (BRINGUP) */
-unsigned int serialmode;				/* Serial mode keyboard and console control */
 extern int disableConsoleOutput;
 
 struct shadowBAT shadow_BAT;
+
+
 
 /*
  *	NOTE: mem_size is bogus on large memory machines.  We will pin it to 0x80000000 if there is more than 2 GB
@@ -232,13 +234,13 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
 	pmap_bootstrap(max_mem, &first_avail, kmapsize);
 
 	pmap_map(trunc_page(exception_entry), trunc_page(exception_entry), 
-		round_page(exception_end), VM_PROT_READ|VM_PROT_EXECUTE);
+		round_page(exception_end), VM_PROT_READ|VM_PROT_EXECUTE, VM_WIMG_USE_DEFAULT);
 
 	pmap_map(trunc_page(sectTEXTB), trunc_page(sectTEXTB), 
-		round_page(sectTEXTB+sectSizeTEXT), VM_PROT_READ|VM_PROT_EXECUTE);
+		round_page(sectTEXTB+sectSizeTEXT), VM_PROT_READ|VM_PROT_EXECUTE, VM_WIMG_USE_DEFAULT);
 
 	pmap_map(trunc_page(sectDATAB), trunc_page(sectDATAB), 
-		round_page(sectDATAB+sectSizeDATA), VM_PROT_READ|VM_PROT_WRITE);
+		round_page(sectDATAB+sectSizeDATA), VM_PROT_READ|VM_PROT_WRITE, VM_WIMG_USE_DEFAULT);
 
 /* The KLD and LINKEDIT segments are unloaded in toto after boot completes,
 * but via ml_static_mfree(), through IODTFreeLoaderInfo(). Hence, we have
@@ -250,7 +252,7 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
              addr += PAGE_SIZE) {
 
             pmap_enter(kernel_pmap, (vm_map_offset_t)addr, (ppnum_t)(addr>>12), 
-			VM_PROT_READ|VM_PROT_WRITE, 
+			VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE, 
 			VM_WIMG_USE_DEFAULT, TRUE);
 
 	}
@@ -260,7 +262,7 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
              addr += PAGE_SIZE) {
 
             pmap_enter(kernel_pmap, (vm_map_offset_t)addr, (ppnum_t)(addr>>12), 
-			VM_PROT_READ|VM_PROT_WRITE, 
+			VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE, 
 			VM_WIMG_USE_DEFAULT, TRUE);
 
 	}
@@ -271,7 +273,7 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
 
            pmap_enter(kernel_pmap, (vm_map_offset_t)addr,
 			(ppnum_t)(addr>>12), 
-			VM_PROT_READ|VM_PROT_WRITE, 
+			VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE, 
 			VM_WIMG_USE_DEFAULT, TRUE);
 
 	}
@@ -281,7 +283,7 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
              addr += PAGE_SIZE) {
 
             pmap_enter(kernel_pmap, (vm_map_offset_t)addr, (ppnum_t)(addr>>12), 
-			VM_PROT_READ|VM_PROT_WRITE, 
+			VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE, 
 			VM_WIMG_USE_DEFAULT, TRUE);
 
 	}
@@ -304,7 +306,7 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
 	for(addr = trunc_page(end); addr < round_page(static_memory_end); addr += PAGE_SIZE) {
 
 		pmap_enter(kernel_pmap, (vm_map_address_t)addr, (ppnum_t)addr>>12, 
-			VM_PROT_READ|VM_PROT_WRITE, 
+			VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE, 
 			VM_WIMG_USE_DEFAULT, TRUE);
 
 	}
@@ -329,6 +331,8 @@ void ppc_vm_init(uint64_t mem_limit, boot_args *args)
  */
 
 	hw_start_trans();					/* Start translating */
+	PE_init_platform(TRUE, args);		/* Initialize this right off the bat */
+
 
 #if 0
 	GratefulDebInit((bootBumbleC *)&(args->Video));	/* Initialize the GratefulDeb debugger */

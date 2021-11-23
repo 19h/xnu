@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -70,6 +70,7 @@
 
 #include <machine/machine_routines.h>
 #include <machine/sched_param.h>
+#include <machine/machine_cpu.h>
 
 #include <kern/kern_types.h>
 #include <kern/clock.h>
@@ -95,6 +96,8 @@
 #include <vm/vm_map.h>
 
 #include <sys/kdebug.h>
+
+#include <kern/pms.h>
 
 #define		DEFAULT_PREEMPTION_RATE		100		/* (1/s) */
 int			default_preemption_rate = DEFAULT_PREEMPTION_RATE;
@@ -1565,10 +1568,8 @@ thread_dispatch(
 	 *	If blocked at a continuation, discard
 	 *	the stack.
 	 */
-#ifndef i386
     if (thread->continuation != NULL && thread->kernel_stack)
 		stack_free(thread);
-#endif
 
 	if (!(thread->state & TH_IDLE)) {
 		wake_lock(thread);
@@ -1648,6 +1649,16 @@ thread_block_reason(
 	counter(++c_thread_block_calls);
 
 	s = splsched();
+
+#if 0
+#if	MACH_KDB
+	{
+		extern void db_chkpmgr(void);
+		db_chkpmgr();						/* (BRINGUP) See if pm config changed */
+
+	}
+#endif
+#endif
 
 	if (!(reason & AST_PREEMPT))
 		funnel_release_check(self, 2);
@@ -2484,8 +2495,10 @@ delay_idle(
 
 			timer_event((uint32_t)abstime, &processor->idle_thread->system_timer);
 		}
-		else
+		else {
+			cpu_pause();
 			abstime = mach_absolute_time();
+		}
 	}
 
 	timer_event((uint32_t)abstime, &self->system_timer);
@@ -2523,7 +2536,11 @@ idle_thread(void)
 	lcount = &processor->runq.count;
 	gcount = &processor->processor_set->runq.count;
 
-	(void)splsched();
+
+	(void)splsched();			/* Turn interruptions off */
+
+	pmsDown();					/* Step power down.  Note: interruptions must be disabled for this call */
+
 	while (	(*threadp == THREAD_NULL)				&&
 				(*gcount == 0) && (*lcount == 0)	) {
 
@@ -2545,6 +2562,8 @@ idle_thread(void)
 	 */
 	pset = processor->processor_set;
 	simple_lock(&pset->sched_lock);
+
+	pmsStep(0);					/* Step up out of idle power, may start timer for next step */
 
 	state = processor->state;
 	if (state == PROCESSOR_DISPATCHING) {

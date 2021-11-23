@@ -144,7 +144,7 @@ static int blackhole = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, blackhole, CTLFLAG_RW,
 	&blackhole, 0, "Do not send RST when dropping refused connections");
 
-int tcp_delack_enabled = 1;
+int tcp_delack_enabled = 3;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, delayed_ack, CTLFLAG_RW, 
     &tcp_delack_enabled, 0, 
     "Delay ACK to try and piggyback it onto a data packet");
@@ -236,13 +236,17 @@ extern int fw_verbose;
  *      - the peer hasn't sent us a TH_PUSH data packet, if he did, take this as a clue that we
  *        need to ACK with no delay. This helps higher level protocols who won't send
  *        us more data even if the window is open because their last "segment" hasn't been ACKed
- *    
+ *  - delayed acks are enabled (set to 3, "streaming detection") and
+ *  	- if we receive more than 4 full packets per second on this socket, we're streaming acts as "1".
+ *  	- if we don't meet that criteria, acts like "2". Allowing faster acking while browsing for example.
  *
  */
 #define DELAY_ACK(tp) \
 	(((tcp_delack_enabled == 1) && ((tp->t_flags & TF_RXWIN0SENT) == 0)) || \
 	 (((tcp_delack_enabled == 2) && (tp->t_flags & TF_RXWIN0SENT) == 0) && \
-	   ((thflags & TH_PUSH) == 0) && ((tp->t_flags & TF_DELACK) == 0)))
+	   ((thflags & TH_PUSH) == 0) && ((tp->t_flags & TF_DELACK) == 0)) || \
+	 (((tcp_delack_enabled == 3) && (tp->t_flags & TF_RXWIN0SENT) == 0) && \
+	   (((tp->t_rcvtime == 0) && (tp->rcv_byps > (4* tp->t_maxseg)))  || (((thflags & TH_PUSH) == 0) && ((tp->t_flags & TF_DELACK) == 0)))))
 
 
 static int tcpdropdropablreq(struct socket *head);
@@ -1166,17 +1170,22 @@ findpcb:
 	 * example interactive connections with many small packets like
 	 * telnet or SSH.
 	 *
-	 * Setting either tcp_minmssoverload or tcp_minmss to "0" disables
-	 * this check.
 	 *
 	 * Account for packet if payload packet, skip over ACK, etc.
+	 *
+	 * The packet per second count is done all the time and is also used
+	 * by "DELAY_ACK" to detect streaming situations.
+	 *
 	 */
-	if (tcp_minmss && tcp_minmssoverload &&
-	    tp->t_state == TCPS_ESTABLISHED && tlen > 0) {
+	if (tp->t_state == TCPS_ESTABLISHED && tlen > 0) {
 		if (tp->rcv_reset > tcp_now) {
 			tp->rcv_pps++;
 			tp->rcv_byps += tlen + off;
-			if (tp->rcv_pps > tcp_minmssoverload) {
+		/*
+		 * Setting either tcp_minmssoverload or tcp_minmss to "0" disables
+		 * the check. 
+		 */
+			if (tcp_minmss && tcp_minmssoverload && tp->rcv_pps > tcp_minmssoverload) {
 				if ((tp->rcv_byps / tp->rcv_pps) < tcp_minmss) {
 					char	ipstrbuf[MAX_IPv6_STR_LEN];
 					printf("too many small tcp packets from "
@@ -3420,6 +3429,7 @@ tcpdropdropablreq(struct socket *head)
 	static unsigned int cur_cnt, old_cnt;
 	struct timeval tv;
 	struct inpcb *inp = NULL;
+	struct tcpcb *tp;
 	
 	microtime(&tv);
 	if ((i = (tv.tv_sec - old_runtime.tv_sec)) != 0) {
@@ -3452,6 +3462,11 @@ tcpdropdropablreq(struct socket *head)
 	if (!so)
 		return 0;
 	
+	head->so_incqlen--;
+	head->so_qlen--;
+	TAILQ_REMOVE(&head->so_incomp, so, so_list);
+	tcp_unlock(head, 0, 0);
+
 	/* Let's remove this connection from the incomplete list */
 	tcp_lock(so, 1, 0);
 	
@@ -3459,16 +3474,25 @@ tcpdropdropablreq(struct socket *head)
 		tcp_unlock(so, 1, 0);
 		return 0;
 	}
-	sototcpcb(so)->t_flags |= TF_LQ_OVERFLOW;
-	head->so_incqlen--;
-	head->so_qlen--;
+	
 	so->so_head = NULL;
-	TAILQ_REMOVE(&head->so_incomp, so, so_list);
 	so->so_usecount--;	/* No more held by so_head */
 
-	tcp_drop(sototcpcb(so), ETIMEDOUT);
-
+	/* 
+	 * We do not want to lose track of the PCB right away in case we receive 
+	 * more segments from the peer
+	 */
+	tp = sototcpcb(so);
+	tp->t_flags |= TF_LQ_OVERFLOW;
+	tp->t_state = TCPS_CLOSED;
+	(void) tcp_output(tp);
+	tcpstat.tcps_drops++;
+	soisdisconnected(so);
+	tcp_canceltimers(tp);
+	add_to_time_wait(tp);
+	
 	tcp_unlock(so, 1, 0);
+	tcp_lock(head, 0, 0);
 	
 	return 1;
 	

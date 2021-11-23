@@ -144,6 +144,10 @@ typedef __darwin_pid_t	pid_t;
 #define	FWASWRITTEN	0x10000		/* descriptor was written */
 #endif
 
+#ifndef _POSIX_C_SOURCE
+#define O_DIRECTORY    0x100000
+#endif
+
 /* defined by POSIX 1003.1; BSD default, so no bit required */
 #define	O_NOCTTY	0		/* don't assign controlling terminal */
 //#define	O_SYNC  /* ??? POSIX: Write according to synchronized I/O file integrity completion */
@@ -213,6 +217,7 @@ typedef __darwin_pid_t	pid_t;
 #define F_PATHPKG_CHECK 52              /* find which component (if any) is a package */
 #define F_FREEZE_FS     53              /* "freeze" all fs operations */
 #define F_THAW_FS       54              /* "thaw" all fs operations */
+#define F_GLOBAL_NOCACHE 55		/* turn data caching off/on (globally) for this file */
 
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
 #define FCNTL_FS_SPECIFIC_BASE  0x00010000
@@ -358,19 +363,11 @@ typedef struct fbootstraptransfer {
  * WARNING - keep in sync with fbootstraptransfer
  */
 
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=natural
-#endif
-
 typedef struct user_fbootstraptransfer {
   off_t fbt_offset;             /* IN: offset to start read/write */
   user_size_t fbt_length;		/* IN: number of bytes to transfer */
   user_addr_t fbt_buffer;		/* IN: buffer to be read/written */
 } user_fbootstraptransfer_t;
-
-#if __DARWIN_ALIGN_NATURAL
-#pragma options align=reset
-#endif
 
 #endif // KERNEL
 
@@ -390,9 +387,7 @@ typedef struct user_fbootstraptransfer {
  * and a per filesystem type flag will be needed to interpret the
  * contiguous bytes count result from CMAP.
  */
-#if __DARWIN_ALIGN_POWER
-#pragma options align=power
-#endif
+#pragma pack(4)
 
 struct log2phys {
 	unsigned int	l2p_flags;		/* unused so far */
@@ -400,9 +395,7 @@ struct log2phys {
 	off_t		l2p_devoffset;	/* bytes into device */
 };
 
-#if __DARWIN_ALIGN_POWER
-#pragma options align=reset
-#endif
+#pragma pack()
 
 #define	O_POPUP	   0x80000000   /* force window to popup on open */
 #define	O_ALERT	   0x20000000	/* small, clean popup window */

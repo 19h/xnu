@@ -162,7 +162,7 @@ rts_attach(struct socket *so, int proto, __unused struct proc *p)
 		so->so_flags |= SOF_PCBCLEARING;
 		return error;
 	}
-	socket_lock(so, 1);
+
 	switch(rp->rcb_proto.sp_protocol) {
 //####LD route_cb needs looking
 	case AF_INET:
@@ -180,9 +180,9 @@ rts_attach(struct socket *so, int proto, __unused struct proc *p)
 	}
 	rp->rcb_faddr = &route_src;
 	route_cb.any_count++;
+	/* the socket is already locked when we enter rts_attach */ 
 	soisconnected(so);
 	so->so_options |= SO_USELOOPBACK;
-	socket_unlock(so, 1);
 	return 0;
 }
 
@@ -1361,17 +1361,18 @@ sysctl_rtsock SYSCTL_HANDLER_ARGS
 	w.w_arg = name[2];
 	w.w_req = req;
 
-	lck_mtx_lock(rt_mtx);
 	switch (w.w_op) {
 
 	case NET_RT_DUMP:
 	case NET_RT_DUMP2:
 	case NET_RT_FLAGS:
+		lck_mtx_lock(rt_mtx);
 		for (i = 1; i <= AF_MAX; i++)
 			if ((rnh = rt_tables[i]) && (af == 0 || af == i) &&
 			    (error = rnh->rnh_walktree(rnh,
 							sysctl_dumpentry, &w)))
 				break;
+		lck_mtx_unlock(rt_mtx);
 		break;
 	case NET_RT_IFLIST:
 		error = sysctl_iflist(af, &w);
@@ -1386,7 +1387,6 @@ sysctl_rtsock SYSCTL_HANDLER_ARGS
 		error = sysctl_rttrash(req);
 		break;
 	}
-	lck_mtx_unlock(rt_mtx);
 	if (w.w_tmem)
 		FREE(w.w_tmem, M_RTABLE);
 	return (error);

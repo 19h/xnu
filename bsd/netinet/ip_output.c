@@ -476,6 +476,11 @@ loopit:
 				
 				lck_mtx_unlock(ip_mutex);
 				ipf_ref();
+				
+				/* 4135317 - always pass network byte order to filter */
+				HTONS(ip->ip_len);
+				HTONS(ip->ip_off);
+				
 				TAILQ_FOREACH(filter, &ipv4_filters, ipf_link) {
 					if (seen == 0) {
 						if ((struct ipfilter *)inject_filter_ref == filter)
@@ -494,6 +499,11 @@ loopit:
 						}
 					}
 				}
+				
+				/* set back to host byte order */
+				NTOHS(ip->ip_len);
+				NTOHS(ip->ip_off);
+				
 				lck_mtx_lock(ip_mutex);
 				ipf_unref();
 				didfilter = 1;
@@ -607,6 +617,11 @@ injectit:
 		
 		lck_mtx_unlock(ip_mutex);
 		ipf_ref();
+		
+		/* 4135317 - always pass network byte order to filter */
+		HTONS(ip->ip_len);
+		HTONS(ip->ip_off);
+		
 		TAILQ_FOREACH(filter, &ipv4_filters, ipf_link) {
 			if (seen == 0) {
 				if ((struct ipfilter *)inject_filter_ref == filter)
@@ -625,6 +640,11 @@ injectit:
 				}
 			}
 		}
+		
+		/* set back to host byte order */
+		NTOHS(ip->ip_len);
+		NTOHS(ip->ip_off);
+		
 		ipf_unref();
 		lck_mtx_lock(ip_mutex);
 	}
@@ -802,6 +822,11 @@ injectit:
 		
 		lck_mtx_unlock(ip_mutex);
 		ipf_ref();
+		
+		/* 4135317 - always pass network byte order to filter */
+		HTONS(ip->ip_len);
+		HTONS(ip->ip_off);
+		
 		TAILQ_FOREACH(filter, &ipv4_filters, ipf_link) {
 			if (filter->ipf_filter.ipf_output) {
 				errno_t result;
@@ -817,6 +842,11 @@ injectit:
 				}
 			}
 		}
+		
+		/* set back to host byte order */
+		NTOHS(ip->ip_len);
+		NTOHS(ip->ip_off);
+		
 		ipf_unref();
 		lck_mtx_lock(ip_mutex);
 	}
@@ -850,6 +880,7 @@ skip_ipsec:
 		args.m = m;
 		args.next_hop = dst;
 		args.oif = ifp;
+		lck_mtx_unlock(ip_mutex);
 		off = ip_fw_chk_ptr(&args);
 		m = args.m;
 		dst = args.next_hop;
@@ -873,12 +904,13 @@ skip_ipsec:
 			if (m)
 				m_freem(m);
 			error = EACCES ;
-			lck_mtx_unlock(ip_mutex);
 			goto done ;
 		}
 		ip = mtod(m, struct ip *);
-		if (off == 0 && dst == old) /* common case */
+		if (off == 0 && dst == old) {/* common case */
+			lck_mtx_lock(ip_mutex);
 			goto pass ;
+		}
 #if DUMMYNET
                 if (DUMMYNET_LOADED && (off & IP_FW_PORT_DYNT_FLAG) != 0) {
                     /*
@@ -894,12 +926,12 @@ skip_ipsec:
 		    args.dst = dst;
 		    args.flags = flags;
 
-		    lck_mtx_unlock(ip_mutex);
 		    error = ip_dn_io_ptr(m, off & 0xffff, DN_TO_IP_OUT,
 				&args);
 		    goto done;
 		}
 #endif /* DUMMYNET */
+		lck_mtx_lock(ip_mutex);
 #if IPDIVERT
 		if (off != 0 && (off & IP_FW_PORT_DYNT_FLAG) == 0) {
 			struct mbuf *clone = NULL;
@@ -1381,8 +1413,8 @@ in_delayed_cksum_offset(struct mbuf *m, int ip_offset)
 	}
 	
 	if (ip_offset + sizeof(struct ip) > m->m_len) {
-		printf("delayed m_pullup, m->len: %d  off: %d  p: %d\n",
-			m->m_len, ip_offset, ip->ip_p);
+		printf("delayed m_pullup, m->len: %d  off: %d\n",
+			m->m_len, ip_offset);
 		/*
 		 * XXX
 		 * this shouldn't happen

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -29,6 +29,8 @@
 #include <kern/assert.h>
 #include <kern/thread.h>
 #include <kern/counters.h>
+#include <kern/etimer.h>
+#include <kern/pms.h>
 #include <ppc/misc_protos.h>
 #include <ppc/trap.h>
 #include <ppc/proc_reg.h>
@@ -86,9 +88,15 @@ struct savearea * interrupt(
 			}
 #endif
 
+			now = mach_absolute_time();				/* Find out what time it is */
+			
+			if(now >= proc_info->pms.pmsPop) {		/* Is it time for power management state change? */
+				pmsStep(1);							/* Yes, advance step */
+				now = mach_absolute_time();			/* Get the time again since we ran a bit */
+			}
+
 			thread = current_thread();					/* Find ourselves */
 			if(thread->machine.qactTimer != 0) {	/* Is the timer set? */
-				clock_get_uptime(&now);				/* Find out what time it is */
 				if (thread->machine.qactTimer <= now) {	/* It is set, has it popped? */
 					thread->machine.qactTimer = 0;		/* Clear single shot timer */
 					if((unsigned int)thread->machine.vmmControl & 0xFFFFFFFE) {	/* Are there any virtual machines? */
@@ -97,7 +105,7 @@ struct savearea * interrupt(
 				}
 			}
 
-			rtclock_intr(0, ssp, 0);
+			etimer_intr(USER_MODE(ssp->save_srr1), ssp->save_srr0);	/* Handle event timer */
 			break;
 	
 		case T_INTERRUPT:
@@ -130,10 +138,8 @@ struct savearea * interrupt(
 	
 				
 		default:
-#if     MACH_KDP || MACH_KDB
-                        if (!Call_Debugger(type, ssp))
-#endif
-                        unresolved_kernel_trap(type, ssp, dsisr, dar, NULL);
+			if (!Call_Debugger(type, ssp))
+				unresolved_kernel_trap(type, ssp, dsisr, dar, NULL);
 			break;
 	}
 

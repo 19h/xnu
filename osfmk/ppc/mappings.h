@@ -336,7 +336,8 @@ typedef struct mappingblok {
 #define mapRtMapDup	7
 #define mapRtGuest	8
 #define mapRtEmpty	9
-#define mapRtSmash	0xA					/* Mapping already exists and doesn't match new mapping */
+#define mapRtSmash	10					/* Mapping already exists and doesn't match new mapping */
+#define mapRtBadSz	11					/* Requested size too big or more than 256MB and not mult of 32MB */
 
 /*
  *	This struct describes available physical page configurations
@@ -364,7 +365,7 @@ extern mappingctl_t	mapCtl;				/* Mapping allocation control */
 
 extern unsigned char ppc_prot[];		/* Mach -> PPC protection translation table */
 
-#define getProtPPC(__key) (ppc_prot[(__key) & 0xF])
+vm_prot_t getProtPPC(int, boolean_t);
 										/* Safe Mach -> PPC protection key conversion */
 
 extern addr64_t 	mapping_remove(pmap_t pmap, addr64_t va);	/* Remove a single mapping for this VADDR */
@@ -400,6 +401,7 @@ extern phys_entry_t  *mapping_phys_lookup(ppnum_t pp, unsigned int *pindex);	/* 
 extern int			mapalc1(struct mappingblok *mb);			/* Finds and allcates a 1-bit mapping entry */
 extern int			mapalc2(struct mappingblok *mb);			/* Finds and allcates a 2-bit mapping entry */
 extern void			ignore_zero_fault(boolean_t type);			/* Sets up to ignore or honor any fault on page 0 access for the current thread */
+extern void			mapping_hibernate_flush(void);
 
 extern void			mapping_fake_zone_info(		/* return mapping usage stats as a fake zone info */
 						int *count,

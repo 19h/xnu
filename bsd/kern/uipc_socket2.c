@@ -81,6 +81,7 @@
 #define DBG_FNC_SBDROP	NETDBG_CODE(DBG_NETSOCK, 4)
 #define DBG_FNC_SBAPPEND	NETDBG_CODE(DBG_NETSOCK, 5)
 
+static int sbcompress(struct sockbuf *, struct mbuf *, struct mbuf *);
 
 /*
  * Primitive routines for operating on sockets and socket buffers
@@ -142,18 +143,22 @@ soisconnected(so)
 	sflt_notify(so, sock_evt_connected, NULL);
 	
 	if (head && (so->so_state & SS_INCOMP)) {
-		if (head->so_proto->pr_getlock != NULL) 
+		so->so_state &= ~SS_INCOMP;
+		so->so_state |= SS_COMP;
+		if (head->so_proto->pr_getlock != NULL) {
+			socket_unlock(so, 0);
 			socket_lock(head, 1);
+		}
 		postevent(head, 0, EV_RCONN);
 		TAILQ_REMOVE(&head->so_incomp, so, so_list);
 		head->so_incqlen--;
-		so->so_state &= ~SS_INCOMP;
 		TAILQ_INSERT_TAIL(&head->so_comp, so, so_list);
-		so->so_state |= SS_COMP;
 		sorwakeup(head);
 		wakeup_one((caddr_t)&head->so_timeo);
-		if (head->so_proto->pr_getlock != NULL) 
+		if (head->so_proto->pr_getlock != NULL) {
 			socket_unlock(head, 1);
+			socket_lock(so, 0);
+		}
 	} else {
 		postevent(so, 0, EV_WCONN);
 		wakeup((caddr_t)&so->so_timeo);
@@ -283,6 +288,14 @@ sonewconn_internal(head, connstatus)
 	so->so_pgid  = head->so_pgid;
 	so->so_uid = head->so_uid;
 	so->so_usecount = 1;
+	so->next_lock_lr = 0;
+	so->next_unlock_lr = 0;
+
+#ifdef __APPLE__
+	so->so_rcv.sb_flags |= SB_RECV;	/* XXX */
+	so->so_rcv.sb_so = so->so_snd.sb_so = so;
+	TAILQ_INIT(&so->so_evlist);
+#endif
 
 	if (soreserve(so, head->so_snd.sb_hiwat, head->so_rcv.sb_hiwat)) {
 		sflt_termsock(so);
@@ -291,16 +304,19 @@ sonewconn_internal(head, connstatus)
 	}
 
 	/*
-	 * Must be done with head unlocked to avoid deadlock with pcb list
+	 * Must be done with head unlocked to avoid deadlock for protocol with per socket mutexes.
 	 */
-	socket_unlock(head, 0);
+	if (head->so_proto->pr_unlock)
+		socket_unlock(head, 0);
 	if (((*so->so_proto->pr_usrreqs->pru_attach)(so, 0, NULL) != 0) || error) {
 		sflt_termsock(so);
 		sodealloc(so);
-		socket_lock(head, 0);
+		if (head->so_proto->pr_unlock)
+			socket_lock(head, 0);
 		return ((struct socket *)0);
 	}
-	socket_lock(head, 0);
+	if (head->so_proto->pr_unlock)
+		socket_lock(head, 0);
 #ifdef __APPLE__
 	so->so_proto->pr_domain->dom_refs++;
 #endif
@@ -314,12 +330,10 @@ sonewconn_internal(head, connstatus)
 		head->so_incqlen++;
 	}
 	head->so_qlen++;
-#ifdef __APPLE__
-	so->so_rcv.sb_so = so->so_snd.sb_so = so;
-	TAILQ_INIT(&so->so_evlist);
 
-        /* Attach socket filters for this protocol */
-        sflt_initsock(so);
+#ifdef __APPLE__
+	/* Attach socket filters for this protocol */
+	sflt_initsock(so);
 #endif
 	if (connstatus) {
 		so->so_state |= connstatus;
@@ -400,17 +414,13 @@ int
 sbwait(sb)
 	struct sockbuf *sb;
 {
-	int error = 0, lr, lr_saved;
+	int error = 0, lr_saved;
 	struct socket *so = sb->sb_so;
 	lck_mtx_t *mutex_held;
 	struct timespec ts;
 
-#ifdef __ppc__
-	__asm__ volatile("mflr %0" : "=r" (lr));
-	lr_saved = lr;
-#endif
+	lr_saved = (unsigned int) __builtin_return_address(0);
 	
-
 	if (so->so_proto->pr_getlock != NULL) 
 		mutex_held = (*so->so_proto->pr_getlock)(so, 0);
 	else 
@@ -448,12 +458,7 @@ sb_lock(sb)
 {
 	struct socket *so = sb->sb_so;
 	lck_mtx_t * mutex_held;
-	int error = 0, lr, lr_saved;
-
-#ifdef __ppc__
-	__asm__ volatile("mflr %0" : "=r" (lr));
-	lr_saved = lr;
-#endif
+	int error = 0;
 	
 	if (so == NULL)
 		panic("sb_lock: null so back pointer sb=%x\n", sb);
@@ -466,6 +471,7 @@ sb_lock(sb)
 			mutex_held = so->so_proto->pr_domain->dom_mtx;
 		if (so->so_usecount < 1)
 			panic("sb_lock: so=%x refcount=%d\n", so, so->so_usecount);
+
 		error = msleep((caddr_t)&sb->sb_flags, mutex_held,
 	    		(sb->sb_flags & SB_NOINTR) ? PSOCK : PSOCK | PCATCH, "sblock", 0);
 		if (so->so_usecount < 1)
@@ -641,12 +647,15 @@ sbappend(sb, m)
 	register struct mbuf *n, *sb_first;
 	int result = 0;
 	int error = 0;
+	int	filtered = 0;
 
 
 	KERNEL_DEBUG((DBG_FNC_SBAPPEND | DBG_FUNC_START), sb, m->m_len, 0, 0, 0);
 
 	if (m == 0)
 		return 0;
+	
+again:
 	sb_first = n = sb->sb_mb;
 	if (n) {
 		while (n->m_nextpkt)
@@ -660,21 +669,22 @@ sbappend(sb, m)
 		} while (n->m_next && (n = n->m_next));
 	}
 	
-	if ((sb->sb_flags & SB_RECV) != 0) {
-		error = sflt_data_in(sb->sb_so, NULL, &m, NULL, 0);
+	if (!filtered && (sb->sb_flags & SB_RECV) != 0) {
+		error = sflt_data_in(sb->sb_so, NULL, &m, NULL, 0, &filtered);
 		if (error) {
 			/* no data was appended, caller should not call sowakeup */
 			return 0;
 		}
-	}
-	
-	/* 3962537 - sflt_data_in may drop the lock, need to validate state again */
-	if (sb_first != sb->sb_mb) {
-		n = sb->sb_mb;
-		if (n) {
-			while (n->m_nextpkt)
-				n = n->m_nextpkt;
-		}
+		
+		/*
+		  If we any filters, the socket lock was dropped. n and sb_first
+		  cached data from the socket buffer. This cache is not valid
+		  since we dropped the lock. We must start over. Since filtered
+		  is set we won't run through the filters a second time. We just
+		  set n and sb_start again.
+		*/
+		if (filtered)
+			goto again;
 	}
 
 	result = sbcompress(sb, m, n);
@@ -727,7 +737,7 @@ sbcheck(sb)
 int
 sbappendrecord(sb, m0)
 	register struct sockbuf *sb;
-	register struct mbuf *m0;
+	struct mbuf *m0;
 {
 	register struct mbuf *m;
 	int result = 0;
@@ -736,7 +746,7 @@ sbappendrecord(sb, m0)
 		return 0;
     
 	if ((sb->sb_flags & SB_RECV) != 0) {
-		int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL, sock_data_filt_flag_record);
+		int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL, sock_data_filt_flag_record, NULL);
 		if (error != 0) {
 			if (error != EJUSTRETURN)
 				m_freem(m0);
@@ -784,7 +794,7 @@ sbinsertoob(sb, m0)
 	
 	if ((sb->sb_flags & SB_RECV) != 0) {
 		int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL,
-								 sock_data_filt_flag_oob);
+								 sock_data_filt_flag_oob, NULL);
 		
 		if (error) {
 			if (error != EJUSTRETURN) {
@@ -895,7 +905,7 @@ sbappendaddr(
 	/* Call socket data in filters */
 	if ((sb->sb_flags & SB_RECV) != 0) {
 		int error;
-		error = sflt_data_in(sb->sb_so, asa, &m0, &control, 0);
+		error = sflt_data_in(sb->sb_so, asa, &m0, &control, 0, NULL);
 		if (error) {
 			if (error != EJUSTRETURN) {
 				if (m0) m_freem(m0);
@@ -964,7 +974,7 @@ sbappendcontrol(
 	
 	if (sb->sb_flags & SB_RECV) {
 		int error;
-		error = sflt_data_in(sb->sb_so, NULL, &m0, &control, 0);
+		error = sflt_data_in(sb->sb_so, NULL, &m0, &control, 0, NULL);
 		if (error) {
 			if (error != EJUSTRETURN) {
 				if (m0) m_freem(m0);
@@ -1451,13 +1461,12 @@ void
 sbunlock(struct sockbuf *sb, int keeplocked)
 {
 	struct socket *so = sb->sb_so;
-	int lr, lr_saved;
+	int lr_saved;
 	lck_mtx_t *mutex_held;
 
-#ifdef __ppc__
-	__asm__ volatile("mflr %0" : "=r" (lr));
-	lr_saved = lr;
-#endif
+
+	lr_saved = (unsigned int) __builtin_return_address(0);
+
 	sb->sb_flags &= ~SB_LOCK; 
 
 	if (so->so_proto->pr_getlock != NULL) 
@@ -1479,7 +1488,8 @@ sbunlock(struct sockbuf *sb, int keeplocked)
 		so->so_usecount--;
 		if (so->so_usecount < 0)
 			panic("sbunlock: unlock on exit so=%x lr=%x sb_flags=%x\n", so, so->so_usecount,lr_saved, sb->sb_flags);
-		so->reserved4= lr_saved;
+		so->unlock_lr[so->next_unlock_lr] = (void *)lr_saved;
+		so->next_unlock_lr = (so->next_unlock_lr+1) % SO_LCKDBG_MAX;
 		lck_mtx_unlock(mutex_held);
 	}
 }

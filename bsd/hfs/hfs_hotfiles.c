@@ -288,12 +288,9 @@ hfs_recording_stop(struct hfsmount *hfsmp)
 	if (hfsmp->hfc_stage != HFC_RECORDING)
 		return (EPERM);
 
-	hotfiles_collect(hfsmp);
-
-	if (hfsmp->hfc_stage != HFC_RECORDING)
-		return (0);
-
 	hfsmp->hfc_stage = HFC_BUSY;
+
+	hotfiles_collect(hfsmp);
 
 	/*
 	 * Convert hot file data into a simple file id list....
@@ -759,6 +756,7 @@ hfs_addhotfile_internal(struct vnode *vp)
 
 	if ((ffp->ff_bytesread == 0) ||
 	    (ffp->ff_blocks == 0) ||
+	    (ffp->ff_size == 0) ||
 	    (ffp->ff_blocks > hotdata->maxblocks) ||
 	    (cp->c_flag & (C_DELETED | C_NOEXISTS)) ||
 	    (cp->c_flags & UF_NODUMP) ||
@@ -822,7 +820,7 @@ hfs_removehotfile(struct vnode *vp)
 	cp = VTOC(vp);
 
 	if ((ffp->ff_bytesread == 0) || (ffp->ff_blocks == 0) ||
-	    (cp->c_atime < hfsmp->hfc_timebase)) {
+	    (ffp->ff_size == 0) || (cp->c_atime < hfsmp->hfc_timebase)) {
 		return (0);
 	}
 
@@ -1225,11 +1223,13 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 	filefork_t * filefork;
 	hotfilelist_t  *listp;
 	enum hfc_stage stage;
+	u_int32_t savedtemp;
 	int  blksmoved;
 	int  filesmoved;
 	int  fileblocks;
 	int  error = 0;
 	int  startedtrans = 0;
+	int  bt_op;
 
 	if (hfsmp->hfc_stage != HFC_EVICTION) {
 		return (EBUSY);
@@ -1246,6 +1246,7 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 	hfsmp->hfc_stage = HFC_BUSY;
 
 	filesmoved = blksmoved = 0;
+	bt_op = kBTreeFirstRecord;
 
 	MALLOC(iterator, BTreeIterator *, sizeof(*iterator), M_TEMP, M_WAITOK);
 	bzero(iterator, sizeof(*iterator));
@@ -1260,7 +1261,7 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 		/*
 		 * Obtain the first record (ie the coldest one).
 		 */
-		if (BTIterateRecord(filefork, kBTreeFirstRecord, iterator, NULL, NULL) != 0) {
+		if (BTIterateRecord(filefork, bt_op, iterator, NULL, NULL) != 0) {
 #if HFC_VERBOSE
 			printf("hotfiles_evict: no more records\n");
 #endif
@@ -1299,10 +1300,7 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 
 		if (error) {
 			if (error == ENOENT) {
-				(void) BTDeleteRecord(filefork, iterator);
-				key->temperature = HFC_LOOKUPTAG;
-				(void) BTDeleteRecord(filefork, iterator);
-				goto next;  /* stale entry, go to next */
+				goto delete;  /* stale entry, go to next */
 			} else {
 				printf("hotfiles_evict: err %d getting file %d\n",
 				       error, key->fileID);
@@ -1313,10 +1311,7 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 			printf("hotfiles_evict: huh, not a file %d\n", key->fileID);
 			hfs_unlock(VTOC(vp));
 			vnode_put(vp);
-			(void) BTDeleteRecord(filefork, iterator);
-			key->temperature = HFC_LOOKUPTAG;
-			(void) BTDeleteRecord(filefork, iterator);
-			goto next;  /* invalid entry, go to next */
+			goto delete;  /* invalid entry, go to next */
 		}
 		fileblocks = VTOF(vp)->ff_blocks;
 		if ((blksmoved > 0) &&
@@ -1334,10 +1329,7 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 #endif
 			hfs_unlock(VTOC(vp));
 			vnode_put(vp);
-			(void) BTDeleteRecord(filefork, iterator);
-			key->temperature = HFC_LOOKUPTAG;
-			(void) BTDeleteRecord(filefork, iterator);
-			goto next;  /* go to next */
+			goto delete;  /* stale entry, go to next */
 		}
 		
 		/*
@@ -1348,6 +1340,7 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 			printf("hotfiles_evict: err %d relocating file %d\n", error, key->fileID);
 			hfs_unlock(VTOC(vp));
 			vnode_put(vp);
+			bt_op = kBTreeNextRecord;
 			goto next;  /* go to next */
 		}
 
@@ -1367,20 +1360,20 @@ hotfiles_evict(struct hfsmount *hfsmp, struct proc *p)
 			listp->hfl_reclaimblks = 0;
 		blksmoved += fileblocks;
 		filesmoved++;
-
+delete:
 		error = BTDeleteRecord(filefork, iterator);
 		if (error) {
-			printf("hotfiles_evict: BTDeleteRecord failed %d (fileid %d)\n", error, key->fileID);
 			error = MacToVFSError(error);
 			break;
 		}
+		savedtemp = key->temperature;
 		key->temperature = HFC_LOOKUPTAG;
 		error = BTDeleteRecord(filefork, iterator);
 		if (error) {
-			printf("hotfiles_evict: BTDeleteRecord thread failed %d (fileid %d)\n", error, key->fileID);
 			error = MacToVFSError(error);
 			break;
 		}
+		key->temperature = savedtemp;
 next:
 		(void) BTFlushPath(filefork);
 

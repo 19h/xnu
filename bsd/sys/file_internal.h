@@ -122,7 +122,8 @@ struct fileglob {
 		int	(*fo_write)	__P((struct fileproc *fp, struct uio *uio,
 					    struct ucred *cred, int flags,
 					    struct proc *p));
-#define	FOF_OFFSET	1
+#define	FOF_OFFSET	0x00000001	/* offset supplied to vn_write */
+#define FOF_PCRED	0x00000002	/* cred from proc, not current thread */
 		int	(*fo_ioctl)	__P((struct fileproc *fp, u_long com,
 					    caddr_t data, struct proc *p));
 		int	(*fo_select)	__P((struct fileproc *fp, int which,
@@ -190,8 +191,15 @@ struct kqueue;
 int fp_getfkq(struct proc *p, int fd, struct fileproc **resultfp, struct kqueue  **resultkq);
 struct psemnode;
 int fp_getfpsem(struct proc *p, int fd, struct fileproc **resultfp, struct psemnode  **resultpsem);
+struct pshmnode;
+int fp_getfpshm(struct proc *p, int fd, struct fileproc **resultfp, struct pshmnode  **resultpshm);
+struct pipe;
+int fp_getfpipe(struct proc *p, int fd, struct fileproc **resultfp, struct pipe  **resultpipe);
+struct atalk;
+int fp_getfatalk(struct proc *p, int fd, struct fileproc **resultfp, struct atalk  **resultatalk);
 struct vnode;
 int fp_getfvp(struct proc *p, int fd, struct fileproc **resultfp, struct vnode  **resultvp);
+int fp_getfvpandvid(struct proc *p, int fd, struct fileproc **resultfp, struct vnode  **resultvp, uint32_t * vidp);
 struct socket;
 int fp_getfsock(struct proc *p, int fd, struct fileproc **resultfp, struct socket  **results);
 int fp_lookup(struct proc *p, int fd, struct fileproc **resultfp, int locked);

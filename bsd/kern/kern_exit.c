@@ -295,6 +295,15 @@ proc_exit(struct proc *p)
 	 * need to cancel async IO requests that can be cancelled and wait for those
 	 * already active.  MAY BLOCK!
 	 */
+	
+	p->p_lflag |= P_LREFDRAIN;
+	while (p->p_internalref) {
+		p->p_lflag |= P_LREFDRAINWAIT;
+		msleep(&p->p_internalref, (lck_mtx_t *)0, 0, "proc_refdrain", 0) ;
+	}
+	p->p_lflag &= ~P_LREFDRAIN;
+	p->p_lflag |= P_LREFDEAD;
+
 	_aio_exit( p );
 
 	/*

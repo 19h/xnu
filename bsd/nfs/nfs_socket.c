@@ -310,7 +310,6 @@ nfs_bind_resv_nopriv(struct nfsmount *nmp)
 	if (nfs_bind_resv_thread_state < NFS_BIND_RESV_THREAD_STATE_RUNNING) {
 		if (nfs_bind_resv_thread_state < NFS_BIND_RESV_THREAD_STATE_INITTED) {
 			nfs_bind_resv_lck_grp_attr = lck_grp_attr_alloc_init();
-			lck_grp_attr_setstat(nfs_bind_resv_lck_grp_attr);
 			nfs_bind_resv_lck_grp = lck_grp_alloc_init("nfs_bind_resv", nfs_bind_resv_lck_grp_attr);
 			nfs_bind_resv_lck_attr = lck_attr_alloc_init();
 			nfs_bind_resv_mutex = lck_mtx_alloc_init(nfs_bind_resv_lck_grp, nfs_bind_resv_lck_attr);
@@ -1890,6 +1889,12 @@ nfs_timer(__unused void *arg)
 	TAILQ_FOREACH(slp, &nfssvc_sockhead, ns_chain) {
 	    if (slp->ns_wgtime && (slp->ns_wgtime <= cur_usec))
 		nfsrv_wakenfsd(slp);
+	}
+	while ((slp = TAILQ_FIRST(&nfssvc_deadsockhead))) {
+		if ((slp->ns_timestamp + 5) > now.tv_sec)
+			break;
+		TAILQ_REMOVE(&nfssvc_deadsockhead, slp, ns_chain);
+		nfsrv_slpfree(slp);
 	}
 	lck_mtx_unlock(nfsd_mutex);
 #endif /* NFS_NOSERVER */

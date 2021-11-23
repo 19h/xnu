@@ -42,7 +42,8 @@
 
 struct socket_filter;
 
-#define SFEF_DETACHING		0x1
+#define	SFEF_DETACHUSEZERO	0x1	// Detach when use reaches zero
+#define	SFEF_UNREGISTERING	0x2	// Remove due to unregister
 
 struct socket_filter_entry {
 	struct socket_filter_entry	*sfe_next_onsocket;
@@ -78,9 +79,8 @@ void	sflt_use(struct socket *so);
 void	sflt_unuse(struct socket *so);
 void	sflt_notify(struct socket *so, sflt_event_t event, void *param);
 int		sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
-					 mbuf_t *control, sflt_data_flag_t flags);
+					 mbuf_t *control, sflt_data_flag_t flags, int *filtered);
 int		sflt_attach_private(struct socket *so, struct socket_filter *filter, sflt_handle handle, int locked);
-void	sflt_detach_private(struct socket_filter_entry *entry, int filter_detached);
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -98,9 +98,7 @@ void	sflt_detach_private(struct socket_filter_entry *entry, int filter_detached)
  *  the 'where' NKE.  If the latter is NULL, the flags indicate "first"
  *  or "last"
  */
-#if __DARWIN_ALIGN_POWER
-#pragma options align=power
-#endif
+#pragma pack(4)
 
 struct so_nke
 {	unsigned int nke_handle;
@@ -109,9 +107,7 @@ struct so_nke
 	unsigned long reserved[4];	/* for future use */
 };
 
-#if __DARWIN_ALIGN_POWER
-#pragma options align=reset
-#endif
+#pragma pack()
 
 #endif /* NET_KEXT_NET_H */
 
