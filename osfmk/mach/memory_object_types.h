@@ -497,7 +497,7 @@ struct upl_page_info {
 
 	    needed:1,           /* page should be left in cache on abort */
 	    mark:1,             /* a mark flag for the creator to use as they wish */
-	reserved: 12,
+	    reserved: 12,
 	:0;                     /* force to long boundary */
 #else
 	opaque;                 /* use upl_page_xxx() accessor funcs */
@@ -563,8 +563,11 @@ typedef uint64_t upl_control_flags_t;
 #define UPL_NOZEROFILLIO        0x40000000ULL /* allow non zerofill pages present */
 #define UPL_REQUEST_FORCE_COHERENCY     0x80000000ULL
 
+
+
+#define UPL_CARRY_VA_TAG        0x10000000000ULL
 /* UPL flags known by this kernel */
-#define UPL_VALID_FLAGS         0xFFFFFFFFFFULL
+#define UPL_VALID_FLAGS         0x1FFFFFFFFFFULL
 
 
 /* upl abort error flags */
@@ -812,6 +815,7 @@ extern boolean_t        upl_has_wired_pages(upl_t upl);
 
 void upl_page_set_mark(upl_page_info_t *upl, int index, boolean_t v);
 boolean_t upl_page_get_mark(upl_page_info_t *upl, int index);
+boolean_t upl_page_is_needed(upl_page_info_t *upl, int index);
 
 #endif // KERNEL_PRIVATE
 

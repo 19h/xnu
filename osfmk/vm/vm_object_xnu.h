@@ -123,7 +123,7 @@ struct vm_object_fault_info {
 	/* boolean_t */ fi_used_for_tpro:1,
 	/* boolean_t */ fi_change_wiring:1,
 	/* boolean_t */ fi_no_sleep:1,
-	__vm_object_fault_info_unused_bits:19;
+	    __vm_object_fault_info_unused_bits:19;
 	int             pmap_options;
 };
 
@@ -140,7 +140,7 @@ struct vm_object {
 	 * the packed pointers are required to be on a 64 byte boundary
 	 * which means 2 things for the vm_object...  (1) the memq
 	 * struct has to be the first element of the structure so that
-	 * we can control it's alignment... (2) the vm_object must be
+	 * we can control its alignment... (2) the vm_object must be
 	 * aligned on a 64 byte boundary... for static vm_object's
 	 * this is accomplished via the 'aligned' attribute... for
 	 * vm_object's in the zone pool, this is accomplished by
@@ -320,7 +320,7 @@ struct vm_object {
 	vm_object_offset_t      last_alloc;     /* last allocation offset */
 	vm_offset_t             cow_hint;       /* last page present in     */
 	                                        /* shadow but not in object */
-	int                     sequential;     /* sequential access size */
+	int32_t                 sequential;     /* sequential access size */
 
 	uint32_t                pages_created;
 	uint32_t                pages_used;
@@ -363,7 +363,13 @@ struct vm_object {
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 
 	uint8_t                 scan_collisions;
-	uint8_t                 __object4_unused_bits[1];
+#if COMPRESSOR_PAGEOUT_CHEADS_MAX_COUNT > 1
+	/* This value is used for selecting a chead in the compressor for internal objects.
+	 * see rdar://140849693 for a possible way to implement the chead_hint functionality
+	 * in a way that doesn't require these bits */
+	uint8_t vo_chead_hint:COMPRESSOR_PAGEOUT_CHEADS_BITS;
+#endif /*COMPRESSOR_PAGEOUT_CHEADS_COUNT */
+	uint8_t __object4_unused_bits:8 - COMPRESSOR_PAGEOUT_CHEADS_BITS;
 	vm_tag_t                wire_tag;
 
 #if CONFIG_PHANTOM_CACHE
@@ -397,6 +403,14 @@ struct vm_object {
 	task_t vo_purgeable_volatilizer; /* who made it volatile? */
 	void *purgeable_volatilizer_bt[16];
 #endif /* DEBUG */
+
+	/*
+	 * If this object is backed by anonymous memory, this represents the ID of
+	 * the vm_map that the memory originated from (i.e. this points backwards in
+	 * shadow chains). Note that an originator is present even if the object
+	 * hasn't been faulted into the backing pmap yet.
+	 */
+	vm_map_serial_t vmo_provenance;
 };
 
 #define VM_OBJECT_PURGEABLE_FAULT_ERROR(object)                         \
@@ -565,6 +579,12 @@ extern void vm_io_reprioritize_init(void);
 
 extern void page_worker_init(void);
 
+__enum_closed_decl(vm_chead_select_t, uint32_t, {
+	CSEL_MIN = 1,
+	CSEL_BY_PID  = 1,
+	CSEL_BY_COALITION = 2,
+	CSEL_MAX = 2
+});
 
 #endif /* XNU_KERNEL_PRIVATE */
 

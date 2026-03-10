@@ -44,6 +44,7 @@
 #include <ptrauth.h>
 #endif // defined(HAS_APPLE_PAC)
 
+
 #if __x86_64__
 static void
 _backtrace_packed_out_of_reach(void)
@@ -363,7 +364,8 @@ backtrace_unpack(backtrace_pack_t packing, uintptr_t *dst, unsigned int dst_len,
 static errno_t
 _backtrace_copyin(void * __unused ctx, void *dst, user_addr_t src, size_t size)
 {
-	return copyin((user_addr_t)src, dst, size);
+	int error = copyin((user_addr_t)src, dst, size);
+	return error;
 }
 
 errno_t
@@ -384,7 +386,6 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 	const struct backtrace_control *ctl = ctl_in ?: &ctl_default;
 	uintptr_t pc = 0, next_fp = 0;
 	uintptr_t fp = ctl->btc_frame_addr;
-	bool custom_fp = fp != 0;
 	int64_t addr_offset = ctl ? ctl->btc_addr_offset : 0;
 	vm_map_t map = NULL;
 	vm_map_switch_context_t switch_ctx;
@@ -416,15 +417,18 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 	assert(max_frames > 0);
 
 	if (!custom_copy) {
-		assert(ml_get_interrupts_enabled() == TRUE);
-		if (!ml_get_interrupts_enabled()) {
+		bool interrupts_enabled = ml_get_interrupts_enabled();
+		assert(interrupts_enabled);
+		if (!interrupts_enabled) {
 			error = EDEADLK;
+			goto out;
 		}
 
 		if (cur_thread == NULL) {
 			cur_thread = current_thread();
 		}
-		if (thread != cur_thread) {
+		bool const must_switch_maps = thread != cur_thread;
+		if (must_switch_maps) {
 			map = get_task_map_reference(task);
 			if (map == NULL) {
 				error = ENOMEM;
@@ -565,10 +569,10 @@ backtrace_user(uintptr_t *bt, unsigned int max_frames,
 			break;
 		}
 
-		// Stacks grow down; backtracing should be moving to higher addresses,
-		// unless a custom frame pointer is provided, in which case, an async
-		// stack might be walked, which is allocated on the heap in any order.
-		if ((next_fp == fp) || (!custom_fp && next_fp < fp)) {
+		// User space stacks generally grow down, but in some cases can jump to a different stack.
+		// Skip the check that the frame pointer moves downward here.
+
+		if (next_fp == fp) {
 			break;
 		}
 		fp = next_fp;

@@ -60,11 +60,6 @@ struct proc_bsdinfowithuniqid {
 	struct proc_uniqidentifierinfo  p_uniqidentifier;
 };
 
-struct proc_archinfo {
-	cpu_type_t              p_cputype;
-	cpu_subtype_t           p_cpusubtype;
-};
-
 struct proc_pidcoalitioninfo {
 	uint64_t coalition_id[COALITION_NUM_TYPES];
 	uint64_t reserved1;
@@ -123,8 +118,16 @@ struct proc_delegated_signal_info {
 #define PROC_FLAG_APPLICATION 0x1000000 /* Process is an application */
 #define PROC_FLAG_IOS_APPLICATION PROC_FLAG_APPLICATION /* Process is an application */
 #define PROC_FLAG_ROSETTA 0x2000000 /* Process is running translated under Rosetta */
-#define PROC_FLAG_SEC_ENABLED 0x4000000
-#define PROC_FLAG_SEC_BYPASS_ENABLED 0x8000000
+
+/*
+ * Security config.
+ * These flags are currently folded inside pbi_flags, but per-feature policies should
+ * likely move elsewhere.
+ */
+#define PROC_FLAG_SEC_ENABLED                   0x04000000
+#define PROC_FLAG_SEC_BYPASS_ENABLED            0x08000000
+#define PROC_FLAG_HARDENED_HEAP_ENABLED         0x10000000
+#define PROC_FLAG_TPRO_ENABLED                  0x20000000
 
 /* keep in sync with KQ_* in sys/eventvar.h */
 #define PROC_KQUEUE_WORKQ       0x0040
@@ -147,9 +150,7 @@ struct kevent_extinfo {
 #define PROC_PIDT_BSDINFOWITHUNIQID_SIZE \
 	                                (sizeof(struct proc_bsdinfowithuniqid))
 
-#define PROC_PIDARCHINFO                19
-#define PROC_PIDARCHINFO_SIZE           \
-	                                (sizeof(struct proc_archinfo))
+/* PROC_PIDARCHINFO defined in sys/proc_info.h */
 
 #define PROC_PIDCOALITIONINFO           20
 #define PROC_PIDCOALITIONINFO_SIZE      (sizeof(struct proc_pidcoalitioninfo))

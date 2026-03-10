@@ -9,8 +9,8 @@ import base64
 import argparse
 import logging
 import contextlib
-import base64
 import zlib
+from operator import itemgetter
 
 long = int
 
@@ -137,7 +137,9 @@ kcdata_type_def = {
     'STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGMENTS' : 0x954,
     'STACKSHOT_KCTYPE_KERN_EXCLAVES_CRASH_THREADINFO' : 0x955,
     'STACKSHOT_KCTYPE_LATENCY_INFO_CPU': 0x956,
-
+    'STACKSHOT_KCTYPE_TASK_EXEC_META': 0x957,
+    'STACKSHOT_KCTYPE_TASK_MEMORYSTATUS': 0x958,
+    'STACKSHOT_KCTYPE_LATENCY_INFO_BUFFER': 0x95a,
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
 
     'TASK_CRASHINFO_EXTMODINFO':           0x801,
@@ -765,13 +767,6 @@ class KCData_item:
     """
     header_size = 16  # (uint32_t + uint32_t + uint64_t)
 
-    def __init__(self, item_type, item_size, item_flags, item_data):
-        self.i_type = item_type
-        self.i_size = item_size
-        self.i_flags = item_flags
-        self.i_data = item_data
-        self.i_offset = None
-
     def __init__(self, barray, pos=0):
         """ create an object by parsing data from bytes array
             returns : obj - if data is readable
@@ -788,7 +783,7 @@ class KCData_item:
 
     def GetHeaderDescription(self):
         outs = "type: 0x%x size: 0x%x flags: 0x%x  (%s)" % (self.i_type, self.i_size, self.i_flags, GetTypeNameForKey(self.i_type))
-        if not self.i_offset is None:
+        if self.i_offset is not None:
             outs = "pos: 0x%x" % self.i_offset + outs
         return outs
 
@@ -900,7 +895,9 @@ KNOWN_TYPES_COLLECTION[0x905] = KCTypeDescription(0x905, (
     KCSubTypeElement.FromBasicCtype('ts_did_throttle', KCSUBTYPE_TYPE.KC_ST_UINT32, 76),
     KCSubTypeElement.FromBasicCtype('ts_latency_qos', KCSUBTYPE_TYPE.KC_ST_UINT32, 80),
     KCSubTypeElement.FromBasicCtype('ts_pid', KCSUBTYPE_TYPE.KC_ST_INT32, 84),
-    KCSubTypeElement('ts_p_comm', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(32, 1), 88, 1)
+    KCSubTypeElement('ts_p_comm', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(32, 1), 88, 1),
+    KCSubTypeElement.FromBasicCtype('ts_uid', KCSUBTYPE_TYPE.KC_ST_UINT32, 120),
+    KCSubTypeElement.FromBasicCtype('ts_gid', KCSUBTYPE_TYPE.KC_ST_UINT32, 124)
 ),
     'task_snapshot'
 )
@@ -981,6 +978,11 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT')] =
     'task_delta_snapshot'
 )
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_TASK_EXEC_META')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_TASK_EXEC_META'), (
+    KCSubTypeElement.FromBasicCtype('tem_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
+),
+    'task_exec_meta'
+)
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_NAME')] = KCSubTypeElement('pth_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(64, 1), 0, 1)
 
@@ -1249,6 +1251,15 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_CPU')] = KC
                         KCSubTypeElement.FromBasicCtype('intercluster_buf_used', KCSUBTYPE_TYPE.KC_ST_UINT64, 80),
             ),
             'stackshot_latency_cpu')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_BUFFER')] = KCTypeDescription(GetTypeForName('STACKSHOT_LATENCY_INFO_BUFFER'),
+            (
+                        KCSubTypeElement.FromBasicCtype('cluster_type', KCSUBTYPE_TYPE.KC_ST_INT32, 0),
+                        KCSubTypeElement.FromBasicCtype('size', KCSUBTYPE_TYPE.KC_ST_UINT64, 4),
+                        KCSubTypeElement.FromBasicCtype('used', KCSUBTYPE_TYPE.KC_ST_UINT64, 12),
+                        KCSubTypeElement.FromBasicCtype('overhead', KCSUBTYPE_TYPE.KC_ST_UINT64, 20),
+            ),
+            'stackshot_latency_buffer')
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_TASK')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_LATENCY_INFO_TASK'),
             (
@@ -1544,6 +1555,15 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_EXCLAVE_TEXTLAYOUT_SEGME
         KCSubTypeElement.FromBasicCtype('layoutSegment_rawLoadAddress', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
     ), 'exclave_textlayout_segments')
 
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_TASK_MEMORYSTATUS')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_TASK_MEMORYSTATUS'),
+    (
+        KCSubTypeElement.FromBasicCtype('tms_current_memlimit', KCSUBTYPE_TYPE.KC_ST_INT32, 0),
+        KCSubTypeElement.FromBasicCtype('tms_effectivepriority', KCSUBTYPE_TYPE.KC_ST_INT32, 4),
+        KCSubTypeElement.FromBasicCtype('tms_requestedpriority', KCSUBTYPE_TYPE.KC_ST_INT32, 8),
+        KCSubTypeElement.FromBasicCtype('tms_assertionpriority', KCSUBTYPE_TYPE.KC_ST_INT32, 12),
+    ), 'task_memorystatus')
+
+
 def GetSecondsFromMATime(mat, tb):
     return (float(long(mat) * tb['numer']) / tb['denom']) / 1e9
 
@@ -1600,6 +1620,7 @@ def GetStateDescription(s):
     TH_TERMINATE2 = 0x20
     TH_WAIT_REPORT = 0x40
     TH_IDLE = 0x80
+    TH_WAKING = 0x100
     if (s & TH_WAIT):
         retval.append("TH_WAIT")
     if (s & TH_SUSP):
@@ -1616,6 +1637,8 @@ def GetStateDescription(s):
         retval.append("TH_WAIT_REPORT")
     if (s & TH_IDLE):
         retval.append("TH_IDLE")
+    if (s & TH_WAKING):
+        retval.append("TH_WAKING")
     return retval
 
 
@@ -1705,7 +1728,7 @@ def formatPortLabelID(portlabel_id, portlabels):
         if portlabels is not None:
             portlabel = portlabels.get(str(portlabel_id), {})
         portlabel_name = portlabel_domain(portlabel.get('portlabel_domain')) + " "
-        portlabel_name += portlabel.get("portlabel_name", "!!!unknown, ID {} !!!".format(portlabel_id));
+        portlabel_name += portlabel.get("portlabel_name", "!!!unknown, ID {} !!!".format(portlabel_id))
         return " {" + portlabel_name + portThrottledSuffix(portlabel.get('portlabel_flags', 0)) + "}"
     if portlabel_id < 0:
         return " {labeled, info truncated" + portThrottledSuffix(portlabel.get('portlabel_flags', 0)) + "}"
@@ -1915,27 +1938,25 @@ def FindTextLayout(text_layouts, text_layout_id):
             return layout
     return None
 
-def BinaryImagesFromExclavesLayout(layout):
-    flags = layout['exclave_textlayout_info']['etl_flags']
-    sharedCacheIndex = layout['exclave_textlayout_info'].get('sharedcache_index', 0xffffffff)
+def BinaryImagesFromExclavesLayout(textlayout):
+    flags = textlayout['exclave_textlayout_info']['etl_flags']
+    sharedCacheIndex = textlayout['exclave_textlayout_info'].get('sharedcache_index', 0xffffffff)
     layouts = [ [format_uuid(layout['layoutSegment_uuid']), layout['layoutSegment_loadAddress'], 'P'] for layout in textlayout['exclave_textlayout_segments'] ]
     # 0x4 == kExclaveTextLayoutHasSharedCache
-    if ((flags & 0x4) != 0 and sharedCacheIndex < length(layouts)):
+    if ((flags & 0x4) != 0 and sharedCacheIndex < len(layouts)):
         layouts[sharedCacheIndex][2] = "S"
     layouts.sort(key=itemgetter(1))
     return layouts
 
 def GetExclaveLibs(text_layouts, text_layout_id):
-    from operator import itemgetter
     textlayout = text_layouts.get(str(text_layout_id))
 
     # This fallback is needed to preserve compatibility with kcdata generated before rdar://123838752
     # FindTextLayout function should be removed in future
     if not textlayout or textlayout['exclave_textlayout_info']['layout_id'] != text_layout_id:
-        textlayout = FindTextLayout(text_layouts, text_layout_id) 
+        textlayout = FindTextLayout(text_layouts, text_layout_id)
 
-    return BinaryImagesFromExclavesLayout(layout)
-    
+    return BinaryImagesFromExclavesLayout(textlayout)
 
 # kcdata is json at path 'kcdata_stackshot/threads_exclave/0'
 def GetEASFrames(AllImageCatalog, kcdata, ipc_entry, notes, scid):
@@ -1952,9 +1973,9 @@ def GetEASFrames(AllImageCatalog, kcdata, ipc_entry, notes, scid):
         return []
     text_layout_id = as_info['exclave_addressspace_info']['eas_layoutid']
     addr_space_name = as_info['exclave_addressspace_name']
-    
+
     exclave_libs = GetExclaveLibs(kcdata['exclave_textlayout'], text_layout_id)
-    
+
     frames = []
     stack = ipc_entry.get('secure_ecstack_entry', [])
     for stack_item in stack:
@@ -1972,7 +1993,7 @@ def GetEASFrames(AllImageCatalog, kcdata, ipc_entry, notes, scid):
     notes.info("PID ${PID} TID ${TID} SCID %d ASID 0x%x has address space name '%s' (%s)" % (scid, asid, addr_space_name, frame_info))
     notes.addToOffset(len(frames))
     return frames
-    
+
 
 def GetExclavesFrames(AllImageCatalog, json, scid, notes):
     kcdata = json['kcdata_stackshot']
@@ -2009,7 +2030,7 @@ def GetExclavesFrames(AllImageCatalog, json, scid, notes):
         frames.extend(entry_frames)
 
     return frames
-    
+
 
 def InsertExclavesFrames(AllImageCatalog, json, thdata, notes, kernel_frames):
     thread_info = thdata.get('exclaves_thread_info')
@@ -2022,13 +2043,13 @@ def InsertExclavesFrames(AllImageCatalog, json, thdata, notes, kernel_frames):
     notes.offset = offset
 
     exclaves_frames = GetExclavesFrames(AllImageCatalog, json, scid, notes)
-    
+
     # insert exclaves frames to offset
     for i in range(len(exclaves_frames)):
         kernel_frames.insert(offset + i, exclaves_frames[i])
 
 class NotesBuilder:
-    
+
     notes = []
     pid = None
     tis = None
@@ -2045,7 +2066,7 @@ class NotesBuilder:
         note = note.replace('${PID}', str(self.pid))
         note = note.replace('${TID}', str(self.tid))
         return note + '\n'
-    
+
     def warn(self, note):
         note = self.format(note)
         sys.stdout.write(note)
@@ -2054,7 +2075,7 @@ class NotesBuilder:
     def info(self, note):
         note = self.format(note)
         self.notes.append(note)
-        
+
     def isEmpty(self):
         return len(self.notes) == 0
 
@@ -2066,7 +2087,6 @@ class NotesBuilder:
 
 def SaveStackshotReport(j, outfile_name, incomplete):
     import time
-    from operator import itemgetter, attrgetter
     ss = j.get('kcdata_stackshot')
     if not ss:
         print("No KCDATA_BUFFER_BEGIN_STACKSHOT object found. Skipping writing report.")
@@ -2099,7 +2119,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
         #
         is_intel = ('X86_64' in ss.get('osversion', "") and
            ss.get('kernel_page_size', 0) == 4096)
-        slidFirstMapping = shared_cache_info.get(SC_SLID_FIRSTMAPPING_KEY, -1);
+        slidFirstMapping = shared_cache_info.get(SC_SLID_FIRSTMAPPING_KEY, -1)
         if slidFirstMapping >= shared_cache_base_addr:
             shared_cache_base_addr = slidFirstMapping
             sc_note = "base-accurate"
@@ -2212,9 +2232,9 @@ def SaveStackshotReport(j, outfile_name, incomplete):
             ttsnap = { key[1:] : value for key,value in ttsnap.items() }
             # Add a note to let people know
             obj["notes"] = obj["notes"] + "PID {} is a transitioning (exiting) task. ".format(pid)
-        tasksnap = piddata.get('task_snapshot', ttsnap);
+        tasksnap = piddata.get('task_snapshot', ttsnap)
         if tasksnap is None:
-            continue;
+            continue
         tsnap["pid"] = tasksnap["ts_pid"]
         if 'ts_asid' in piddata:
             tsnap["asid"] = piddata["ts_asid"]
@@ -2257,7 +2277,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
             thsnap["qosRequested"] = threadsnap["ths_rqos"]
 
             if "pth_name" in thdata:
-                thsnap["name"] = thdata["pth_name"];
+                thsnap["name"] = thdata["pth_name"]
 
             if threadsnap['ths_continuation']:
                 thsnap["continuation"] = GetSymbolInfoForFrame(AllImageCatalog, pr_libs, threadsnap['ths_continuation'])
@@ -2339,7 +2359,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
 def data_from_stream(stream):
     try:
         fmap = mmap.mmap(stream.fileno(), 0, mmap.MAP_SHARED, mmap.PROT_READ)
-    except:
+    except Exception:
         yield stream.buffer.read()
     else:
         try:
@@ -2366,7 +2386,7 @@ def iterate_kcdatas(kcdata_file):
         if not isinstance(kcdata_buffer, KCBufferObject):
             try:
                 decoded = base64.b64decode(data)
-            except:
+            except Exception:
                 pass
             else:
                 iterator = kcdata_item_iterator(decoded)
@@ -2376,7 +2396,7 @@ def iterate_kcdatas(kcdata_file):
             from io import BytesIO
             try:
                 decompressed = gzip.GzipFile(fileobj=BytesIO(data[:])).read()
-            except:
+            except Exception:
                 pass
             else:
                 iterator = kcdata_item_iterator(decompressed)
@@ -2503,6 +2523,7 @@ PRETTIFY_FLAGS = {
         'TH_TERMINATE2',
         'TH_WAIT_REPORT',
         'TH_IDLE',
+        'TH_WAKING',
     ],
     'ts_ss_flags': [
         'kUser64_p',
@@ -2544,6 +2565,10 @@ PRETTIFY_FLAGS = {
         'kTaskDyldCompactInfoTriedFault',
         'kTaskWqExceededCooperativeThreadLimit',
         'kTaskWqExceededActiveConstrainedThreadLimit',
+        'kTaskRunawayMitigated',
+        'kTaskIsActive',
+        'kTaskIsManaged',
+        'kTaskHasAssertion',
     ],
     'turnstile_flags': [
         'turnstile_status_unknown',
@@ -2666,7 +2691,7 @@ def decode_kcdata_file(kcdata_file, stackshot_file, multiple=False, prettyhex=Fa
 
         try:
             json_obj = json.loads(str_data)
-        except:
+        except Exception:
             print("JSON reparsing failed!  Printing string data!\n", file=sys.stderr)
             import textwrap
             print(textwrap.fill(str_data, 100))

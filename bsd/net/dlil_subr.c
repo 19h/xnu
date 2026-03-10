@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2024 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2025 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -57,32 +57,6 @@ uint32_t dlil_pending_thread_cnt = 0;
 __private_extern__ void link_rtrequest(int, struct rtentry *, struct sockaddr *);
 __private_extern__ void if_rtproto_del(struct ifnet *ifp, int protocol);
 
-
-/*
- * Allocation zones
- */
-unsigned int dlif_size;          /* size of dlil_ifnet to allocate */
-unsigned int dlif_bufsize;       /* size of dlif_size + headroom */
-ZONE_DECLARE(dlif_zone, struct dlil_ifnet);
-#define DLIF_ZONE_NAME          "ifnet" /* zone name */
-zone_t dlif_zone;                       /* zone for dlil_ifnet */
-
-unsigned int dlif_tcpstat_size;  /* size of tcpstat_local to allocate */
-unsigned int dlif_tcpstat_bufsize; /* size of dlif_tcpstat_size + headroom */
-ZONE_DECLARE(dlif_tcpstat_zone, struct ifnet_tcpstat);
-#define DLIF_TCPSTAT_ZONE_NAME  "ifnet_tcpstat" /* zone name */
-zone_t dlif_tcpstat_zone;                       /* zone for tcpstat_local */
-
-unsigned int dlif_udpstat_size;  /* size of udpstat_local to allocate */
-unsigned int dlif_udpstat_bufsize;       /* size of dlif_udpstat_size + headroom */
-ZONE_DECLARE(dlif_udpstat_zone, struct ifnet_udpstat);
-#define DLIF_UDPSTAT_ZONE_NAME  "ifnet_udpstat" /* zone name */
-zone_t dlif_udpstat_zone;                       /* zone for udpstat_local */
-
-KALLOC_TYPE_DEFINE(dlif_filt_zone, struct ifnet_filter, NET_KT_DEFAULT);
-
-KALLOC_TYPE_DEFINE(dlif_proto_zone, struct if_proto, NET_KT_DEFAULT);
-
 /*
  * Utility routines
  */
@@ -134,34 +108,6 @@ packet_has_vlan_tag(struct mbuf * m)
 	return tag != 0;
 }
 
-void
-log_hexdump(void *__sized_by(len) data, size_t len)
-{
-	size_t i, j, k;
-	unsigned char *ptr = (unsigned char *)data;
-#define MAX_DUMP_BUF 32
-	unsigned char buf[3 * MAX_DUMP_BUF + 1];
-
-	for (i = 0; i < len; i += MAX_DUMP_BUF) {
-		for (j = i, k = 0; j < i + MAX_DUMP_BUF && j < len; j++) {
-			unsigned char msnbl = ptr[j] >> 4;
-			unsigned char lsnbl = ptr[j] & 0x0f;
-
-			buf[k++] = msnbl < 10 ? msnbl + '0' : msnbl + 'a' - 10;
-			buf[k++] = lsnbl < 10 ? lsnbl + '0' : lsnbl + 'a' - 10;
-
-			if ((j % 2) == 1) {
-				buf[k++] = ' ';
-			}
-			if ((j % MAX_DUMP_BUF) == MAX_DUMP_BUF - 1) {
-				buf[k++] = ' ';
-			}
-		}
-		buf[k] = 0;
-		os_log(OS_LOG_DEFAULT, "%3lu: %s", i, buf);
-	}
-}
-
 /*
  * Monitor functions.
  */
@@ -207,149 +153,75 @@ if_flt_monitor_leave(struct ifnet *ifp)
 	}
 }
 
-/*
- * Allocation routines
- */
-void
-dlil_allocation_zones_init(void)
-{
-	dlif_size = (ifnet_debug == 0) ? sizeof(struct dlil_ifnet) :
-	    sizeof(struct dlil_ifnet_dbg);
-	/* Enforce 64-bit alignment for dlil_ifnet structure */
-	dlif_bufsize = dlif_size + sizeof(void *) + sizeof(u_int64_t);
-	dlif_bufsize = (uint32_t)P2ROUNDUP(dlif_bufsize, sizeof(u_int64_t));
-	dlif_zone = zone_create(DLIF_ZONE_NAME, dlif_bufsize, ZC_ZFREE_CLEARMEM);
-
-	dlif_tcpstat_size = sizeof(struct tcpstat_local);
-	/* Enforce 64-bit alignment for tcpstat_local structure */
-	dlif_tcpstat_bufsize =
-	    dlif_tcpstat_size + sizeof(void *) + sizeof(u_int64_t);
-	dlif_tcpstat_bufsize = (uint32_t)
-	    P2ROUNDUP(dlif_tcpstat_bufsize, sizeof(u_int64_t));
-	dlif_tcpstat_zone = zone_create(DLIF_TCPSTAT_ZONE_NAME,
-	    dlif_tcpstat_bufsize, ZC_ZFREE_CLEARMEM);
-
-	dlif_udpstat_size = sizeof(struct udpstat_local);
-	/* Enforce 64-bit alignment for udpstat_local structure */
-	dlif_udpstat_bufsize =
-	    dlif_udpstat_size + sizeof(void *) + sizeof(u_int64_t);
-	dlif_udpstat_bufsize = (uint32_t)
-	    P2ROUNDUP(dlif_udpstat_bufsize, sizeof(u_int64_t));
-	dlif_udpstat_zone = zone_create(DLIF_UDPSTAT_ZONE_NAME,
-	    dlif_udpstat_bufsize, ZC_ZFREE_CLEARMEM);
-}
-
-static void
-_dlil_alloc_aligned_object(struct zone *zone,
-    size_t buffer_size, void *__indexable *__single pbuffer,
-    size_t object_size, void *__indexable *__single pobject)
-{
-	void *base, *buf, **pbuf;
-
-	void *__unsafe_indexable addr = __zalloc_flags(zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
-	__builtin_assume(addr != NULL);
-	buf = __unsafe_forge_bidi_indexable(void*, addr, buffer_size);
-
-	/* Get the 64-bit aligned base address for this object */
-	base = (void*)((char*)buf + (P2ROUNDUP((intptr_t)buf + sizeof(u_int64_t), sizeof(u_int64_t)) - (intptr_t)buf));
-	VERIFY(((intptr_t)base + object_size) <=
-	    ((intptr_t)buf + buffer_size));
-
-	/*
-	 * Wind back a pointer size from the aligned base and
-	 * save the original address so we can free it later.
-	 */
-	pbuf = __unsafe_forge_bidi_indexable(void**, (intptr_t)base - sizeof(void *), sizeof(void *));
-	*pbuf = buf;
-	*pbuffer = buf;
-	*pobject = base;
-}
-
-static void
-_dlil_free_aligned_object(struct zone *zone, void *pobject)
-{
-	if (pobject != NULL) {
-		void *__single *pbuf;
-		pbuf = __unsafe_forge_single(void**, ((intptr_t)pobject - sizeof(void*)));
-		zfree(zone, *pbuf);
-	}
-}
 
 struct dlil_ifnet *
 dlif_ifnet_alloc(void)
 {
-	void *__indexable base, *__indexable buf;
-	_dlil_alloc_aligned_object(dlif_zone,
-	    dlif_bufsize, &buf,
-	    dlif_size, &base);
-
-	return base;
+	return kalloc_type(struct dlil_ifnet, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 }
 
 void
 dlif_ifnet_free(struct dlil_ifnet *ifnet)
 {
-	_dlil_free_aligned_object(dlif_zone, ifnet);
+	if (ifnet != NULL) {
+		kfree_type(struct dlil_ifnet, ifnet);
+	}
 }
 
 struct ifnet_filter *
 dlif_filt_alloc(void)
 {
-	return zalloc_flags(dlif_filt_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	return kalloc_type(struct ifnet_filter, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 }
 
 void
 dlif_filt_free(struct ifnet_filter *filt)
 {
 	if (filt != NULL) {
-		zfree(dlif_filt_zone, filt);
+		kfree_type(struct ifnet_filter, filt);
 	}
 }
 
 struct if_proto *
 dlif_proto_alloc(void)
 {
-	return zalloc_flags(dlif_proto_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	return kalloc_type(struct if_proto, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 }
 
 void
 dlif_proto_free(struct if_proto *ifproto)
 {
 	if (ifproto != NULL) {
-		zfree(dlif_proto_zone, ifproto);
+		kfree_type(struct if_proto, ifproto);
 	}
 }
 
 struct tcpstat_local *
 dlif_tcpstat_alloc(void)
 {
-	void *__indexable base, *__indexable buf;
-	_dlil_alloc_aligned_object(dlif_tcpstat_zone,
-	    dlif_tcpstat_bufsize, &buf,
-	    dlif_tcpstat_size, &base);
-	return base;
+	return kalloc_type(struct tcpstat_local, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 }
 
 void
 dlif_tcpstat_free(struct tcpstat_local *if_tcp_stat)
 {
-	_dlil_free_aligned_object(dlif_tcpstat_zone, if_tcp_stat);
+	if (if_tcp_stat != NULL) {
+		kfree_type(struct tcpstat_local, if_tcp_stat);
+	}
 }
 
 struct udpstat_local *
 dlif_udpstat_alloc(void)
 {
-	void *__indexable base, *__indexable buf;
-	_dlil_alloc_aligned_object(dlif_udpstat_zone,
-	    dlif_udpstat_bufsize, &buf,
-	    dlif_udpstat_size, &base);
-	return base;
+	return kalloc_type(struct udpstat_local, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 }
 
 void
 dlif_udpstat_free(struct udpstat_local *if_udp_stat)
 {
-	_dlil_free_aligned_object(dlif_tcpstat_zone, if_udp_stat);
+	if (if_udp_stat != NULL) {
+		kfree_type(struct udpstat_local, if_udp_stat);
+	}
 }
 
 struct ifaddr *
@@ -538,9 +410,6 @@ dlil_if_ref(struct ifnet *ifp)
 		panic("%s: wraparound refcnt for ifp=%p", __func__, ifp);
 		/* NOTREACHED */
 	}
-	if (dl_if->dl_if_trace != NULL) {
-		(*dl_if->dl_if_trace)(dl_if, TRUE);
-	}
 	lck_mtx_unlock(&dl_if->dl_if_lock);
 
 	return 0;
@@ -571,9 +440,6 @@ dlil_if_free(struct ifnet *ifp)
 		break;
 	}
 	--dl_if->dl_if_refcnt;
-	if (dl_if->dl_if_trace != NULL) {
-		(*dl_if->dl_if_trace)(dl_if, FALSE);
-	}
 	lck_mtx_unlock(&dl_if->dl_if_lock);
 	if (need_release) {
 		_dlil_if_release(ifp, true);
@@ -826,10 +692,18 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	boolean_t is_first_frag = TRUE;
 	boolean_t is_last_frag = TRUE;
 
-	pbuf_init_mbuf(&pbuf_store, *m, ifp);
-	pbuf = &pbuf_store;
-	iph = pbuf->pb_data;
+	/*
+	 * Ensure that the incoming mbuf chain contains a valid
+	 * IPv4 header in contiguous memory, or exit early.
+	 */
+	if ((size_t)(*m)->m_pkthdr.len < sizeof(struct ip) ||
+	    ((size_t)(*m)->m_len < sizeof(struct ip) &&
+	    (*m = m_pullup(*m, sizeof(struct ip))) == NULL)) {
+		ip6stat.ip6s_clat464_in_tooshort_drop++;
+		return -1;
+	}
 
+	iph = mtod(*m, struct ip *);
 	osrc = iph->ip_src;
 	odst = iph->ip_dst;
 	proto = iph->ip_p;
@@ -838,6 +712,15 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	ip_frag_off = ntohs(iph->ip_off) & IP_OFFMASK;
 
 	tot_len = ntohs(iph->ip_len);
+
+	/* Validate that mbuf contains IP payload equal to `iph->ip_len' */
+	if ((size_t)(*m)->m_pkthdr.len < tot_len) {
+		ip6stat.ip6s_clat464_in_tooshort_drop++;
+		return -1;
+	}
+
+	pbuf_init_mbuf(&pbuf_store, *m, ifp);
+	pbuf = &pbuf_store;
 
 	/*
 	 * For packets that are not first frags
@@ -884,8 +767,12 @@ dlil_clat46(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 		goto cleanup;
 	}
 
-
-	/* Translate the IP header part first */
+	/*
+	 * Translate the IP header part first.
+	 * NOTE: `nat464_translate_46' handles the situation where the value
+	 * `off' is past the end of the mbuf chain that is associated with
+	 * the pbuf, in a graceful manner.
+	 */
 	error = (nat464_translate_46(pbuf, off, iph->ip_tos, iph->ip_p,
 	    iph->ip_ttl, src_storage, dstsock.sin6_addr, tot_len) == NT_NAT64) ? 0 : -1;
 
@@ -963,7 +850,10 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	uint8_t tos = 0;
 	boolean_t is_first_frag = TRUE;
 
-	/* Incoming mbuf does not contain valid IP6 header */
+	/*
+	 * Ensure that the incoming mbuf chain contains a valid
+	 * IPv6 header in contiguous memory, or exit early.
+	 */
 	if ((size_t)(*m)->m_pkthdr.len < sizeof(struct ip6_hdr) ||
 	    ((size_t)(*m)->m_len < sizeof(struct ip6_hdr) &&
 	    (*m = m_pullup(*m, sizeof(struct ip6_hdr))) == NULL)) {
@@ -996,12 +886,13 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 	 * CLAT46 IPv6 address
 	 */
 	if (IN6_ARE_ADDR_EQUAL(&odst, &ia6_clat_dst->ia_addr.sin6_addr)) {
+		bool translate = false;
 		pbuf_t pbuf_store, *pbuf = NULL;
 		pbuf_init_mbuf(&pbuf_store, *m, ifp);
 		pbuf = &pbuf_store;
 
 		/*
-		 * Retrive the local CLAT46 IPv4 address reserved for stateless
+		 * Retrieve the local CLAT46 IPv4 address reserved for stateless
 		 * translation.
 		 */
 		ia4_clat_dst = inifa_ifpclatv4(ifp);
@@ -1015,9 +906,19 @@ dlil_clat64(ifnet_t ifp, protocol_family_t *proto_family, mbuf_t *m)
 
 		/* Translate IPv6 src to IPv4 src by removing the NAT64 prefix */
 		dst = &ia4_clat_dst->ia_addr.sin_addr;
-		if ((error = nat464_synthesize_ipv4(ifp, &osrc, &src)) != 0) {
+		error = nat464_synthesize_ipv4(ifp, &osrc, &src, &translate);
+		if (error != 0) {
 			ip6stat.ip6s_clat464_in_v4synthfail_drop++;
 			error = -1;
+			goto cleanup;
+		}
+		if (!translate) {
+			/* no translation required */
+			if (ip6h->ip6_nxt != IPPROTO_ICMPV6) {
+				/* only allow icmpv6 */
+				ip6stat.ip6s_clat464_in_v4synthfail_drop++;
+				error = -1;
+			}
 			goto cleanup;
 		}
 
@@ -1069,7 +970,7 @@ cleanup:
 			ip6stat.ip6s_clat464_in_invalpbuf_drop++;
 		}
 
-		if (error == 0) {
+		if (error == 0 && translate) {
 			*proto_family = PF_INET;
 			ip6stat.ip6s_clat464_in_success++;
 		}

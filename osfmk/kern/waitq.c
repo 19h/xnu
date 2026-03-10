@@ -200,7 +200,7 @@ static_assert(__alignof(struct waitq) == WQ_OPAQUE_ALIGN, "waitq structure align
 static KALLOC_TYPE_DEFINE(waitq_sellink_zone, struct waitq_sellink, KT_PRIV_ACCT);
 static KALLOC_TYPE_DEFINE(waitq_link_zone, struct waitq_link, KT_PRIV_ACCT);
 ZONE_DEFINE_ID(ZONE_ID_SELECT_SET, "select_set", struct select_set,
-    ZC_SEQUESTER | ZC_NOPGZ | ZC_ZFREE_CLEARMEM);
+    ZC_SEQUESTER | ZC_ZFREE_CLEARMEM);
 
 static LCK_GRP_DECLARE(waitq_lck_grp, "waitq");
 
@@ -377,17 +377,15 @@ static SECURITY_READ_ONLY_LATE(uint32_t) g_num_waitqs = 1;
 #define _CAST_TO_EVENT_MASK(event) \
 	((waitq_flags_t)(uintptr_t)(event) & ((1ul << _EVENT_MASK_BITS) - 1ul))
 
-static inline uint32_t
-waitq_hash(char *key, size_t length)
-{
-	return os_hash_jenkins(key, length) & (g_num_waitqs - 1);
-}
-
 /* return a global waitq pointer corresponding to the given event */
 struct waitq *
-_global_eventq(char *event, size_t event_length)
+_global_eventq(event64_t event)
 {
-	return &global_waitqs[waitq_hash(event, event_length)];
+	/*
+	 * this doesn't use os_hash_kernel_pointer() because
+	 * some clients use "numbers" here.
+	 */
+	return &global_waitqs[os_hash_uint64(event) & (g_num_waitqs - 1)];
 }
 
 bool
@@ -621,8 +619,10 @@ waitq_wait_possible(thread_t thread)
 	       ((thread->state & TH_WAKING) == 0);
 }
 
+__static_testable void waitq_bootstrap(void);
+
 __startup_func
-static void
+__static_testable void
 waitq_bootstrap(void)
 {
 	const uint32_t qsz = sizeof(struct waitq);
@@ -712,19 +712,19 @@ static const struct hw_spin_policy waitq_spin_policy = {
 	.hwsp_op_timeout        = waitq_timeout_handler,
 };
 
-void
+__mockable void
 waitq_invalidate(waitq_t waitq)
 {
 	hw_lck_ticket_invalidate(&waitq.wq_q->waitq_interlock);
 }
 
-bool
+__mockable bool
 waitq_held(waitq_t wq)
 {
 	return hw_lck_ticket_held(&wq.wq_q->waitq_interlock);
 }
 
-void
+__mockable void
 waitq_lock(waitq_t wq)
 {
 	(void)hw_lck_ticket_lock_to(&wq.wq_q->waitq_interlock,
@@ -734,7 +734,7 @@ waitq_lock(waitq_t wq)
 #endif
 }
 
-bool
+__mockable bool
 waitq_lock_try(waitq_t wq)
 {
 	bool rc = hw_lck_ticket_lock_try(&wq.wq_q->waitq_interlock, &waitq_lck_grp);
@@ -753,7 +753,7 @@ waitq_lock_reserve(waitq_t wq, uint32_t *ticket)
 	return hw_lck_ticket_reserve(&wq.wq_q->waitq_interlock, ticket, &waitq_lck_grp);
 }
 
-void
+__mockable void
 waitq_lock_wait(waitq_t wq, uint32_t ticket)
 {
 	(void)hw_lck_ticket_wait(&wq.wq_q->waitq_interlock, ticket,
@@ -779,7 +779,7 @@ waitq_lock_allow_invalid(waitq_t wq)
 	return rc == HW_LOCK_ACQUIRED;
 }
 
-void
+__mockable void
 waitq_unlock(waitq_t wq)
 {
 	assert(waitq_held(wq));
@@ -1202,23 +1202,6 @@ do_waitq_select_n_locked_sets(waitq_t waitq, struct waitq_select_args *args)
 		}
 
 		if (wq_type == WQT_SELECT) {
-			/*
-			 * If PGZ picked this select set,
-			 * translate it to the real address
-			 *
-			 * If it is still a select set
-			 * (the slot could have been reused),
-			 * then keep using it for the rest of the logic.
-			 *
-			 * Even in the extremely unlikely case where
-			 * the slot was reused for another select_set,
-			 * the `wql_sellink_valid` check below will
-			 * take care of debouncing it. But we must
-			 * forget the original pointer we read
-			 * so that we unlock the proper object.
-			 */
-			wqset.wqs_sel = pgz_decode_allow_invalid(wqset.wqs_sel,
-			    ZONE_ID_SELECT_SET);
 			if (!wqset.wqs_sel) {
 				continue;
 			}
@@ -1512,7 +1495,7 @@ waitq_should_enable_interrupts(waitq_wakeup_flags_t flags)
 	return (flags & (WAITQ_UNLOCK | WAITQ_KEEP_LOCKED | WAITQ_ENABLE_INTERRUPTS)) == (WAITQ_UNLOCK | WAITQ_ENABLE_INTERRUPTS);
 }
 
-kern_return_t
+__mockable uint32_t
 waitq_wakeup64_nthreads_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
@@ -1523,7 +1506,7 @@ waitq_wakeup64_nthreads_locked(
 	struct waitq_select_args args = {
 		.event = wake_event,
 		.result = result,
-		.flags = (nthreads == 1) ? flags: (flags & ~WAITQ_HANDOFF),
+		.flags = (nthreads == 1) ? flags : (flags & ~WAITQ_HANDOFF),
 		.max_threads = nthreads,
 	};
 
@@ -1549,11 +1532,7 @@ waitq_wakeup64_nthreads_locked(
 		waitq_select_queue_flush(waitq, &args);
 	}
 
-	if (args.nthreads > 0) {
-		return KERN_SUCCESS;
-	}
-
-	return KERN_NOT_WAITING;
+	return args.nthreads;
 }
 
 kern_return_t
@@ -1563,7 +1542,11 @@ waitq_wakeup64_all_locked(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	return waitq_wakeup64_nthreads_locked(waitq, wake_event, result, flags, UINT32_MAX);
+	uint32_t count;
+
+	count = waitq_wakeup64_nthreads_locked(waitq, wake_event, result,
+	    flags, UINT32_MAX);
+	return count ? KERN_SUCCESS : KERN_NOT_WAITING;
 }
 
 kern_return_t
@@ -1573,19 +1556,22 @@ waitq_wakeup64_one_locked(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	return waitq_wakeup64_nthreads_locked(waitq, wake_event, result, flags, 1);
+	uint32_t count;
+
+	count = waitq_wakeup64_nthreads_locked(waitq, wake_event, result,
+	    flags, 1);
+	return count ? KERN_SUCCESS : KERN_NOT_WAITING;
 }
 
-thread_t
+__mockable thread_t
 waitq_wakeup64_identify_locked(
 	waitq_t                 waitq,
 	event64_t               wake_event,
-	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
 	struct waitq_select_args args = {
 		.event = wake_event,
-		.result = result,
+		.result = THREAD_AWAKENED, /* this won't be used */
 		.flags = flags,
 		.max_threads = 1,
 		.is_identified = true,
@@ -1617,7 +1603,7 @@ waitq_wakeup64_identify_locked(
 	return THREAD_NULL;
 }
 
-void
+__mockable void
 waitq_resume_identified_thread(
 	waitq_t                 waitq,
 	thread_t                thread,
@@ -2331,7 +2317,7 @@ waitq_assert_wait64_leeway(struct waitq *waitq,
 	return ret;
 }
 
-kern_return_t
+uint32_t
 waitq_wakeup64_nthreads(
 	waitq_t                 waitq,
 	event64_t               wake_event,
@@ -2361,7 +2347,11 @@ waitq_wakeup64_all(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	return waitq_wakeup64_nthreads(waitq, wake_event, result, flags, UINT32_MAX);
+	uint32_t count;
+
+	count = waitq_wakeup64_nthreads(waitq, wake_event, result,
+	    flags, UINT32_MAX);
+	return count ? KERN_SUCCESS : KERN_NOT_WAITING;
 }
 
 kern_return_t
@@ -2371,7 +2361,10 @@ waitq_wakeup64_one(
 	wait_result_t           result,
 	waitq_wakeup_flags_t    flags)
 {
-	return waitq_wakeup64_nthreads(waitq, wake_event, result, flags, 1);
+	uint32_t count;
+
+	count = waitq_wakeup64_nthreads(waitq, wake_event, result, flags, 1);
+	return count ? KERN_SUCCESS : KERN_NOT_WAITING;
 }
 
 kern_return_t
@@ -2413,7 +2406,7 @@ waitq_wakeup64_identify(
 	waitq_lock(waitq);
 
 	thread_t thread = waitq_wakeup64_identify_locked(waitq, wake_event,
-	    result, flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
+	    flags | waitq_flags_splx(spl) | WAITQ_UNLOCK);
 	/* waitq is unlocked, thread is not go-ed yet */
 	/* preemption disabled if thread non-null */
 	/* splx is handled */
@@ -2433,6 +2426,7 @@ waitq_wakeup64_identify(
 #pragma mark tests
 #if DEBUG || DEVELOPMENT
 
+#include <ipc/ipc_space.h>
 #include <ipc/ipc_pset.h>
 #include <sys/errno.h>
 
@@ -2503,6 +2497,8 @@ wqt_wqset_create(void)
 	struct waitq_set *wqset;
 
 	wqset = &ipc_pset_alloc_special(ipc_space_kernel)->ips_wqset;
+	waitq_unlock(wqset);
+
 	printf("[WQ]: created waitq set %p\n", wqset);
 	return wqset;
 }

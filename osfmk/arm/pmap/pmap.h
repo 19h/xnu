@@ -241,20 +241,20 @@ typedef struct pmap_cpu_data pmap_cpu_data_t;
  * This indicates (roughly) where there is free space for the VM
  * to use for the heap; this does not need to be precise.
  */
-#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR)
 #if defined(ARM_LARGE_MEMORY)
 #define KERNEL_PMAP_HEAP_RANGE_START (VM_MIN_KERNEL_AND_KEXT_ADDRESS+ARM_TT_L1_SIZE)
 #else /* defined(ARM_LARGE_MEMORY) */
 #define KERNEL_PMAP_HEAP_RANGE_START VM_MIN_KERNEL_AND_KEXT_ADDRESS
 #endif /* defined(ARM_LARGE_MEMORY) */
-#else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+#else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR) */
 #if defined(ARM_LARGE_MEMORY)
 /* For large memory systems with no KTRR/CTRR such as virtual machines */
 #define KERNEL_PMAP_HEAP_RANGE_START (VM_MIN_KERNEL_AND_KEXT_ADDRESS+ARM_TT_L1_SIZE)
 #else
 #define KERNEL_PMAP_HEAP_RANGE_START LOW_GLOBAL_BASE_ADDRESS
 #endif
-#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR) */
 
 /**
  * For setups where the VM page size does not match the hardware page size (the
@@ -737,7 +737,9 @@ void pmap_abandon_measurement(void);
 #define PMAP_CHECK_TRUST_CACHE_RUNTIME_FOR_UUID_INDEX 109
 #define PMAP_IMAGE4_MONITOR_TRAP_INDEX 110
 
-#define PMAP_COUNT 111
+#define PMAP_SET_SHARED_REGION_INDEX 111
+
+#define PMAP_COUNT 112
 
 
 /**
@@ -814,7 +816,6 @@ extern boolean_t pmap_is_monitor(ppnum_t pn);
  */
 extern void pmap_static_allocations_done(void);
 
-
 #ifdef KASAN
 #define PPL_STACK_SIZE (PAGE_SIZE << 2)
 #else /* KASAN */
@@ -848,6 +849,7 @@ extern void pmap_static_allocations_done(void);
 #define MARK_AS_PMAP_RODATA
 
 #endif /* XNU_MONITOR */
+
 
 /*
  * Indicates that we are done mutating sensitive state in the system, and that
@@ -888,11 +890,24 @@ extern kern_return_t pmap_test_text_corruption(pmap_paddr_t);
 #endif /* #ifndef ASSEMBLER */
 
 #if __ARM_KERNEL_PROTECT__
+
+/*
+ * The (full/uncontracted) size of the kernel address space.
+ */
+#define KERN_ADDRESS_SPACE_SIZE (ARM_PTE_T1_REGION_MASK(TCR_EL1_BOOT) + 1)
+
+/*
+ * Size of the kernel protect region portion of the address space. This region will be unmapped in
+ * EL0.
+ */
+#define KERN_PROTECT_REGION_SIZE (KERN_ADDRESS_SPACE_SIZE / 2ULL)
+
 /*
  * The exception vector mappings start at the middle of the kernel page table
  * range (so that the EL0 mapping can be located at the base of the range).
  */
-#define ARM_KERNEL_PROTECT_EXCEPTION_START ((~((ARM_TT_ROOT_SIZE + ARM_TT_ROOT_INDEX_MASK) / 2ULL)) + 1ULL)
+#define ARM_KERNEL_PROTECT_EXCEPTION_START (0ULL - KERN_PROTECT_REGION_SIZE)
+
 #endif /* __ARM_KERNEL_PROTECT__ */
 
 #endif /* #ifndef _ARM_PMAP_H_ */

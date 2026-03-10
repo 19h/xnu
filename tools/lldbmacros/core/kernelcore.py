@@ -11,6 +11,10 @@ from .caching import (
     cache_statically,
 )
 from utils import *
+from ctypes import (
+    c_uint64,
+    c_int64,
+)
 
 import lldb
 
@@ -486,13 +490,13 @@ class KernelTarget(object):
         if self.arch != 'arm64e':
             return addr
         T0Sz = self.GetGlobalVariable('gT0Sz')
-        return StripPAC(addr, T0Sz)
+        return CanonicalAddress(addr, T0Sz)
 
     def StripKernelPAC(self, addr):
         if self.arch != 'arm64e':
             return addr
         T1Sz = self.GetGlobalVariable('gT1Sz')
-        return StripPAC(addr, T1Sz)
+        return CanonicalAddress(addr, T1Sz)
 
     PAGE_PROTECTION_TYPE_NONE = 0
     PAGE_PROTECTION_TYPE_PPL = 1
@@ -667,3 +671,24 @@ class KernelTarget(object):
             return 0xffffff8000000000 - 0x80000000
         else:
             return 0xffffffe00000000
+
+def _swap32(i):
+    return struct.unpack("<I", struct.pack(">I", i))[0]
+
+def OSHashPointer(ptr):
+    h  = c_uint64(c_int64(int(ptr) << 16).value >> 20).value
+    h *= 0x5052acdb
+    h &= 0xffffffff
+    return (h ^ _swap32(h)) & 0xffffffff
+
+def OSHashU64(u64):
+    u64  = c_uint64(int(u64)).value
+    u64 ^= (u64 >> 31)
+    u64 *= 0x7fb5d329728ea185
+    u64 &= 0xffffffffffffffff
+    u64 ^= (u64 >> 27)
+    u64 *= 0x81dadef4bc2dd44d
+    u64 &= 0xffffffffffffffff
+    u64 ^= (u64 >> 33)
+
+    return u64 & 0xffffffff

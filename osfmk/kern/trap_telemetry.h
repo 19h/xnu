@@ -45,6 +45,8 @@ __enum_decl(trap_telemetry_ca_event_t, uint8_t, {
 
 	TRAP_TELEMETRY_CA_EVENT_INTERNAL = 2,
 
+	TRAP_TELEMETRY_CA_EVENT_LATENCY = 3,
+
 	/** Used for validation, keep this value last. */
 	TRAP_TELEMETRY_CA_EVENT_COUNT,
 });
@@ -72,6 +74,19 @@ typedef struct {
 	    report_once_per_site:1;
 } trap_telemetry_options_s;
 
+typedef struct {
+	uint64_t violation_cpi;
+	uint64_t violation_freq;
+	uint64_t violation_duration;
+	uint64_t violation_threshold;
+	uint64_t violation_payload;
+	char     violation_cpu_type;
+} trap_telemetry_latency_s;
+
+typedef union trap_telemetry_extra_data {
+	trap_telemetry_latency_s latency_data;
+} trap_telemetry_extra_data_u;
+
 __enum_decl(trap_telemetry_type_t, uint32_t, {
 	/* These show up in telemetry, do not renumber */
 	TRAP_TELEMETRY_TYPE_KERNEL_BRK_KASAN     = 0,     /* <unrecoverable> KASan violation traps */
@@ -84,6 +99,13 @@ __enum_decl(trap_telemetry_type_t, uint32_t, {
 	/* Failure conditions which may eventually turn into hard errors */
 	TRAP_TELEMETRY_TYPE_KERNEL_SOFT_ERROR    = 6,
 	TRAP_TELEMETRY_TYPE_SPTM_SOFT_ERROR      = 7,
+
+	/* Latency guards violations when telemetry mode is enabled */
+	TRAP_TELEMETRY_TYPE_PREEMPTION_TIMEOUT   = 8,
+	TRAP_TELEMETRY_TYPE_INTERRUPT_TIMEOUT    = 9,
+	TRAP_TELEMETRY_TYPE_MMIO_TIMEOUT         = 10,
+	TRAP_TELEMETRY_TYPE_MMIO_OVERRIDE        = 11,
+	TRAP_TELEMETRY_TYPE_LOCK_TIMEOUT         = 12,
 
 	TRAP_TELEMETRY_TYPE_KERNEL_BRK_TEST      = ~0u,   /* Development only */
 });
@@ -114,6 +136,17 @@ trap_telemetry_report_simulated_trap(
 	trap_telemetry_options_s options);
 
 /**
+ * Report a latency violation of the given type and parameters.
+ * Fault PC and backtrace will begin at the call site of this function.
+ *
+ * Returns true if the event was submitted (or duped) and false on error.
+ */
+extern bool
+trap_telemetry_report_latency_violation(
+	trap_telemetry_type_t trap_type,
+	trap_telemetry_latency_s params);
+
+/**
  * Perform a simulated trap of a given type and code, with given fault PC and
  * backtrace.
  *
@@ -126,6 +159,7 @@ trap_telemetry_report_simulated_trap_with_backtrace(
 	trap_telemetry_type_t trap_type,
 	uint64_t trap_code,
 	trap_telemetry_options_s options,
+	trap_telemetry_extra_data_u *extra_data,
 	uintptr_t fault_pc,
 	uintptr_t *frames,
 	size_t frames_valid_count);
@@ -162,6 +196,8 @@ enum kernel_brk_trap_comment {
 	XNU_HARD_TRAP_END              = 0xBFFF,
 
 	/* PTRAUTH (sleh.c)       : [0xC470 ~ 0xC473] <ARM only> */
+	PTRAUTH_TRAP_START             = 0xC470,
+	PTRAUTH_TRAP_END               = 0xC473,
 
 	/* TELEMETRY              : [0xFF00 ~ 0xFFFE] */
 	XNU_SOFT_TRAP_START            = 0xFF00,
@@ -214,20 +250,20 @@ typedef struct kernel_brk_descriptor {
 	const char *(*handle_breakpoint)(void *states, uint16_t comment);
 } *kernel_brk_descriptor_t;
 
-extern struct kernel_brk_descriptor brk_descriptors[]
-__SECTION_START_SYM("__DATA_CONST", "__brk_desc");
+extern struct kernel_brk_descriptor kernel_brk_descriptors[]
+__SECTION_START_SYM("__DATA_CONST", "__kern_brk_desc");
 
-extern struct kernel_brk_descriptor brk_descriptors_end[]
-__SECTION_END_SYM("__DATA_CONST", "__brk_desc");
+extern struct kernel_brk_descriptor kernel_brk_descriptors_end[]
+__SECTION_END_SYM("__DATA_CONST", "__kern_brk_desc");
 
 #define KERNEL_BRK_DESCRIPTOR_DEFINE(name, ...) \
-__PLACE_IN_SECTION("__DATA_CONST,__brk_desc") \
+__PLACE_IN_SECTION("__DATA_CONST,__kern_brk_desc") \
 static const struct kernel_brk_descriptor name = { __VA_ARGS__ };
 
 const static inline struct kernel_brk_descriptor *
-find_brk_descriptor_by_comment(uint16_t comment)
+find_kernel_brk_descriptor_by_comment(uint16_t comment)
 {
-	for (kernel_brk_descriptor_t des = brk_descriptors; des < brk_descriptors_end; des++) {
+	for (kernel_brk_descriptor_t des = kernel_brk_descriptors; des < kernel_brk_descriptors_end; des++) {
 		if (comment >= des->base && comment <= des->max) {
 			return des;
 		}
@@ -241,6 +277,7 @@ find_brk_descriptor_by_comment(uint16_t comment)
 __enum_decl(trap_telemetry_kernel_soft_error_code_t, uint64_t, {
 	/* Do not renumber entries -- IDs are used in telemetry */
 	TRAP_TELEMETRY_KERNEL_SOFT_ERROR_VM_KERNEL_MAX_ALLOC_SIZE = 0,
+	TRAP_TELEMETRY_KERNEL_SOFT_ERROR_RES0 = 1,
 });
 
 /**

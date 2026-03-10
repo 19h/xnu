@@ -1065,6 +1065,7 @@ netagent_handle_register_inner(struct netagent_session *session, struct netagent
 
 	struct netagent_registration *existing_registration = netagent_find_agent_with_uuid_and_lock(new_registration->netagent->netagent_uuid, false, true);
 	if (existing_registration != NULL) {
+		NETAGENTLOG0(LOG_ERR, "Existing agent registration UUID conflicts with new agent registration");
 		NETAGENT_SESSION_UNLOCK(session);
 		NETAGENT_LIST_UNLOCK();
 		return EEXIST;

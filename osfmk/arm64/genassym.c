@@ -156,6 +156,7 @@ main(int     argc,
 #endif
 #if HAS_ARM_FEAT_SME
 	DECLARE("ACT_UMATRIX_HDR", offsetof(struct thread, machine.umatrix_hdr));
+	DECLARE("ACT_UMATRIX_HDR_DIVERSIFIER", ptrauth_string_discriminator("machine_thread.umatrix_hdr"));
 #endif /* HAS_ARM_FEAT_SME */
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
@@ -352,8 +353,6 @@ main(int     argc,
 	DECLARE("BA_TOP_OF_KERNEL_DATA", offsetof(struct boot_args, topOfKernelData));
 	DECLARE("BA_BOOT_FLAGS", offsetof(struct boot_args, bootFlags));
 
-	DECLARE("SR_RESTORE_TCR_EL1", offsetof(struct sysreg_restore, tcr_el1));
-
 #if XNU_MONITOR
 	DECLARE("PMAP_CPU_DATA_INFLIGHT_PMAP", offsetof(struct pmap_cpu_data, inflight_pmap));
 	DECLARE("PMAP_CPU_DATA_PPL_STATE", offsetof(struct pmap_cpu_data, ppl_state));
@@ -380,9 +379,7 @@ main(int     argc,
 #endif /* defined(HAS_APPLE_PAC) */
 
 
-#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 	DECLARE("CPU_SYNC_ON_CSWITCH", offsetof(cpu_data_t, sync_on_cswitch));
-#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 
 #if HIBERNATION
 	DECLARE("HIBHDR_STACKOFFSET", offsetof(IOHibernateImageHeader, restore1StackOffset));
@@ -400,7 +397,6 @@ main(int     argc,
 	DECLARE("SPTM_CPU_PANIC", SPTM_CPU_PANIC);
 	DECLARE("SPTM_TRACE_SIZE_SHIFT", SPTM_TRACE_SIZE_SHIFT);
 #endif
-
 
 
 #if CONFIG_SPTM && (DEVELOPMENT || DEBUG)

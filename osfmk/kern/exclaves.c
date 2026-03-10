@@ -85,6 +85,8 @@
 #include "exclaves_inspection.h"
 #include "exclaves_memory.h"
 #include "exclaves_internal.h"
+#include "exclaves_aoe.h"
+#include "exclaves_sensor.h"
 
 LCK_GRP_DECLARE(exclaves_lck_grp, "exclaves");
 
@@ -254,7 +256,11 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 	 * If requirements are relaxed during development, tasks with no
 	 * conclaves are also allowed.
 	 */
-	if (task_get_conclave(task) == NULL &&
+	if (operation == EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME) {
+		if (!exclaves_has_priv(task, EXCLAVES_PRIV_INDICATOR_MIN_ON_TIME)) {
+			return KERN_DENIED;
+		}
+	} else if (task_get_conclave(task) == NULL &&
 	    !exclaves_has_priv(task, EXCLAVES_PRIV_KERNEL_DOMAIN) &&
 	    !exclaves_requirement_is_relaxed(EXCLAVES_R_CONCLAVE_RESOURCES)) {
 		return KERN_DENIED;
@@ -493,6 +499,14 @@ _exclaves_ctl_trap(struct exclaves_ctl_trap_args *uap)
 
 		if (id == EXCLAVES_INVALID_ID) {
 			return KERN_NOT_FOUND;
+		}
+
+		/*
+		 * Looking up a forwarding service verifies its existence, but
+		 * doesn't return the id since communication with it is not possible
+		 */
+		if (id > EXCLAVES_FORWARDING_RESOURCE_ID_BASE) {
+			return KERN_NAME_EXISTS;
 		}
 
 		uresource.r_id = id;
@@ -735,6 +749,85 @@ notification_resource_lookup_out:
 		if (kr != KERN_SUCCESS && port_name != MACH_PORT_NULL) {
 			mach_port_deallocate(current_space(), port_name);
 		}
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_SETUP: {
+		uint8_t num_message = 0;
+		uint8_t num_worker = 0;
+
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		kr = exclaves_aoe_setup(&num_message, &num_worker);
+		if (kr != KERN_SUCCESS) {
+			break;
+		}
+
+		error = copyout(&num_message, ubuffer, sizeof(num_message));
+		if (error != 0) {
+			kr = KERN_INVALID_ADDRESS;
+			break;
+		}
+
+		error = copyout(&num_worker, ustatus, sizeof(num_worker));
+		if (error != 0) {
+			kr = KERN_INVALID_ADDRESS;
+			break;
+		}
+
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_MESSAGE_LOOP: {
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		kr = exclaves_aoe_message_loop();
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_AOE_WORK_LOOP: {
+		if (task_get_conclave(task) == NULL) {
+			kr = KERN_FAILURE;
+			break;
+		}
+
+		kr = exclaves_aoe_work_loop();
+		break;
+	}
+
+	case EXCLAVES_CTL_OP_SENSOR_MIN_ON_TIME: {
+		if (name != MACH_PORT_NULL) {
+			/* Only accept MACH_PORT_NULL for now */
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		if (ubuffer == USER_ADDR_NULL || usize == 0 ||
+		    usize != sizeof(struct exclaves_indicator_deadlines)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		struct exclaves_indicator_deadlines udurations;
+		error = copyin(ubuffer, &udurations, usize);
+		if (error) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		kr = exclaves_indicator_min_on_time_deadlines(&udurations);
+		if (kr != KERN_SUCCESS) {
+			return kr;
+		}
+
+		error = copyout(&udurations, ubuffer, usize);
+		if (error) {
+			return KERN_INVALID_ADDRESS;
+		}
+
 		break;
 	}
 
@@ -1043,6 +1136,35 @@ exclaves_endpoint_call_internal(__unused ipc_port_t port,
 /* -------------------------------------------------------------------------- */
 #pragma mark secure kernel communication
 
+/** save SME state before entering exclaves */
+static bool
+exclaves_save_matrix_state(void)
+{
+	bool saved = false;
+#if HAS_ARM_FEAT_SME
+	/* Save only the ZA/ZT0 state. SPTM will save/restore TPIDR2. */
+	if (arm_sme_version() > 0 && !!(__builtin_arm_rsr64("SVCR") & SVCR_ZA)) {
+		arm_sme_saved_state_t *sme_state = machine_thread_get_sme_state(current_thread());
+		arm_save_sme_za_zt0(&sme_state->context, sme_state->svl_b);
+		asm volatile ("smstop za");
+		saved = true;
+	}
+#endif /* HAS_ARM_FEAT_SME */
+	return saved;
+}
+
+static void
+exclaves_restore_matrix_state(bool did_save_sme __unused)
+{
+#if HAS_ARM_FEAT_SME
+	if (did_save_sme) {
+		arm_sme_saved_state_t *sme_state = machine_thread_get_sme_state(current_thread());
+		asm volatile ("smstart za");
+		arm_load_sme_za_zt0(&sme_state->context, sme_state->svl_b);
+	}
+#endif /* HAS_ARM_FEAT_SME */
+}
+
 /* ringgate entry endpoints */
 enum {
 	RINGGATE_EP_ENTER,
@@ -1065,7 +1187,7 @@ exclaves_enter(void)
 
 	sptm_call_regs_t regs = { };
 
-	__assert_only thread_t thread = current_thread();
+	thread_t thread = current_thread();
 
 	/*
 	 * Should never re-enter exclaves.
@@ -1085,6 +1207,11 @@ exclaves_enter(void)
 		TH_EXCLAVES_RESUME_PANIC_THREAD);
 	assert3u(thread->th_exclaves_state & mask, !=, 0);
 	assert3u(thread->th_exclaves_intstate & TH_EXCLAVES_EXECUTION, ==, 0);
+
+	/*
+	 * Save any SME matrix state before entering exclaves.
+	 */
+	bool did_save_sme = exclaves_save_matrix_state();
 
 #if MACH_ASSERT
 	/*
@@ -1132,6 +1259,11 @@ exclaves_enter(void)
 
 	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCLAVES, MACH_EXCLAVES_SWITCH)
 	    | DBG_FUNC_END);
+
+	/*
+	 * Restore SME matrix state, if it existed.
+	 */
+	exclaves_restore_matrix_state(did_save_sme);
 
 	switch (result) {
 	case RINGGATE_STATUS_SUCCESS:
@@ -2408,7 +2540,6 @@ exclaves_hosted_error(bool success, XrtHosted_Error_t *error)
 	}
 }
 
-
 #pragma mark exclaves privilege management
 
 /*
@@ -2498,6 +2629,23 @@ exclaves_has_priv(task_t task, exclaves_priv_t priv)
 		return has_entitlement(task, priv,
 		    "com.apple.private.exclaves.boot");
 		/* END IGNORE CODESTYLE */
+
+	case EXCLAVES_PRIV_INDICATOR_MIN_ON_TIME:
+		/*
+		 * If the task was entitled and has been through this path
+		 * before, it will have set the TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS flag.
+		 */
+		if ((task_ro_flags_get(task) & TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS) != 0) {
+			return true;
+		}
+
+		if (has_entitlement(task, priv,
+		    "com.apple.private.exclaves.indicator_min_on_time")) {
+			task_ro_flags_set(task, TFRO_HAS_SENSOR_MIN_ON_TIME_ACCESS);
+			return true;
+		}
+
+		return false;
 
 	/* The CONCLAVE HOST priv is always checked by vnode. */
 	case EXCLAVES_PRIV_CONCLAVE_HOST:

@@ -200,6 +200,8 @@ extern int PAGE_SHIFT_CONST;
  * constrain the address space further.
  */
 
+
+#ifndef __BUILDING_XNU_LIBRARY__
 #if XNU_KERNEL_PRIVATE
 #if defined(ARM_LARGE_MEMORY)
 /*
@@ -248,13 +250,13 @@ extern int PAGE_SHIFT_CONST;
  * |                       |        |        | PMAP_HEAP_RANGE_START  | >= H9
  * +-----------------------+--------+--------+------------------------+
  */
-#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR)
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  38
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) (0ULL - GiB(144)))
-#else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+#else /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR) */
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  37
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0xffffffe000000000ULL)
-#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
+#endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR) */
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
 
 #endif // ARM_LARGE_MEMORY
@@ -265,6 +267,11 @@ extern int PAGE_SHIFT_CONST;
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) (0ULL - TiB(2)))
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
 #endif // XNU_KERNEL_PRIVATE
+#else /* __BUILDING_XNU_LIBRARY__ */
+#define VM_MIN_KERNEL_ADDRESS ((vm_address_t)(0x100000000ULL))
+#define VM_MAX_KERNEL_ADDRESS ((vm_address_t)(0ULL + GiB(2)))
+#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31
+#endif /*__BUILDING_XNU_LIBRARY__ */
 #else
 #error architecture not supported
 #endif
@@ -279,32 +286,58 @@ extern int PAGE_SHIFT_CONST;
 #define VM_USER_STRIP_TBI(_v)    (_v)
 #endif /* __arm64__ */
 
-#if CONFIG_KERNEL_TAGGING
-#include <vm/vm_memtag.h>
-/*
- * 'strip' in PAC sense, therefore replacing the stripped bits sign extending
- * the sign bit. In kernel space the sign bit is 1, so 0xFF is a valid mask
- * here.
- */
-#define VM_KERNEL_STRIP_TAG(_v)         (vm_memtag_canonicalize_kernel((vm_offset_t)_v))
-#else /* CONFIG_KERNEL_TAGGING */
-#define VM_KERNEL_STRIP_TAG(_v)         (_v)
-#endif /* CONFIG_KERNEL_TAGGING */
+
+#if __arm64__
+
+#if XNU_KERNEL_PRIVATE
+#define VM_KERNEL_STRIP_MASK            (-1ULL << (64 - T1SZ_BOOT))
+#define VM_USER_STRIP_MASK              (-1ULL >> (T0SZ_BOOT))
+#define _VM_KERNEL_STRIP_PTR(_va)       ({((_va) & 1ULL << 55) ? ((_va) | VM_KERNEL_STRIP_MASK) : ((_va) & VM_USER_STRIP_MASK);})
+#else /* XNU_KERNEL_PRIVATE */
 
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
-#define VM_KERNEL_STRIP_PAC(_v) (ptrauth_strip((void *)(uintptr_t)(_v), ptrauth_key_asia))
+#define VM_KERNEL_STRIP_PAC(_v)         ((uintptr_t)(ptrauth_strip((void *)(uintptr_t)(_v), ptrauth_key_asia)))
 #else /* !ptrauth_calls */
-#define VM_KERNEL_STRIP_PAC(_v) (_v)
+#define VM_KERNEL_STRIP_PAC(_v)         (_v)
 #endif /* ptrauth_calls */
+/* For KEXT, just blow away TBI bits, even if only used for KASAN. */
+#define _VM_KERNEL_STRIP_PTR(_v)        (VM_KERNEL_STRIP_PAC(_v) | (0xFF00000000000000ULL))
+#endif /* XNU_KERNEL_PRIVATE */
 
-#define VM_KERNEL_STRIP_PTR(_va)        ((VM_KERNEL_STRIP_TAG(VM_KERNEL_STRIP_PAC((_va)))))
-#define VM_KERNEL_STRIP_UPTR(_va)       ((vm_address_t)VM_KERNEL_STRIP_PTR((uintptr_t)(_va)))
+#else /* __arm64__ */
+#define _VM_KERNEL_STRIP_PTR(_v)        (_v)
+#endif /* __arm64__ */
+
+#define VM_KERNEL_STRIP_PTR(_va)        (_VM_KERNEL_STRIP_PTR((uintptr_t)(_va)))
+
+/* Vestige from the past, kept for retro-compatibility. */
+#define VM_KERNEL_STRIP_UPTR(_va)       (VM_KERNEL_STRIP_PTR(_va))
+
 #define VM_KERNEL_ADDRESS(_va)  \
-	((VM_KERNEL_STRIP_UPTR(_va) >= VM_MIN_KERNEL_ADDRESS) && \
-	 (VM_KERNEL_STRIP_UPTR(_va) <= VM_MAX_KERNEL_ADDRESS))
+	((VM_KERNEL_STRIP_PTR(_va) >= VM_MIN_KERNEL_ADDRESS) && \
+	 (VM_KERNEL_STRIP_PTR(_va) <= VM_MAX_KERNEL_ADDRESS))
 
 #define VM_USER_STRIP_PTR(_v)           (VM_USER_STRIP_TBI(_v))
+
+#if DEBUG || DEVELOPMENT || !defined(HAS_APPLE_PAC)
+
+#define ML_ADDRPERM(addr, slide) ((addr) + (slide))
+
+#else /* DEBUG || DEVELOPMENT || !defined(HAS_APPLE_PAC) */
+
+/**
+ * While these function's implementations are machine specific, due to the need
+ * to prevent header file circular dependencies, they need to be externed here
+ * for usage in the addrperm macro
+ */
+__BEGIN_DECLS
+vm_offset_t ml_addrperm_pacga(vm_offset_t addr);
+__END_DECLS
+
+#define ML_ADDRPERM(addr, slide) ml_addrperm_pacga(addr)
+
+#endif /* DEBUG || DEVELOPMENT || !defined(HAS_APPLE_PAC) */
 
 #ifdef  MACH_KERNEL_PRIVATE
 /*

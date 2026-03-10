@@ -56,7 +56,7 @@ extern lck_rw_t         c_master_lock;
 #define PAGE_REPLACEMENT_ALLOWED(enable)        (enable == TRUE ? lck_rw_lock_exclusive(&c_master_lock) : lck_rw_done(&c_master_lock))
 
 #if ENCRYPTED_SWAP
-extern void             vm_swap_decrypt(c_segment_t);
+extern void             vm_swap_decrypt(c_segment_t, bool);
 #endif /* ENCRYPTED_SWAP */
 
 extern void             vm_swap_free(uint64_t);
@@ -103,7 +103,6 @@ uint32_t vm_compressor_get_decode_scratch_size(void) __pure2;
 extern void      c_compressed_record_init(void);
 extern void      c_compressed_record_write(char *, int);
 #endif
-
 
 #endif /* XNU_KERNEL_PRIVATE */
 __END_DECLS

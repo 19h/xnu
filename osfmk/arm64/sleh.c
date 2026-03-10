@@ -93,10 +93,6 @@
 
 
 
-#ifdef CONFIG_BTI_TELEMETRY
-#include <arm64/bti_telemetry.h>
-#endif /* CONFIG_BTI_TELEMETRY */
-
 #ifndef __arm64__
 #error Should only be compiling for arm64.
 #endif
@@ -170,7 +166,7 @@ static void handle_uncategorized(arm_saved_state_t *);
 
 static void handle_kernel_breakpoint(arm_saved_state_t *, uint64_t);
 
-static void handle_breakpoint(arm_saved_state_t *, uint64_t) __dead2;
+static void handle_user_breakpoint(arm_saved_state_t *, uint64_t) __dead2;
 
 typedef void (*abort_inspector_t)(uint32_t, fault_status_t *, vm_prot_t *);
 static void inspect_instruction_abort(uint32_t, fault_status_t *, vm_prot_t *);
@@ -280,6 +276,26 @@ extern unsigned int gFastIPI;
 #endif /* defined(HAS_IPI) */
 
 static arm_saved_state64_t *original_faulting_state = NULL;
+
+/*
+ * A self-restrict mode describes which (if any, or several) special permissive
+ * modes are active at the time of a fault. This, in part, determines how the
+ * fault will be handled.
+ */
+__options_closed_decl(self_restrict_mode_t, unsigned int, {
+	/* None of the special modes are active. */
+	SELF_RESTRICT_NONE  = 0U,
+
+	/*
+	 * Any of the other more specific modes, this should be active if any other
+	 * mode is active.
+	 */
+	SELF_RESTRICT_ANY   = (1U << 0),
+
+	/* Reserved */
+
+	/* Reserved */
+});
 
 
 TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
@@ -455,6 +471,7 @@ is_table_walk_error(fault_status_t status)
 
 
 
+
 static inline int
 is_servicible_fault(fault_status_t status, uint64_t esr)
 {
@@ -532,6 +549,7 @@ arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, pl
 	}
 }
 
+
 void
 panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 {
@@ -555,6 +573,7 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 		    PACK_2X32(VALUE(state->esr), VALUE(state->cpsr)),
 		    VALUE(state->far));
 	}
+
 
 
 	panic_plain("%s at pc 0x%016llx, lr 0x%016llx (saved state: %p%s)\n"
@@ -614,6 +633,7 @@ thread_exception_return()
 		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_END, 0, 0, 0, 0, 0);
 		thread->machine.exception_trace_code = 0;
 	}
+
 
 #if KASAN_TBI
 	kasan_unpoison_curstack(true);
@@ -844,6 +864,7 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		ml_set_interrupts_enabled(TRUE);
 	}
 
+
 	switch (class) {
 	case ESR_EC_SVC_64:
 		if (!is_saved_state64(state) || !is_user) {
@@ -926,7 +947,7 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		__builtin_unreachable();
 
 	case ESR_EC_BKPT_AARCH32:
-		handle_breakpoint(state, esr);
+		handle_user_breakpoint(state, esr);
 		__builtin_unreachable();
 
 	case ESR_EC_BRK_AARCH64:
@@ -939,13 +960,13 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 			handle_kernel_breakpoint(state, esr);
 			break;
 		} else {
-			handle_breakpoint(state, esr);
+			handle_user_breakpoint(state, esr);
 			__builtin_unreachable();
 		}
 
 	case ESR_EC_BKPT_REG_MATCH_EL0:
 		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
-			handle_breakpoint(state, esr);
+			handle_user_breakpoint(state, esr);
 		}
 		panic("Unsupported Class %u event code. state=%p class=%u esr=%llu far=%p",
 		    class, state, class, esr, (void *)far);
@@ -1019,12 +1040,6 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 			break;
 		}
 #endif /* CONFIG_XNUPOST */
-#ifdef CONFIG_BTI_TELEMETRY
-		if (bti_telemetry_handle_exception(state)) {
-			/* Telemetry has accepted and corrected the exception, continue */
-			break;
-		}
-#endif /* CONFIG_BTI_TELEMETRY */
 		handle_bti_fail(state, esr);
 		__builtin_unreachable();
 
@@ -1085,6 +1100,7 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		panic("synchronous exception changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
 	}
 #endif
+
 }
 
 /*
@@ -1180,14 +1196,6 @@ handle_uncategorized(arm_saved_state_t *state)
 }
 
 #if __has_feature(ptrauth_calls)
-static const uint16_t PTRAUTH_TRAP_START = 0xC470;
-static inline bool
-brk_comment_is_ptrauth(uint16_t comment)
-{
-	return comment >= PTRAUTH_TRAP_START &&
-	       comment <= PTRAUTH_TRAP_START + ptrauth_key_asdb;
-}
-
 static inline const char *
 ptrauth_key_to_string(ptrauth_key key)
 {
@@ -1283,7 +1291,7 @@ xnu_hard_trap_handle_breakpoint(void *tstate, uint16_t comment)
 KERNEL_BRK_DESCRIPTOR_DEFINE(ptrauth_desc,
     .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_PTRAUTH,
     .base                = PTRAUTH_TRAP_START,
-    .max                 = PTRAUTH_TRAP_START + ptrauth_key_asdb,
+    .max                 = PTRAUTH_TRAP_END,
     .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
     .handle_breakpoint   = ptrauth_handle_brk_trap);
 #endif
@@ -1329,7 +1337,7 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint64_t esr)
 	const struct kernel_brk_descriptor *desc;
 	const char *msg = NULL;
 
-	desc = find_brk_descriptor_by_comment(comment);
+	desc = find_kernel_brk_descriptor_by_comment(comment);
 
 	if (!desc) {
 		goto brk_out;
@@ -1361,10 +1369,15 @@ brk_out:
 	if (msg == NULL) {
 		kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
 
-		msg = tsnprintf(pr->buf, sizeof(pr->buf),
-		    "Break 0x%04X instruction exception from kernel. "
-		    "Panic (by design)",
-		    comment);
+		if (comment == CLANG_ARM_TRAP_BOUND_CHK) {
+			msg = tsnprintf(pr->buf, sizeof(pr->buf),
+			    "Bounds safety trap");
+		} else {
+			msg = tsnprintf(pr->buf, sizeof(pr->buf),
+			    "Break 0x%04X instruction exception from kernel. "
+			    "Panic (by design)",
+			    comment);
+		}
 	}
 
 	panic_with_thread_kernel_state(msg, state);
@@ -1372,19 +1385,88 @@ brk_out:
 #undef MSG_FMT
 }
 
+/*
+ * Similar in spirit to kernel_brk_descriptor, but with less flexible semantics:
+ * each descriptor defines a `brk` label range for use from userspace.
+ * When used, system policy may decide to kill the calling process without giving them opportunity to
+ * catch the exception or continue execution from a signal handler.
+ * This is used to enforce security boundaries: userspace code may use this mechanism
+ * to reliably terminate when internal inconsistencies are detected.
+ * Note that we don't invariably terminate without giving the process a say: we might only enforce
+ * such a policy if a security feature is enabled, for example.
+ */
+typedef struct user_brk_label_range_descriptor {
+	uint16_t base;
+	uint16_t max;
+} user_brk_label_range_descriptor_t;
+
+const user_brk_label_range_descriptor_t user_brk_descriptors[] = {
+#if __has_feature(ptrauth_calls)
+	/* PAC failures detected in data by userspace */
+	{
+		/* Use the exact same label range as kernel PAC */
+		.base   = PTRAUTH_TRAP_START,
+		.max    = PTRAUTH_TRAP_END,
+	},
+#endif /* __has_feature(ptrauth_calls) */
+	/* Available for use by system libraries when detecting disallowed conditions */
+	{
+		/* Note this uses the same range as the kernel-specific XNU_HARD_TRAP range */
+		.base   = 0xB000,
+		.max    = 0xBFFF,
+	}
+};
+const int user_brk_descriptor_count = sizeof(user_brk_descriptors) / sizeof(user_brk_descriptors[0]);
+
+const static inline user_brk_label_range_descriptor_t *
+find_user_brk_descriptor_by_comment(uint16_t comment)
+{
+	for (int desc_idx = 0; desc_idx < user_brk_descriptor_count; desc_idx++) {
+		const user_brk_label_range_descriptor_t* des = &user_brk_descriptors[desc_idx];
+		if (comment >= des->base && comment <= des->max) {
+			return des;
+		}
+	}
+
+	return NULL;
+}
+
 static void
-handle_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
+handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
 {
 	exception_type_t           exception = EXC_BREAKPOINT;
 	mach_exception_data_type_t codes[2]  = {EXC_ARM_BREAKPOINT};
 	mach_msg_type_number_t     numcodes  = 2;
 
+	if (ESR_EC(esr) == ESR_EC_BRK_AARCH64) {
+		/*
+		 * Consult the trap labels we know about to decide whether userspace
+		 * should be given the opportunity to handle the exception.
+		 */
+		uint16_t brk_label = ISS_BRK_COMMENT(esr);
+		const struct user_brk_label_range_descriptor* descriptor = find_user_brk_descriptor_by_comment(brk_label);
+		/*
+		 * Note it's no problem if we don't recognize the label.
+		 * In this case we'll just go through normal exception delivery.
+		 */
+		if (descriptor != NULL) {
+			exception |= EXC_MAY_BE_UNRECOVERABLE_BIT;
+
 #if __has_feature(ptrauth_calls)
-	if (ESR_EC(esr) == ESR_EC_BRK_AARCH64 &&
-	    brk_comment_is_ptrauth(ISS_BRK_COMMENT(esr))) {
-		exception |= EXC_PTRAUTH_BIT;
-	}
+			/*
+			 * We have additional policy specifically for PAC violations.
+			 * To make the rest of the code easier to follow, don't set
+			 * EXC_MAY_BE_UNRECOVERABLE_BIT here and just set EXC_PTRAUTH_BIT instead.
+			 * Conceptually a PAC failure is absolutely 'maybe unrecoverable', but it's
+			 * not really worth excising the discrepency from the plumbing.
+			 */
+			if (descriptor->base == PTRAUTH_TRAP_START) {
+				exception &= ~(EXC_MAY_BE_UNRECOVERABLE_BIT);
+				exception |= EXC_PTRAUTH_BIT;
+			}
 #endif /* __has_feature(ptrauth_calls) */
+		}
+	}
 
 	codes[1] = get_saved_state_pc(state);
 	exception_triage(exception, codes, numcodes);
@@ -1533,11 +1615,12 @@ user_fault_matches_pac_error_code(vm_offset_t fault_addr, uint64_t pc, bool data
  * potentially-compromised process try to handle the exception, it will be killed
  * by the kernel and a crash report will be generated.
  */
-static bool
+static self_restrict_mode_t
 user_fault_in_self_restrict_mode(thread_t thread __unused)
 {
+	self_restrict_mode_t out = SELF_RESTRICT_NONE;
 
-	return false;
+	return out;
 }
 
 static void
@@ -1756,7 +1839,7 @@ handle_sw_step_debug(arm_saved_state_t *state)
 }
 
 #if MACH_ASSERT
-TUNABLE_WRITEABLE(int, panic_on_jit_guard, "panic_on_jit_guard", 0);
+TUNABLE_WRITEABLE(self_restrict_mode_t, panic_on_jit_guard, "panic_on_jit_guard", SELF_RESTRICT_NONE);
 #endif /* MACH_ASSERT */
 
 static void
@@ -1900,7 +1983,8 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
-	if (user_fault_in_self_restrict_mode(thread) &&
+	const self_restrict_mode_t self_restrict_mode = user_fault_in_self_restrict_mode(thread);
+	if ((self_restrict_mode != SELF_RESTRICT_NONE) &&
 	    task_is_jit_exception_fatal(get_threadtask(thread))) {
 		int flags = PX_KTRIAGE;
 		exception_info_t info = {
@@ -1911,11 +1995,29 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 		};
 
 #if MACH_ASSERT
+		/*
+		 * Case: panic_on_jit_guard=1. Catch an early process creation TPRO issue causing
+		 * rdar://129742083. Only panic during early process creation (1 thread, few syscalls
+		 * issued) to avoid spurious panics.
+		 */
+		const self_restrict_mode_t self_restrict_panic_mask = panic_on_jit_guard & self_restrict_mode;
+		bool should_panic = ((self_restrict_panic_mask == SELF_RESTRICT_ANY) &&
+		    (current_task()->thread_count == 1) &&
+		    (thread->syscalls_unix < 24));
+
+		/*
+		 * Modes other than ANY will force panic, skipping checks that were done in the ANY case,
+		 * but allowing us to filter on a more specific scenario (e.g. TPRO, JIT, etc).  This is
+		 * meant to catch a TPRO issue causing rdar://145703251. Restrict to KERN_PROTECTION_FAILURE
+		 * only to avoid failures from the more frequent case of KERN_INVALID_ADDRESS that aren't
+		 * of interest for that radar.
+		 */
+		should_panic |= (codes[0] == KERN_PROTECTION_FAILURE)
+		    && ((self_restrict_panic_mask & ~SELF_RESTRICT_ANY) != 0);
+
 		printf("\nGUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx\n",
 		    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr);
-		if (panic_on_jit_guard &&
-		    current_task()->thread_count == 1 &&
-		    thread->syscalls_unix < 24) {
+		if (should_panic) {
 			panic("GUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx state %p j %d t %d s user 0x%llx (0x%llx) jb 0x%llx (0x%llx)",
 			    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr, state,
 			    0, 0, 0ull, 0ull,
@@ -2033,6 +2135,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 #ifndef CONFIG_XNUPOST
 	(void)expected_fault_handler;
 #endif /* CONFIG_XNUPOST */
+
 
 #if CONFIG_DTRACE
 	if (is_vm_fault(fault_code) && thread->t_dtrace_inprobe) { /* Executing under dtrace_probe? */
@@ -2539,9 +2642,9 @@ sleh_fiq(arm_saved_state_t *state)
 #endif /* defined(HAS_IPI) */
 #if MONOTONIC_FIQ
 	if (type == DBG_INTR_TYPE_PMI) {
-		INTERRUPT_MASKED_DEBUG_START(mt_fiq, DBG_INTR_TYPE_PMI);
+		ml_interrupt_masked_debug_start(mt_fiq, DBG_INTR_TYPE_PMI);
 		mt_fiq(getCpuDatap(), pmcr0, upmsr);
-		INTERRUPT_MASKED_DEBUG_END();
+		ml_interrupt_masked_debug_end();
 	} else
 #endif /* MONOTONIC_FIQ */
 	{
@@ -2559,9 +2662,9 @@ sleh_fiq(arm_saved_state_t *state)
 		 * We can easily thread it through, but not bothering for the
 		 * moment (AArch32 doesn't either).
 		 */
-		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
 		rtclock_intr(TRUE);
-		INTERRUPT_MASKED_DEBUG_END();
+		ml_interrupt_masked_debug_end();
 	}
 
 #if APPLEVIRTUALPLATFORM
@@ -2695,7 +2798,7 @@ sleh_invalid_stack(arm_context_t *context, uint64_t esr __unused, vm_offset_t fa
 		panic_with_thread_kernel_state("Invalid kernel stack pointer (probable overflow).", &context->ss);
 	}
 
-	panic_with_thread_kernel_state("Invalid kernel stack pointer (probable corruption).", &context->ss);
+	panic_with_thread_kernel_state("Invalid kernel stack pointer (probable corruption or early boot).", &context->ss);
 }
 
 
@@ -2763,7 +2866,7 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
 		 */
 #if HAS_TELEMETRY_KERNEL_BRK
 		const struct kernel_brk_descriptor *desc;
-		desc = find_brk_descriptor_by_comment(ISS_BRK_COMMENT(esr));
+		desc = find_kernel_brk_descriptor_by_comment(ISS_BRK_COMMENT(esr));
 		if (desc && desc->options.recoverable) {
 			/*
 			 * We matched a breakpoint and it's recoverable, skip lockdown.
@@ -2790,6 +2893,7 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
 			 */
 			return false;
 		}
+
 
 
 		/*
@@ -2821,12 +2925,8 @@ sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
 	}
 
 	case ESR_EC_BTI_FAIL: {
-		/* Kernel BTI exceptions are recoverable only in telemetry mode */
-#ifdef CONFIG_BTI_TELEMETRY
-		return false;
-#else
+		/* Kernel BTI exceptions are always fatal */
 		return true;
-#endif /* CONFIG_BTI_TELEMETRY */
 	}
 
 	default: {

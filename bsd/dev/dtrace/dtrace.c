@@ -258,7 +258,7 @@ static uint8_t      dtrace_kerneluuid[16];	/* the 128-bit uuid */
  */
 
 static ZONE_DEFINE_TYPE(dtrace_probe_t_zone, "dtrace.dtrace_probe_t",
-    dtrace_probe_t, ZC_PGZ_USE_GUARDS);
+    dtrace_probe_t, ZC_NONE);
 
 static ZONE_DEFINE(dtrace_state_pcpu_zone, "dtrace.dtrace_dstate_percpu_t",
     sizeof(dtrace_dstate_percpu_t), ZC_PERCPU);
@@ -564,7 +564,7 @@ dtrace_load##bits(uintptr_t addr)					\
 	int i;								\
 	volatile uint16_t *flags = (volatile uint16_t *)		\
 	    &cpu_core[CPU->cpu_id].cpuc_dtrace_flags;			\
-	uintptr_t caddr = vm_memtag_canonicalize_kernel(addr);		\
+	uintptr_t caddr = VM_KERNEL_STRIP_PTR(addr);			\
 									\
 	DTRACE_ALIGNCHECK(addr, size, flags);				\
 									\
@@ -19277,8 +19277,6 @@ static int gMajDevNo;
 
 void dtrace_early_init (void)
 {
-	dtrace_restriction_policy_load();
-
 	/*
 	 * See dtrace_impl.h for a description of kernel symbol modes.
 	 * The default is to wait for symbols from userspace (lazy symbols).

@@ -42,9 +42,11 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_fast_convergence, CTLFLAG_RW | CTLFLAG_LOCK
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_use_minrtt, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_cubic_use_minrtt, 0, "use a min of 5 sec rtt");
 
+/* TODO - remove once uTCP stops using it */
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_minor_fixes, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_cubic_minor_fixes, 1, "Minor fixes to TCP Cubic");
 
+/* TODO - remove once uTCP stops using it */
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, cubic_rfc_compliant, CTLFLAG_RW | CTLFLAG_LOCKED,
     int, tcp_cubic_rfc_compliant, 1, "RFC Compliance for TCP Cubic");
 
@@ -76,7 +78,7 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, bg_target_qdelay, CTLFLAG_RW | CTLFLAG_LOCKED,
  * 'Allowed_increase' parameter is set to 8. If the flight size is zero, then
  * we want the congestion window to be at least 8 packets to reduce the
  * delay induced by delayed ack. This helps when the receiver is acking
- * more than 2 packets at a time (stretching acks for better performance).
+ * more than 2 packets at a time.
  *
  * 'Tether' is also set to 2. We do not want this to limit the growth of cwnd
  * during slow-start.

@@ -66,8 +66,10 @@ static_assert(sizeof(cpumap_t) * CHAR_BIT >= MAX_CPUS, "cpumap_t bitvector is to
 #define CPUWINDOWS_BASE                 (VM_MAX_KERNEL_ADDRESS & CPUWINDOWS_BASE_MASK)
 #define CPUWINDOWS_TOP                  (CPUWINDOWS_BASE + (MAX_CPUS * CPUWINDOWS_MAX * ARM_PGBYTES))
 
+#ifndef __BUILDING_XNU_LIBRARY__  /* in user-mode kernel addresses are low */
 static_assert((CPUWINDOWS_BASE >= VM_MIN_KERNEL_ADDRESS) && ((CPUWINDOWS_TOP - 1) <= VM_MAX_KERNEL_ADDRESS),
     "CPU copy windows too large for CPUWINDOWS_BASE_MASK value");
+#endif
 
 typedef struct cpu_data_entry {
 	void                           *cpu_data_paddr;         /* Cpu data physical address */
@@ -126,6 +128,7 @@ __options_closed_decl(cpu_signal_t, unsigned int, {
 	SIGPkppet       = 0x00000100U,     /* Request kperf PET handler */
 	SIGPxcallImm    = 0x00000200U,     /* Send a cross-call, fail if already pending */
 	SIGPTimerLocal  = 0x00000400U,     /* Update the decrementer via timer_queue_expire_local */
+	SIGPdeferred    = 0x00000800U,     /* Scheduler deferred IPI to wake core */
 
 	SIGPdisabled    = 0x80000000U,     /* Signal disabled */
 });
@@ -157,9 +160,7 @@ typedef struct cpu_data {
 	bool                            cpu_hibernate; /* This cpu is currently hibernating the system */
 	bool                            cpu_running;
 	bool                            cluster_master;
-#if ERET_IS_NOT_CONTEXT_SYNCHRONIZING
 	bool                            sync_on_cswitch;
-#endif /* ERET_IS_NOT_CONTEXT_SYNCHRONIZING */
 	/* true if processor_start() or processor_exit() is operating on this CPU */
 	bool                            in_state_transition;
 
@@ -227,6 +228,7 @@ typedef struct cpu_data {
 	unsigned int                    cpu_sleep_token_last;
 
 	cluster_type_t                  cpu_cluster_type;
+
 	uint32_t                        cpu_cluster_id;
 	uint32_t                        cpu_l2_id;
 	uint32_t                        cpu_l2_size;
@@ -312,13 +314,5 @@ extern void             cpu_stack_alloc(cpu_data_t*);
 extern void             cpu_data_init(cpu_data_t *cpu_data_ptr);
 extern void             cpu_data_register(cpu_data_t *cpu_data_ptr);
 extern cpu_data_t      *processor_to_cpu_datap( processor_t processor);
-
-#if __arm64__
-typedef struct sysreg_restore {
-	uint64_t                tcr_el1;
-} sysreg_restore_t;
-
-extern sysreg_restore_t sysreg_restore;
-#endif  /* __arm64__ */
 
 #endif  /* ARM_CPU_DATA_INTERNAL */

@@ -92,7 +92,7 @@ struct _attrlist_buf {
 
 
 static int
-attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, int flags)
+attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, char *prefix, int prefix_len, int flags)
 {
 	proc_t p = vfs_context_proc(vfs_context_current());
 	int retlen = 0;
@@ -114,8 +114,14 @@ attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, 
 			buf = kalloc_data(buflen, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		}
 
+		/* Add the resolve prefix if provided */
+		if (prefix && prefix_len) {
+			assert(prefix_len + 1 <= buflen);
+			strlcpy(buf, prefix, prefix_len + 1);
+		}
+
 		/* call build_path making sure NOT to use the cache-only behavior */
-		err = build_path(vp, buf, buflen, &retlen, flags, vfs_context_current());
+		err = build_path(vp, buf + prefix_len, buflen - prefix_len, &retlen, flags, vfs_context_current());
 	} while (err == ENOSPC && proc_support_long_paths(p) && (buflen *= 2) && buflen <= MAXLONGPATHLEN);
 	if (err == 0) {
 		if (outbuf) {
@@ -125,7 +131,7 @@ attrlist_build_path(vnode_t vp, char **outbuf, int *outbuflen, int *outpathlen, 
 			*outbuflen = buflen;
 		}
 		if (outpathlen) {
-			*outpathlen = retlen - 1;
+			*outpathlen = retlen + prefix_len - 1;
 		}
 	}
 	return err;
@@ -1007,9 +1013,17 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	VATTR_INIT(&va);
 	VFSATTR_INIT(&vs);
 	vs.f_vol_name = NULL;
-	mnt = vp->v_mount;
 	attr_max_buffer = proc_support_long_paths(vfs_context_proc(ctx)) ?
 	    ATTR_MAX_BUFFER_LONGPATHS : ATTR_MAX_BUFFER;
+	mnt = vp->v_mount;
+
+	/* Check for invalid or dead mounts. */
+	if (!mnt || mnt == dead_mountp) {
+		/* This condition can only be true for fgetattrlist */
+		error = EBADF;
+		VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: volume attributes requested on dead mount.");
+		goto out;
+	}
 
 	/* Check for special packing semantics */
 	return_valid = (alp->commonattr & ATTR_CMN_RETURNED_ATTRS);
@@ -1908,11 +1922,12 @@ attr_pack_common(vfs_context_t ctx, mount_t mp, vnode_t vp, struct attrlist *alp
 		}
 	}
 	if (alp->commonattr & ATTR_CMN_FNDRINFO) {
-		size_t  fisize = 32;
+		size_t  fisize = lmax(lmin(32, abp->allocated - (abp->fixedcursor - abp->base)), 0);
 
 		error = 0;
 		if (vp && !is_bulk) {
 			uio_t   auio;
+			size_t fialloc = fisize;
 			UIO_STACKBUF(uio_buf, 1);
 
 			if ((auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE,
@@ -1921,10 +1936,10 @@ attr_pack_common(vfs_context_t ctx, mount_t mp, vnode_t vp, struct attrlist *alp
 				goto out;
 			}
 			uio_addiov(auio, CAST_USER_ADDR_T(abp->fixedcursor),
-			    fisize);
+			    fialloc);
 			/* fisize may be reset to 0 after this call */
 			error = vn_getxattr(vp, XATTR_FINDERINFO_NAME, auio,
-			    &fisize, XATTR_NOSECURITY, ctx);
+			    &fialloc, XATTR_NOSECURITY, ctx);
 			uio_free(auio);
 
 			/*
@@ -1936,12 +1951,12 @@ attr_pack_common(vfs_context_t ctx, mount_t mp, vnode_t vp, struct attrlist *alp
 			    ((error == ENOATTR) || (error == ENOENT) ||
 			    (error == ENOTSUP) || (error == EPERM))) {
 				VFS_DEBUG(ctx, vp, "ATTRLIST - No system.finderinfo attribute, returning zeroes");
-				bzero(abp->fixedcursor, 32);
+				bzero(abp->fixedcursor, fisize);
 				error = 0;
 			}
 
 			if (error == 0) {
-				abp->fixedcursor += 32;
+				abp->fixedcursor += roundup(fisize, 4);
 				abp->actual.commonattr |= ATTR_CMN_FNDRINFO;
 			} else if (!return_valid) {
 				goto out;
@@ -1955,11 +1970,12 @@ attr_pack_common(vfs_context_t ctx, mount_t mp, vnode_t vp, struct attrlist *alp
 			}
 		} else if (VATTR_IS_SUPPORTED(vap, va_finderinfo)) {
 			bcopy(&vap->va_finderinfo[0], abp->fixedcursor, fisize);
-			abp->fixedcursor += fisize;
+			abp->fixedcursor += roundup(fisize, 4);
+
 			abp->actual.commonattr |= ATTR_CMN_FNDRINFO;
 		} else if (!return_valid || pack_invalid) {
 			bzero(abp->fixedcursor, fisize);
-			abp->fixedcursor += fisize;
+			abp->fixedcursor += roundup(fisize, 4);
 		}
 	}
 	if (alp->commonattr & ATTR_CMN_OWNERID) {
@@ -2665,7 +2681,7 @@ struct _attrlist_paths {
 static errno_t
 calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
     ssize_t *varsizep, struct _attrlist_paths *pathsp, const char **vnamep,
-    const char **cnpp, ssize_t *cnlp)
+    const char **cnpp, ssize_t *cnlp, char *pathbuf)
 {
 	int error = 0;
 
@@ -2716,7 +2732,19 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	if (vp && (alp->commonattr & ATTR_CMN_FULLPATH)) {
 		int pathlen;
 		int buflen;
-		int err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, 0);
+		int err;
+		uint32_t resolve_flags = 0;
+		size_t perfix_len = 0;
+
+		if (pathbuf) {
+			err = lookup_check_for_resolve_prefix(pathbuf, PATHBUFLEN, PATHBUFLEN, &resolve_flags, &perfix_len);
+			if (err) {
+				error = err;
+				goto out;
+			}
+		}
+
+		err = attrlist_build_path(vp, &(pathsp->fullpathptr), &buflen, &pathlen, pathbuf, (int)perfix_len, 0);
 		if (err) {
 			error = err;
 			goto out;
@@ -2733,7 +2761,7 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	if (vp && (alp->forkattr & ATTR_CMNEXT_RELPATH)) {
 		int pathlen;
 		int buflen;
-		int err = attrlist_build_path(vp, &(pathsp->relpathptr), &buflen, &pathlen, BUILDPATH_VOLUME_RELATIVE);
+		int err = attrlist_build_path(vp, &(pathsp->relpathptr), &buflen, &pathlen, NULL, 0, BUILDPATH_VOLUME_RELATIVE);
 		if (err) {
 			error = err;
 			goto out;
@@ -2750,7 +2778,7 @@ calc_varsize(vnode_t vp, struct attrlist *alp, struct vnode_attr *vap,
 	if (vp && (alp->forkattr & ATTR_CMNEXT_NOFIRMLINKPATH)) {
 		int pathlen;
 		int buflen;
-		int err = attrlist_build_path(vp, &(pathsp->REALpathptr), &buflen, &pathlen, BUILDPATH_NO_FIRMLINK);
+		int err = attrlist_build_path(vp, &(pathsp->REALpathptr), &buflen, &pathlen, NULL, 0, BUILDPATH_NO_FIRMLINK);
 		if (err) {
 			error = err;
 			goto out;
@@ -2788,7 +2816,8 @@ out:
 static errno_t
 vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
     uint64_t options, struct vnode_attr *vap, __unused void *fndesc,
-    vfs_context_t ctx, int is_bulk, enum vtype vtype, ssize_t fixedsize)
+    vfs_context_t ctx, int is_bulk, enum vtype vtype, ssize_t fixedsize,
+    char *pathbuf)
 {
 	struct _attrlist_buf ab;
 	struct _attrlist_paths apaths = {.fullpathptr = NULL, .fullpathlen = 0, .fullpathbuflen = 0,
@@ -2885,7 +2914,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	/*
 	 * Compute variable-space requirements.
 	 */
-	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl);
+	error = calc_varsize(vp, alp, vap, &varsize, &apaths, &vname, &cnp, &cnl, pathbuf);
 	if (error) {
 		goto out;
 	}
@@ -3168,7 +3197,7 @@ vfs_attr_pack_ext(mount_t mp, vnode_t vp, uio_t uio, struct attrlist *alp, uint6
 
 	error = vfs_attr_pack_internal(mp, vp, uio, alp,
 	    options | FSOPT_REPORT_FULLSIZE, vap, NULL, ctx, 1, v_type,
-	    fixedsize);
+	    fixedsize, NULL);
 
 	if (mp) {
 		vap->va_uid = ouid;
@@ -3189,6 +3218,26 @@ vfs_attr_pack(vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options,
 }
 
 /*
+ * Attributes used by the non-blocking version of {,f}statfs_ext(),
+ * which can be satisfied without calling into the file system back
+ * end.
+ */
+#define FAST_STATFS_CMN_ATTRS                         \
+	(ATTR_CMN_RETURNED_ATTRS |                    \
+	 ATTR_CMN_FSID /* f_fsid */ )
+
+#define FAST_STATFS_VOL_ATTRS                         \
+	(ATTR_VOL_INFO |                              \
+	 ATTR_VOL_FSTYPE /* f_type */ |               \
+	 ATTR_VOL_MOUNTPOINT /* f_mntonname */ |      \
+	 ATTR_VOL_MOUNTFLAGS /* f_flags */ |          \
+	 ATTR_VOL_MOUNTEDDEVICE /* f_mntfromname */ | \
+	 ATTR_VOL_FSTYPENAME /* f_fstypename */ |     \
+	 ATTR_VOL_FSSUBTYPE /* f_fssubtype */ |       \
+	 ATTR_VOL_MOUNTEXTFLAGS /* f_flags_ext */ |   \
+	 ATTR_VOL_OWNER /* f_owner */ )
+
+/*
  * Obtain attribute information about a filesystem object.
  *
  * Note: The alt_name parameter can be used by the caller to pass in the vnode
@@ -3200,7 +3249,8 @@ vfs_attr_pack(vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options,
 static int
 getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
     user_addr_t attributeBuffer, size_t bufferSize, uint64_t options,
-    enum uio_seg segflg, char* authoritative_name, struct ucred *file_cred)
+    enum uio_seg segflg, char* authoritative_name, struct ucred *file_cred,
+    char *pathbuf)
 {
 	struct vnode_attr *va;
 	kauth_action_t  action;
@@ -3215,6 +3265,15 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 	UIO_STACKBUF(uio_buf, 1);
 	// must be true for fork attributes to be used as new common attributes
 	const int use_fork = (options & FSOPT_ATTR_CMN_EXTENDED) != 0;
+
+	/*
+	 * Check to see if this is a fast-statfs operation.
+	 */
+	const int is_fast_statfs =
+	    (alp->volattr != 0 && alp->fileattr == 0 &&
+	    alp->dirattr == 0 && alp->forkattr == 0 &&
+	    (alp->volattr & ~FAST_STATFS_VOL_ATTRS) == 0 &&
+	    (alp->commonattr & ~FAST_STATFS_CMN_ATTRS) == 0);
 
 	if (bufferSize < sizeof(uint32_t)) {
 		return ERANGE;
@@ -3247,7 +3306,15 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 	    (options & FSOPT_NOFOLLOW) ? "no":"", vp->v_name);
 
 #if CONFIG_MACF
-	error = mac_vnode_check_getattrlist(ctx, vp, alp, options);
+	/*
+	 * If we're doing a fast-statfs operation, gate it on the same
+	 * capability as a regular statfs().
+	 */
+	if (is_fast_statfs) {
+		error = mac_mount_check_stat(ctx, vp->v_mount);
+	} else {
+		error = mac_vnode_check_getattrlist(ctx, vp, alp, options);
+	}
 	if (error) {
 		goto out;
 	}
@@ -3400,7 +3467,7 @@ getattrlist_internal(vfs_context_t ctx, vnode_t vp, struct attrlist  *alp,
 	}
 
 	error = vfs_attr_pack_internal(vp->v_mount, vp, auio, alp, options, va, NULL, ctx,
-	    0, vtype, fixedsize);
+	    0, vtype, fixedsize, pathbuf);
 
 out:
 	if (va_name) {
@@ -3451,7 +3518,7 @@ fgetattrlist(proc_t p, struct fgetattrlist_args *uap, __unused int32_t *retval)
 	    uap->bufferSize, uap->options,
 	    (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : \
 	    UIO_USERSPACE32), NULL,
-	    fp->fp_glob->fg_cred);
+	    fp->fp_glob->fg_cred, NULL);
 
 out_vnode_put:
 	vnode_put(vp);
@@ -3485,6 +3552,9 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	if (options & FSOPT_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
 	}
+	if (options & FSOPT_RESOLVE_BENEATH) {
+		nd.ni_flag |= NAMEI_RESOLVE_BENEATH;
+	}
 
 	error = nameiat(&nd, fd);
 
@@ -3495,7 +3565,7 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	vp = nd.ni_vp;
 
 	error = getattrlist_internal(ctx, vp, alp, attributeBuffer,
-	    bufferSize, options, segflg, NULL, NOCRED);
+	    bufferSize, options, segflg, NULL, NOCRED, nd.ni_pathbuf);
 
 	/* Retain the namei reference until the getattrlist completes. */
 	nameidone(&nd);
@@ -4012,7 +4082,7 @@ readdirattr(vnode_t dvp, struct fd_vn_data *fvd, uio_t auio,
 		    CAST_USER_ADDR_T(kern_attr_buf), kern_attr_buf_siz,
 		    options | FSOPT_REPORT_FULLSIZE, UIO_SYSSPACE,
 		    CAST_DOWN_EXPLICIT(char *, name_buffer),
-		    NOCRED);
+		    NOCRED, NULL);
 
 		nameidone(&nd);
 
@@ -4633,6 +4703,11 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	if (al.commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) {
 		ATTR_UNPACK(va.va_dataprotect_class);
 		VATTR_SET_ACTIVE(&va, va_dataprotect_class);
+#if CONFIG_MACF
+		if ((error = mac_vnode_check_dataprotect_set(ctx, vp, &va.va_dataprotect_class))) {
+			goto out;
+		}
+#endif
 	}
 
 	/* volume */
@@ -4811,6 +4886,9 @@ setattrlist(proc_t p, struct setattrlist_args *uap, __unused int32_t *retval)
 	if (uap->options & FSOPT_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
 	}
+	if (uap->options & FSOPT_RESOLVE_BENEATH) {
+		nd.ni_flag |= NAMEI_RESOLVE_BENEATH;
+	}
 	if ((error = namei(&nd)) != 0) {
 		goto out;
 	}
@@ -4855,6 +4933,9 @@ setattrlistat(proc_t p, struct setattrlistat_args *uap, __unused int32_t *retval
 	NDINIT(&nd, LOOKUP, OP_SETATTR, nameiflags, UIO_USERSPACE, uap->path, ctx);
 	if (uap->options & FSOPT_NOFOLLOW_ANY) {
 		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+	if (uap->options & FSOPT_RESOLVE_BENEATH) {
+		nd.ni_flag |= NAMEI_RESOLVE_BENEATH;
 	}
 	if ((error = nameiat(&nd, uap->fd)) != 0) {
 		goto out;

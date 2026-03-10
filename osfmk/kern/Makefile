@@ -46,6 +46,7 @@ PRIVATE_DATAFILES = $(sort \
 	trustcache.h \
 	turnstile.h \
 	socd_client.h \
+	kcdata_private.h \
 	$(EXTRA_PRIVATE_DATAFILES))
 
 PRIVATE_MODULEMAPFILES = $(sort \
@@ -124,7 +125,6 @@ PRIVATE_EXPORT_FILES = \
 	copyout_shim.h \
 	kern_apfs_reflock.h \
 	mach_filter.h \
-	mach_node_link.h \
 	sched_clutch.h \
 	smr.h \
 	smr_hash.h \
@@ -145,17 +145,17 @@ XNU_ONLY_EXPORTS = \
 	recount.h \
 	sched_hygiene.h \
 	sync_sema.h \
+	upsi.h \
 	ux_handler.h \
 	workload_config.h \
 	kern_stackshot.h \
 	thread_test_context.h
 
-
 INSTALL_MI_LIST = ${DATAFILES}
 
 INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
-INSTALL_MI_LCL_LIST = $(sort cs_blobs.h debug.h panic_call.h ext_paniclog.h ${EXTRA_PRIVATE_DATAFILES})
+INSTALL_MI_LCL_LIST = $(sort cs_blobs.h debug.h panic_call.h ext_paniclog.h kcdata_private.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
 
@@ -188,8 +188,11 @@ TIGHTBEAM_MODULES := \
 	Stackshot.tbmodule \
 	SharedMemoryBase.tbmodule \
 	ExclavesCHelloServer.tbmodule \
+	HelloDriverInterrupts.tbmodule \
 	StackshotPanicSetup.tbmodule \
-	ExclaveAudioArbiter.tbmodule
+	ExclaveAudioArbiter.tbmodule \
+	ExclavesMessageQueueTypes.tbmodule \
+	ExclavesMessageQueueProxy.tbmodule
 
 endif
 

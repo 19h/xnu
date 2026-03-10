@@ -67,6 +67,12 @@ extern uint16_t vm_object_pagein_throttle;
 	              &vm_object_lck_attr)))
 #define vm_object_lock_destroy(object)  lck_rw_destroy(&(object)->Lock, &vm_object_lck_grp)
 
+/*
+ * This is used whenever we try to acquire the VM object lock
+ * without mutex_pause. The mutex_pause is intended to let
+ * pageout_scan try getting the object lock if it's trying to
+ * reclaim pages from that object (see vm_pageout_scan_wants_object).
+ */
 #define vm_object_lock_try_scan(object) _vm_object_lock_try(object)
 
 /*
@@ -273,10 +279,11 @@ __private_extern__ void         vm_object_bootstrap(void);
 
 __private_extern__ void         vm_object_reaper_init(void);
 
-__private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size);
+__private_extern__ vm_object_t  vm_object_allocate(vm_object_size_t size,
+    vm_map_serial_t provenance);
 
 __private_extern__ void    _vm_object_allocate(vm_object_size_t size,
-    vm_object_t object);
+    vm_object_t object, vm_map_serial_t provenance);
 
 __private_extern__ void vm_object_set_size(
 	vm_object_t             object,
@@ -360,7 +367,7 @@ __private_extern__ void vm_object_reuse_pages(
 
 __private_extern__ kern_return_t vm_object_zero(
 	vm_object_t             object,
-	vm_object_offset_t      cur_offset,
+	vm_object_offset_t      *cur_offset_p,
 	vm_object_offset_t      end_offset);
 
 __private_extern__ uint64_t     vm_object_purge(
@@ -376,8 +383,9 @@ __private_extern__ kern_return_t vm_object_get_page_counts(
 	vm_object_t             object,
 	vm_object_offset_t      offset,
 	vm_object_size_t        size,
-	unsigned int            *resident_page_count,
-	unsigned int            *dirty_page_count);
+	uint64_t                *resident_page_count,
+	uint64_t                *dirty_page_count,
+	uint64_t                *swapped_page_count);
 
 __private_extern__ boolean_t    vm_object_coalesce(
 	vm_object_t             prev_object,
@@ -534,6 +542,9 @@ extern kern_return_t vm_object_range_op(
 	vm_object_offset_t      offset_end,
 	int                     ops,
 	uint32_t                *range);
+
+__private_extern__ void vm_object_set_chead_hint(
+	vm_object_t     object);
 
 
 __private_extern__ void         vm_object_reap_pages(

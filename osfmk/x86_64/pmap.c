@@ -809,13 +809,13 @@ pmap_init(void)
 	ppnum_t                 ppn;
 
 	kernel_pmap->pm_obj_pml4 = &kpml4obj_object_store;
-	_vm_object_allocate((vm_object_size_t)NPML4PGS * PAGE_SIZE, &kpml4obj_object_store);
+	_vm_object_allocate((vm_object_size_t)NPML4PGS * PAGE_SIZE, &kpml4obj_object_store, VM_MAP_SERIAL_SPECIAL);
 
 	kernel_pmap->pm_obj_pdpt = &kpdptobj_object_store;
-	_vm_object_allocate((vm_object_size_t)NPDPTPGS * PAGE_SIZE, &kpdptobj_object_store);
+	_vm_object_allocate((vm_object_size_t)NPDPTPGS * PAGE_SIZE, &kpdptobj_object_store, VM_MAP_SERIAL_SPECIAL);
 
 	kernel_pmap->pm_obj = &kptobj_object_store;
-	_vm_object_allocate((vm_object_size_t)NPDEPGS * PAGE_SIZE, &kptobj_object_store);
+	_vm_object_allocate((vm_object_size_t)NPDEPGS * PAGE_SIZE, &kptobj_object_store, VM_MAP_SERIAL_SPECIAL);
 
 	/*
 	 *	Allocate memory for the pv_head_table and its lock bits,
@@ -1503,6 +1503,24 @@ done:
 }
 #endif /* MACH_ASSERT */
 
+inline void
+pmap_recycle_page(ppnum_t pn)
+{
+	const bool is_freed = pmap_verify_free(pn);
+
+	if (__improbable(!is_freed)) {
+		/*
+		 * There is a redundancy here, but we are going to panic anyways,
+		 * and ASSERT_PMAP_FREE traces useful information. So, we keep this
+		 * behavior.
+		 */
+#if MACH_ASSERT
+		pmap_assert_free(pn);
+#endif /* MACH_ASSERT */
+		panic("%s: page 0x%llx is referenced", __func__, (unsigned long long)ptoa(pn));
+	}
+}
+
 boolean_t
 pmap_is_empty(
 	pmap_t          pmap,
@@ -1675,17 +1693,17 @@ pmap_create_options(
 
 	/* allocate the vm_objs to hold the pdpt, pde and pte pages */
 
-	p->pm_obj_pml4 = vm_object_allocate((vm_object_size_t)(NPML4PGS) *PAGE_SIZE);
+	p->pm_obj_pml4 = vm_object_allocate((vm_object_size_t)(NPML4PGS) *PAGE_SIZE, VM_MAP_SERIAL_SPECIAL);
 	if (NULL == p->pm_obj_pml4) {
 		panic("pmap_create pdpt obj");
 	}
 
-	p->pm_obj_pdpt = vm_object_allocate((vm_object_size_t)(NPDPTPGS) *PAGE_SIZE);
+	p->pm_obj_pdpt = vm_object_allocate((vm_object_size_t)(NPDPTPGS) *PAGE_SIZE, VM_MAP_SERIAL_SPECIAL);
 	if (NULL == p->pm_obj_pdpt) {
 		panic("pmap_create pdpt obj");
 	}
 
-	p->pm_obj = vm_object_allocate((vm_object_size_t)(NPDEPGS) *PAGE_SIZE);
+	p->pm_obj = vm_object_allocate((vm_object_size_t)(NPDEPGS) *PAGE_SIZE, VM_MAP_SERIAL_SPECIAL);
 	if (NULL == p->pm_obj) {
 		panic("pmap_create pte obj");
 	}
